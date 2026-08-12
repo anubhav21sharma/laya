@@ -3,18 +3,22 @@ import Testing
 @testable import PatternEngine
 
 @Test func pressureCapabilitySelectsMeasuredOrRecipeNeutralPressure() throws {
-    let recipe = try BrushRecipe(
-        id: BrushRecipeID("test.pressure"),
-        sizeMapping: .linear(input: .pressure, output: 0.5...1),
+    let definition = currentDynamicsDefinition(
+        id: "test.pressure",
+        size: currentMapping(
+            input: .pressure,
+            output: 0.5...1,
+            missingInputValue: 0.8
+        ),
         noPressureNeutral: 0.8
     )
     let measured = evaluate(
         sample: sample(pressure: 0.2, capabilities: [.pressure]),
-        recipe: recipe
+        definition: definition
     )
     let neutral = evaluate(
         sample: sample(pressure: 0.2, capabilities: []),
-        recipe: recipe
+        definition: definition
     )
 
     #expect(close(measured.diameter, 12))
@@ -23,8 +27,13 @@ import Testing
 
 @Test func mappingsCanReadSpeedDirectionTiltAzimuthRollAgeAndDistance() throws {
     let probes: [(BrushDynamicsInput, InterpolatedStrokeSample, BrushStrokeContext, Float)] = [
-        (.speed, sample(velocity: 50), context(speedReference: 100), 30),
-        (.direction, sample(), context(direction: .pi / 2), 35),
+        (.speed, sample(velocity: 50), context(speedReference: 100), 20.01),
+        (
+            .direction,
+            sample(),
+            context(direction: .pi / 2),
+            34.941174
+        ),
         (
             .tilt,
             sample(altitude: 0, capabilities: [.altitude]),
@@ -35,7 +44,7 @@ import Testing
             .azimuth,
             sample(azimuth: .pi / 2, capabilities: [.azimuth]),
             context(),
-            35
+            34.941174
         ),
         (
             .roll,
@@ -43,24 +52,34 @@ import Testing
             context(),
             25
         ),
-        (.age, sample(), context(strokeAge: 5, ageReference: 10), 30),
+        (.age, sample(), context(strokeAge: 5, ageReference: 10), 40),
         (
             .distance,
             sample(),
             context(traveledDistance: 25, distanceReference: 100),
-            25
+            22.5
         ),
     ]
 
     for (input, sample, context, expectedDiameter) in probes {
-        let recipe = try BrushRecipe(
-            id: BrushRecipeID("test.input.\(input)"),
-            sizeMapping: .linear(input: input, output: 1...2)
+        let response: BrushResponseDefinition = switch input {
+        case .direction, .azimuth, .roll:
+            cyclicIdentityResponse()
+        default:
+            .linear
+        }
+        let definition = currentDynamicsDefinition(
+            id: "test.input.\(input)",
+            size: currentMapping(
+                input: input,
+                output: 1...2,
+                response: response
+            )
         )
         let dab = BrushDynamicsEngine().evaluate(
             sample: sample,
             context: context,
-            program: nativeTestProgram(recipe),
+            program: nativeTestProgram(definition),
             random: .centered,
             strokeSeed: 1
         )
@@ -72,38 +91,15 @@ import Testing
     let color = try #require(
         InkColor(red: 0.4, green: 0.5, blue: 0.6, alpha: 0.8)
     )
-    let recipe = try BrushRecipe(
-        id: BrushRecipeID("test.all.outputs"),
-        shape: .chisel,
-        grain: .paper,
-        grainTransform: BrushGrainTransform(
-            scale: 2,
-            rotation: 0.3,
-            offset: SIMD2(1, -1)
-        ),
-        material: BrushMaterial(
-            family: .dry,
-            strength: 0.6,
-            wetness: 0,
-            bleedRadius: 0,
-            softenPasses: 0,
-            accumulationLimit: 1
-        ),
-        baseSpacingFraction: 0.2,
-        maximumSpacingFraction: 0.3,
-        baseFlow: 0.8,
-        strokeOpacity: 0.7,
-        baseHardness: 0.8,
-        baseScatterFraction: 0.1,
-        baseRotation: 0.1,
-        aspectRatio: 0.5,
-        sizeMapping: .linear(input: .pressure, output: 0.5...1),
-        flowMapping: .linear(input: .pressure, output: 0.5...1),
-        spacingMapping: .linear(input: .pressure, output: 0.5...1),
-        rotationMapping: .linear(input: .roll, output: -0.2...0.2),
-        scatterMapping: .linear(input: .pressure, output: 0.5...1),
-        hardnessMapping: .linear(input: .pressure, output: 0.5...1),
-        grainMapping: .linear(input: .pressure, output: 0.5...1),
+    let definition = currentDynamicsDefinition(
+        id: "test.all.outputs",
+        size: currentMapping(input: .pressure, output: 0.5...1),
+        flow: currentMapping(input: .pressure, output: 0.5...1),
+        spacing: currentMapping(input: .pressure, output: 0.5...1),
+        rotation: currentMapping(input: .roll, output: -0.2...0.2),
+        scatter: currentMapping(input: .pressure, output: 0.5...1),
+        hardness: currentMapping(input: .pressure, output: 0.5...1),
+        grain: currentMapping(input: .pressure, output: 0.5...1),
         randomization: BrushRandomization(
             spacing: 0.2,
             scatter: 1,
@@ -111,11 +107,57 @@ import Testing
             grain: 0.4,
             material: 0.4
         ),
+        coverage: BrushCoverageDefinition(
+            shapes: [BrushShapeLayerDefinition(
+                shape: .chisel,
+                combination: .replace,
+                scale: 1,
+                rotation: 0,
+                offset: .zero
+            )],
+            grains: [BrushGrainLayerDefinition(
+                grain: .paper,
+                coordinateMode: .canonical,
+                transform: BrushGrainTransform(
+                    scale: 2,
+                    rotation: 0.3,
+                    offset: SIMD2(1, -1)
+                ),
+                grainMovementFraction: 0,
+                grainFollowsBrushRotation: false,
+                strength: 1
+            )],
+            baseHardness: 0.8,
+            aspectRatio: 0.5,
+            tipThreshold: 0,
+            antialiasing: true
+        ),
+        placement: BrushPlacementDefinition(
+            baseSpacingFraction: 0.2,
+            maximumSpacingFraction: 0.3,
+            baseFlow: 0.8,
+            strokeOpacity: 0.7,
+            baseScatterFraction: 0.1,
+            baseRotation: 0.1,
+            baseJitterFraction: 0,
+            baseOffset: .zero
+        ),
         colorAdjustment: BrushColorAdjustment(
             redMultiplier: 0.5,
             greenMultiplier: 1,
             blueMultiplier: 0.25,
             alphaMultiplier: 0.5
+        ),
+        material: BrushMaterialDefinition(
+            accumulation: .flow,
+            interaction: .none,
+            edgeTreatment: .dryBreakup,
+            strength: 0.6,
+            wetness: 0,
+            bleedRadius: 0,
+            softenPasses: 0,
+            accumulationLimit: 1,
+            interactionParameters: nil
         )
     )
     let dab = BrushDynamicsEngine().evaluate(
@@ -136,7 +178,7 @@ import Testing
             ordinal: 7,
             isPredicted: true
         ),
-        program: nativeTestProgram(recipe),
+        program: nativeTestProgram(definition),
         random: BrushRandomValues(
             spacing: 0.75,
             scatterX: 0.75,
@@ -151,7 +193,7 @@ import Testing
 
     #expect(close(dab.diameter, 15))
     #expect(close(dab.radius, 7.5))
-    #expect(close(dab.spacing, 2.475))
+    #expect(close(dab.spacing, 2.6715183))
     #expect(close(dab.flow, 0.6))
     #expect(close(dab.strokeOpacity, 0.7))
     #expect(close(dab.rotation, 0.2))
@@ -163,7 +205,10 @@ import Testing
     #expect(close(dab.grainOffset.y, -1.2))
     #expect(close(dab.grainRotation, 0.3))
     #expect(dab.color == InkColor(red: 0.2, green: 0.5, blue: 0.15, alpha: 0.4))
-    #expect(dab.colorAdjustment == recipe.colorAdjustment)
+    #expect(
+        dab.colorAdjustment
+            == definition.components[0].color.baseAdjustment
+    )
     #expect(close(dab.materialContribution, 0.72))
     #expect(dab.materialFamily == .dry)
     #expect(close(dab.sourceDistance, 10))
@@ -179,124 +224,7 @@ import Testing
     #expect(close(dab.brushToWorld.yAxis.y, cos(0.2) * 3.75))
 }
 
-@Test func boundedPowerResponseAndTaperRemainFinite() throws {
-    let recipe = try BrushRecipe(
-        id: BrushRecipeID("test.power.taper"),
-        sizeMapping: .boundedPower(
-            input: .pressure,
-            output: 0.25...1,
-            exponent: 2
-        ),
-        taper: BrushTaperConfiguration(
-            start: .worldPixels(20),
-            end: .diameterMultiples(1),
-            minimumSize: 0.2,
-            minimumFlow: 0.3,
-            effects: [.size, .flow]
-        ),
-        replayMode: .replayTail,
-        replayLimits: BrushRecipePolicy.replayTailLimits
-    )
-    let dab = evaluate(
-        sample: sample(pressure: 0.5, capabilities: [.pressure]),
-        context: context(
-            traveledDistance: 5,
-            totalDistance: 15
-        ),
-        recipe: recipe
-    )
-
-    // Pressure factor 0.4375, then the minimum 25% taper envelope.
-    #expect(close(dab.diameter, 3.5))
-    #expect(close(dab.flow, 0.475))
-    #expect(dab.diameter.isFinite)
-    #expect(dab.spacing.isFinite)
-}
-
-@Test func legacySchemaV1EndTaperKeepsItsFrozenRetainedBoundaryPixels() throws {
-    let recipe = try BrushRecipe(
-        id: BrushRecipeID("test.taper.retained-boundary"),
-        taper: BrushTaperConfiguration(
-            start: .disabled,
-            end: .worldPixels(100),
-            minimumSize: 0.2,
-            minimumFlow: 0.25,
-            effects: [.size, .flow]
-        ),
-        replayMode: .replayTail,
-        replayLimits: BrushReplayLimits(
-            maximumSamples: 3,
-            maximumDabs: 3,
-            maximumProjectedInstances: 3
-        )
-    )
-    let dynamics = BrushDynamicsEngine()
-    let program = nativeTestProgram(recipe)
-    #expect(
-        program.termination
-            == .legacySchemaV1EndTaper(
-                taper: recipe.taper,
-                replayLimits: try #require(recipe.replayLimits)
-            )
-    )
-    var buffer = TransientStrokeBuffer(replayContract: recipe.replayContract)
-    var lastUpdate = TransientStrokeBufferUpdate.noChange
-    for (index, sourceDistance) in [Float(40), 60, 80, 100].enumerated() {
-        let attributes = evaluate(
-            context: context(traveledDistance: sourceDistance),
-            recipe: recipe
-        )
-        let input = StrokeSample(
-            position: ScreenPoint(x: sourceDistance, y: 0),
-            pressure: 1,
-            timestamp: TimeInterval(index),
-            phase: index == 0 ? .began : .moved,
-            source: .mouse
-        )
-        lastUpdate = buffer.appendActual(
-            TransientStrokeChunk(
-                sample: WorldStrokeSample(
-                    sample: input,
-                    position: WorldPoint(x: sourceDistance, y: 0),
-                    velocity: 0,
-                    artisticVelocity: 0
-                ),
-                dabs: [
-                    TransientStrokeDab(
-                        attributes: attributes,
-                        projectedInstanceCount: 1
-                    ),
-                ]
-            )
-        )
-    }
-    let retained = buffer.actualDabs.map(\.attributes)
-
-    #expect(
-        lastUpdate.settledPrefix.first?.dabs.first?.attributes.sourceDistance
-            == 40
-    )
-    #expect(retained.map(\.sourceDistance) == [60, 80, 100])
-
-    let tapered = retained.map {
-        dynamics.applyingLegacySchemaV1EndTaper(
-            $0,
-            totalDistance: 100,
-            nominalDiameter: 20,
-            program: program,
-            retainedReplayStartDistance: retained.first?.sourceDistance
-        )
-    }
-
-    #expect(close(tapered[0].diameter, 20))
-    #expect(close(tapered[1].diameter, 12))
-    #expect(close(tapered[2].diameter, 4))
-    #expect(close(tapered[0].flow, 1))
-    #expect(close(tapered[1].flow, 0.625))
-    #expect(close(tapered[2].flow, 0.25))
-}
-
-@Test func legacyEquivalentRecipeMatchesRecoveredHardRoundBehavior() throws {
+@Test func currentHardRoundDefinitionProducesExpectedBaseDab() throws {
     let color = try #require(
         InkColor(red: 0.2, green: 0.4, blue: 0.6, alpha: 0.8)
     )
@@ -311,7 +239,7 @@ import Testing
             traveledDistance: 40,
             ordinal: 9
         ),
-        recipe: .legacyEquivalent,
+        definition: nativeTestDefinition(),
         random: BrushRandomValues(
             spacing: 0.99,
             scatterX: 0.01,
@@ -343,30 +271,108 @@ import Testing
     #expect(!dab.isPredicted)
 }
 
-@Test func legacyEquivalentSpacingMatchesRecoveredFormulaAcrossSizes() {
+@Test func currentHardRoundSpacingMatchesDiameterFormulaAcrossSizes() {
     for diameter: Float in [4, 20, 100] {
         let dab = evaluate(
             context: context(nominalDiameter: diameter),
-            recipe: .legacyEquivalent
+            definition: nativeTestDefinition()
         )
         let expectedRadius = diameter * 0.5
-        let expectedSpacing = max(1, min(8, expectedRadius * 0.25))
+        let expectedSpacing = max(1, diameter * 0.125)
 
         #expect(dab.radius == expectedRadius)
         #expect(dab.spacing == expectedSpacing)
     }
 }
 
+private func cyclicIdentityResponse() -> BrushResponseDefinition {
+    .curve(BrushCurveDefinition(points: [
+        BrushCurvePoint(x: 0, y: 0),
+        BrushCurvePoint(x: 0.25, y: 0.25),
+        BrushCurvePoint(x: 0.75, y: 0.75),
+        BrushCurvePoint(x: 1, y: 0),
+    ]))
+}
+
+private func currentMapping(
+    input: BrushDynamicsInput,
+    output: ClosedRange<Float>,
+    response: BrushResponseDefinition = .linear,
+    missingInputValue: Float = 1
+) -> BrushMappingDefinition {
+    BrushMappingDefinition(
+        input: input,
+        response: response,
+        scale: output.upperBound - output.lowerBound,
+        offset: output.lowerBound,
+        lowerClamp: output.lowerBound,
+        upperClamp: output.upperBound,
+        inverted: false,
+        jitter: 0,
+        missingInputValue: missingInputValue
+    )
+}
+
+private func currentDynamicsDefinition(
+    id: String,
+    size: BrushMappingDefinition? = nil,
+    flow: BrushMappingDefinition? = nil,
+    spacing: BrushMappingDefinition? = nil,
+    rotation: BrushMappingDefinition? = nil,
+    scatter: BrushMappingDefinition? = nil,
+    hardness: BrushMappingDefinition? = nil,
+    grain: BrushMappingDefinition? = nil,
+    noPressureNeutral: Float = 1,
+    randomization: BrushRandomization = .none,
+    coverage: BrushCoverageDefinition? = nil,
+    placement: BrushPlacementDefinition? = nil,
+    colorAdjustment: BrushColorAdjustment = .identity,
+    material: BrushMaterialDefinition? = nil
+) -> BrushDefinition {
+    let base = nativeTestDefinition()
+    let dynamics = BrushDynamicsDefinition(
+        size: size ?? base.components[0].dynamics.size,
+        flow: flow ?? base.components[0].dynamics.flow,
+        opacity: base.components[0].dynamics.opacity,
+        spacing: spacing ?? base.components[0].dynamics.spacing,
+        rotation: rotation ?? base.components[0].dynamics.rotation,
+        scatter: scatter ?? base.components[0].dynamics.scatter,
+        hardness: hardness ?? base.components[0].dynamics.hardness,
+        grain: grain ?? base.components[0].dynamics.grain,
+        offsetX: base.components[0].dynamics.offsetX,
+        offsetY: base.components[0].dynamics.offsetY,
+        hue: base.components[0].dynamics.hue,
+        saturation: base.components[0].dynamics.saturation,
+        brightness: base.components[0].dynamics.brightness,
+        secondaryColorMix: base.components[0].dynamics.secondaryColorMix,
+        noPressureNeutral: noPressureNeutral,
+        randomization: randomization
+    )
+    let color = BrushColorBehaviorDefinition(
+        baseAdjustment: colorAdjustment,
+        perStampJitter: base.components[0].color.perStampJitter,
+        perStrokeJitter: base.components[0].color.perStrokeJitter
+    )
+    return nativeTestDefinition(
+        id: BrushRecipeID(id),
+        coverage: coverage,
+        placement: placement,
+        dynamics: dynamics,
+        color: color,
+        material: material
+    )
+}
+
 private func evaluate(
     sample: InterpolatedStrokeSample = sample(),
     context: BrushStrokeContext = context(),
-    recipe: BrushRecipe,
+    definition: BrushDefinition,
     random: BrushRandomValues = .centered
 ) -> DabAttributes {
     BrushDynamicsEngine().evaluate(
         sample: sample,
         context: context,
-        program: nativeTestProgram(recipe),
+        program: nativeTestProgram(definition),
         random: random,
         strokeSeed: 1
     )

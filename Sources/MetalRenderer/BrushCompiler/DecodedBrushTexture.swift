@@ -22,6 +22,7 @@ public struct DecodedBrushTexture: Equatable, Sendable {
     public let mipLevels: [Data]
     public let residentByteCount: Int
     public let wasResampled: Bool
+    public let tipSupport: BrushTipAssetSupport?
 
     public var diagnostics: [BrushCompilationDiagnostic] {
         guard wasResampled else { return [] }
@@ -45,7 +46,8 @@ public struct DecodedBrushTexture: Equatable, Sendable {
         workingHeight: Int,
         mipLevels: [Data],
         residentByteCount: Int,
-        wasResampled: Bool
+        wasResampled: Bool,
+        tipSupport: BrushTipAssetSupport? = nil
     ) {
         self.resourceID = resourceID
         self.kind = kind
@@ -56,5 +58,6 @@ public struct DecodedBrushTexture: Equatable, Sendable {
         self.mipLevels = mipLevels
         self.residentByteCount = residentByteCount
         self.wasResampled = wasResampled
+        self.tipSupport = tipSupport
     }
 }

@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "substitutions": [
+    {
+      "sourceName": "Haggard-Oval.png",
+      "resourceID": "laya.charcoal.tip",
+      "role": "shape",
+      "path": "Sources/BrushFormat/Resources/Professional/Charcoal/charcoal-tip.png",
+      "mediaType": "image/png",
+      "sha256": "d894b2560a86e2c6425b1f197a2be1effe98ebed0beeb33269a8a595078014ad",
+      "byteCount": 7186,
+      "pixelWidth": 128,
+      "pixelHeight": 128,
+      "reason": "project-owned-source-library-substitute"
+    },
+    {
+      "sourceName": "Brush-Preset-Bonobo.png",
+      "resourceID": "laya.charcoal.grain.fine",
+      "role": "grain",
+      "path": "Sources/BrushFormat/Resources/Professional/Charcoal/charcoal-fine-grain.png",
+      "mediaType": "image/png",
+      "sha256": "a15c7ae3bfa8b1d2717bfaebb1660f945477bdae6909aab68318f00a4a3d6b3f",
+      "byteCount": 56137,
+      "pixelWidth": 256,
+      "pixelHeight": 256,
+      "reason": "project-owned-source-library-substitute"
+    },
+    {
+      "sourceName": "Brush-Artery-Charcoal-Corse.jpg",
+      "resourceID": "laya.charcoal.grain.coarse",
+      "role": "grain",
+      "path": "Sources/BrushFormat/Resources/Professional/Charcoal/charcoal-coarse-grain.png",
+      "mediaType": "image/png",
+      "sha256": "9a835e125011c1e1a572c2d77a683422dc2bada1ea4c17c5372d84b59dd2688d",
+      "byteCount": 55249,
+      "pixelWidth": 256,
+      "pixelHeight": 256,
+      "reason": "project-owned-source-library-substitute"
+    }
+  ]
+}

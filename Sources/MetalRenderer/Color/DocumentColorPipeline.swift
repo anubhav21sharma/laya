@@ -181,7 +181,7 @@ public enum DocumentColorPipeline {
         return result
     }
 
-    static func referenceSourceOver(
+    package static func referenceSourceOver(
         source: LinearPremultipliedColor,
         destination: LinearPremultipliedColor
     ) -> LinearPremultipliedColor {

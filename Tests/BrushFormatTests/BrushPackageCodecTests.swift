@@ -16,6 +16,53 @@ import Testing
     #expect(try BrushPackageCodec.encode(decoded) == first)
 }
 
+@Test func nativePackageFixtureEmitsOnlyCurrentSchemas() throws {
+    let package = try BrushFormatTestSupport.package()
+
+    #expect(
+        package.manifest.schemaVersion == BrushPackageManifest.currentVersion
+    )
+    #expect(package.manifest.schemaVersion == 2)
+    #expect(
+        package.definition.schemaVersion == BrushDefinition.currentSchemaVersion
+    )
+    #expect(package.definition.schemaVersion == 3)
+}
+
+@Test(arguments: [UInt16(1), UInt16(3)])
+func manifestEnvelopeRejectsEveryNoncurrentVersionBeforeBodyDecode(
+    _ schemaVersion: UInt16
+) {
+    let data = Data(#"{"schemaVersion":\#(schemaVersion)}"#.utf8)
+    #expect(throws: BrushPackageError.unsupportedManifestSchema(schemaVersion)) {
+        _ = try JSONDecoder().decode(BrushPackageManifest.self, from: data)
+    }
+}
+
+@Test(arguments: [UInt16(1), UInt16(2)])
+func codecRejectsEveryNoncurrentDefinitionSchemaWithActualVersion(
+    _ schemaVersion: UInt16
+) throws {
+    let package = try BrushFormatTestSupport.package()
+    var entries = try BrushFormatTestSupport.archiveEntries(package)
+    entries["definition.json"] = Data(
+        String(decoding: entries["definition.json"]!, as: UTF8.self)
+            .replacingOccurrences(
+                of: "\"schemaVersion\":3",
+                with: "\"schemaVersion\":\(schemaVersion)"
+            )
+            .utf8
+    )
+
+    #expect(
+        throws: BrushPackageError.unsupportedDefinitionSchema(schemaVersion)
+    ) {
+        try BrushPackageCodec.decode(
+            BrushFormatTestSupport.encodeArchive(entries)
+        )
+    }
+}
+
 @Test func resourcePathAndHashUseCanonicalContentIdentity() throws {
     let bytes = try BrushFormatTestSupport.fixturePNG()
     let resource = try BrushFormatTestSupport.resource(bytes: bytes)
@@ -62,8 +109,8 @@ import Testing
 @Test func semanticHashIgnoresJSONRepresentationButPinsSchema() throws {
     let package = try BrushFormatTestSupport.package()
     let expected = try package.contentHash
-    #expect(BrushContentHash.schemaVersion == 2)
-    #expect(expected == "ed1f9b8e914d9dc597b45ba9b03baccf57194eb2179776f743bdd2d9d0a872fb")
+    #expect(BrushContentHash.schemaVersion == 4)
+    #expect(expected == "16cc347463c824ecb491b2b1d6ff923134e4435a4283dabb5da9b2e4acf4f64f")
     var entries = try BrushFormatTestSupport.archiveEntries(package)
     var definition = try replacingRootObjectOrder(in: entries["definition.json"]!)
     var spelling = String(decoding: definition, as: UTF8.self)
@@ -83,6 +130,7 @@ import Testing
 @Test func semanticHashTracksEveryMajorRenderingGroupAndResource() throws {
     let package = try BrushFormatTestSupport.package()
     let base = package.definition
+    let component = base.components[0]
     let baseline = try package.contentHash
     let changedDefinitions: [BrushDefinition] = try [
         BrushFormatTestSupport.definition(
@@ -95,7 +143,7 @@ import Testing
             coverage: BrushCoverageDefinition(
                 shapes: [
                     BrushShapeLayerDefinition(
-                        shape: base.coverage.shapes[0].shape,
+                        shape: component.coverage.shapes[0].shape,
                         combination: .replace,
                         scale: 0.5,
                         rotation: 0,
@@ -124,21 +172,21 @@ import Testing
         BrushFormatTestSupport.definition(
             dynamics: BrushDynamicsDefinition(
                 size: constantMapping(0.5),
-                flow: base.dynamics.flow,
-                opacity: base.dynamics.opacity,
-                spacing: base.dynamics.spacing,
-                rotation: base.dynamics.rotation,
-                scatter: base.dynamics.scatter,
-                hardness: base.dynamics.hardness,
-                grain: base.dynamics.grain,
-                offsetX: base.dynamics.offsetX,
-                offsetY: base.dynamics.offsetY,
-                hue: base.dynamics.hue,
-                saturation: base.dynamics.saturation,
-                brightness: base.dynamics.brightness,
-                secondaryColorMix: base.dynamics.secondaryColorMix,
-                noPressureNeutral: base.dynamics.noPressureNeutral,
-                randomization: base.dynamics.randomization
+                flow: component.dynamics.flow,
+                opacity: component.dynamics.opacity,
+                spacing: component.dynamics.spacing,
+                rotation: component.dynamics.rotation,
+                scatter: component.dynamics.scatter,
+                hardness: component.dynamics.hardness,
+                grain: component.dynamics.grain,
+                offsetX: component.dynamics.offsetX,
+                offsetY: component.dynamics.offsetY,
+                hue: component.dynamics.hue,
+                saturation: component.dynamics.saturation,
+                brightness: component.dynamics.brightness,
+                secondaryColorMix: component.dynamics.secondaryColorMix,
+                noPressureNeutral: component.dynamics.noPressureNeutral,
+                randomization: component.dynamics.randomization
             )
         ),
         BrushFormatTestSupport.definition(
@@ -149,20 +197,20 @@ import Testing
                     blueMultiplier: 1,
                     alphaMultiplier: 1
                 ),
-                perStampJitter: base.color.perStampJitter,
-                perStrokeJitter: base.color.perStrokeJitter
+                perStampJitter: component.color.perStampJitter,
+                perStrokeJitter: component.color.perStrokeJitter
             )
         ),
         BrushFormatTestSupport.definition(
             material: BrushMaterialDefinition(
-                accumulation: base.material.accumulation,
+                accumulation: component.material.accumulation,
                 interaction: .none,
-                edgeTreatment: base.material.edgeTreatment,
+                edgeTreatment: component.material.edgeTreatment,
                 strength: 0.5,
-                wetness: base.material.wetness,
-                bleedRadius: base.material.bleedRadius,
-                softenPasses: base.material.softenPasses,
-                accumulationLimit: base.material.accumulationLimit,
+                wetness: component.material.wetness,
+                bleedRadius: component.material.bleedRadius,
+                softenPasses: component.material.softenPasses,
+                accumulationLimit: component.material.accumulationLimit,
                 interactionParameters: nil
             )
         ),
@@ -192,13 +240,6 @@ import Testing
             )
         ),
         BrushFormatTestSupport.definition(performanceIntent: .quality),
-        BrushFormatTestSupport.definition(
-            compatibility: BrushCompatibilityMetadata(
-                nativeFeatureVersion: 2,
-                sourceSettingKeys: [],
-                requiredSemanticKeys: []
-            )
-        ),
     ]
 
     for definition in changedDefinitions {
@@ -218,7 +259,7 @@ import Testing
     )
 }
 
-@Test func semanticHashTracksTerminationAndLegacyCompatibility() throws {
+@Test func semanticHashTracksCurrentTerminationSemantics() throws {
     let base = try BrushFormatTestSupport.package()
     func package(_ definition: BrushDefinition) throws -> BrushPackage {
         try BrushPackage(
@@ -248,15 +289,6 @@ import Testing
             .count == 3
     )
 
-    let legacyDefinition = try LegacyBrushRecipeAdapter.definition(
-        from: BrushRecipe(
-            id: BrushRecipeID("test.package"),
-            shape: .asset(BrushFormatTestSupport.shapeID)
-        ),
-        displayName: "Package Test"
-    )
-    let legacy = try package(legacyDefinition)
-    #expect(try legacy.contentHash != cap.contentHash)
 }
 
 @Test func semanticHashExcludesPreviewAndProvenanceMetadata() throws {
@@ -287,8 +319,10 @@ import Testing
         required: false,
         fallback: nil
     )
-    let referencedDefinition = try BrushFormatTestSupport.definition(
-        resources: (base.definition.resources + [previewReference]).sorted {
+    let referencedDefinition = try BrushFormatTestSupport.replacing(
+        base.definition,
+        resources: (base.definition.components[0].resources
+            + [previewReference]).sorted {
             $0.identifier < $1.identifier
         }
     )
@@ -592,11 +626,15 @@ import Testing
     var definition = try #require(
         JSONSerialization.jsonObject(with: entries["definition.json"]!) as? [String: Any]
     )
+    var components = try #require(
+        definition["components"] as? [[String: Any]]
+    )
     var definitionResources = try #require(
-        definition["resources"] as? [[String: Any]]
+        components[0]["resources"] as? [[String: Any]]
     )
     definitionResources[0].removeValue(forKey: "fallback")
-    definition["resources"] = definitionResources
+    components[0]["resources"] = definitionResources
+    definition["components"] = components
     entries["definition.json"] = try JSONSerialization.data(
         withJSONObject: definition,
         options: [.sortedKeys]
@@ -635,20 +673,10 @@ import Testing
     entries = try BrushFormatTestSupport.archiveEntries(package)
     entries["manifest.json"] = Data(
         String(decoding: entries["manifest.json"]!, as: UTF8.self)
-            .replacingOccurrences(of: "\"schemaVersion\":1", with: "\"schemaVersion\":3")
+            .replacingOccurrences(of: "\"schemaVersion\":2", with: "\"schemaVersion\":3")
             .utf8
     )
     #expect(throws: BrushPackageError.unsupportedManifestSchema(3)) {
-        try BrushPackageCodec.decode(BrushFormatTestSupport.encodeArchive(entries))
-    }
-
-    entries = try BrushFormatTestSupport.archiveEntries(package)
-    entries["definition.json"] = Data(
-        String(decoding: entries["definition.json"]!, as: UTF8.self)
-            .replacingOccurrences(of: "\"schemaVersion\":1", with: "\"schemaVersion\":99")
-            .utf8
-    )
-    #expect(throws: BrushPackageError.unsupportedDefinitionSchema) {
         try BrushPackageCodec.decode(BrushFormatTestSupport.encodeArchive(entries))
     }
 

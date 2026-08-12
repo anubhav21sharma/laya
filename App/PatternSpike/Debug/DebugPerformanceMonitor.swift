@@ -12,6 +12,7 @@ struct DebugPerformanceSnapshot: Codable, Equatable, Sendable {
     var missedFrameCount: UInt64 = 0
     var deposition = DebugDepositionSnapshot()
     var strokeRuntime: StrokeRuntimeTelemetrySnapshot?
+    var paint: StageDAcceptanceRendererEvidence?
 }
 
 struct DebugDurationPercentiles: Codable, Equatable, Sendable {
@@ -698,6 +699,10 @@ final class DebugPerformanceMonitor {
         snapshot.strokeRuntime = runtime
     }
 
+    func recordPaintEvidence(_ evidence: StageDAcceptanceRendererEvidence) {
+        snapshot.paint = evidence
+    }
+
     private func resetSamples(targetFramesPerSecond: Int) {
         intervalsMilliseconds.removeAll(keepingCapacity: true)
         lastFrameTimestamp = nil
@@ -705,7 +710,8 @@ final class DebugPerformanceMonitor {
         currentTargetFramesPerSecond = targetFramesPerSecond
         snapshot = DebugPerformanceSnapshot(
             targetFramesPerSecond: targetFramesPerSecond,
-            deposition: snapshot.deposition
+            deposition: snapshot.deposition,
+            paint: snapshot.paint
         )
     }
 
@@ -742,7 +748,8 @@ final class DebugPerformanceMonitor {
             targetFramesPerSecond: currentTargetFramesPerSecond,
             sampleCount: intervalsMilliseconds.count,
             missedFrameCount: UInt64(missedFrames),
-            deposition: snapshot.deposition
+            deposition: snapshot.deposition,
+            paint: snapshot.paint
         )
     }
 

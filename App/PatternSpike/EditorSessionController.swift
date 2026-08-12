@@ -8,6 +8,20 @@ enum EditorSessionLayerError: Error, Equatable {
     case rendererStorageUnavailable(UUID)
 }
 
+enum StrokeBeginAdmissionResult: String, Equatable, Sendable {
+    case notObserved
+    case accepted
+    case deferredPointerStream
+    case rendererBusyDeferred
+    case awaitingEstimatedUpdates
+    case footprintOutsideDocument
+    case toolUnavailable
+    case transactionNotIdle
+    case transactionOperationPending
+    case activeLayerUnavailable
+    case compiledBrushUnavailable
+}
+
 @MainActor
 func handleEditorShortcut(
     _ shortcut: EditorShortcut,
@@ -30,6 +44,8 @@ final class EditorSessionController {
     var onError: ((MetalRendererError) -> Void)?
     var onNormalizedInput: ((StrokeSample) -> Void)?
     private(set) var isSpaceDown = false
+    private(set) var lastStrokeBeginAdmissionResult:
+        StrokeBeginAdmissionResult = .notObserved
     private let strokeSeedSessionEntropy: UInt64
     private var nextStrokeSequence: UInt64 = 1
     private var activeDrawBrush: CompiledBrush?
@@ -218,6 +234,9 @@ final class EditorSessionController {
         inputGeneration: UInt64? = nil
     ) {
         if hasDeferredPointerStream {
+            if sample.phase == .began {
+                lastStrokeBeginAdmissionResult = .deferredPointerStream
+            }
             enqueueDeferredPointerSample(
                 sample,
                 inputGeneration: inputGeneration
@@ -228,6 +247,7 @@ final class EditorSessionController {
            transaction.state == .idle,
            !renderer.isIdle
         {
+            lastStrokeBeginAdmissionResult = .rendererBusyDeferred
             enqueueDeferredPointerSample(
                 sample,
                 inputGeneration: inputGeneration
@@ -246,6 +266,7 @@ final class EditorSessionController {
             return
         }
         if sample.phase == .began, isAwaitingEstimatedUpdates {
+            lastStrokeBeginAdmissionResult = .awaitingEstimatedUpdates
             enqueueDeferredPointerSample(
                 sample,
                 inputGeneration: inputGeneration
@@ -261,20 +282,31 @@ final class EditorSessionController {
                diameter: model.brushDiameter
            )
         {
+            lastStrokeBeginAdmissionResult = .footprintOutsideDocument
             return
         }
         onNormalizedInput?(sample)
         let event: EditorTransactionEvent
         switch sample.phase {
         case .began:
-            guard let tool = strokeTool,
-                  transaction.state == .idle,
-                  transaction.pendingOperation == nil
-            else { return }
+            guard let tool = strokeTool else {
+                lastStrokeBeginAdmissionResult = .toolUnavailable
+                return
+            }
+            guard transaction.state == .idle else {
+                lastStrokeBeginAdmissionResult = .transactionNotIdle
+                return
+            }
+            guard transaction.pendingOperation == nil else {
+                lastStrokeBeginAdmissionResult =
+                    .transactionOperationPending
+                return
+            }
             let layerID: UUID
             do {
                 layerID = try activeRasterLayerID()
             } catch {
+                lastStrokeBeginAdmissionResult = .activeLayerUnavailable
                 report(.commandFailed(error.localizedDescription))
                 return
             }
@@ -284,6 +316,7 @@ final class EditorSessionController {
                 ? activeDrawBrush
                 : activeEraserBrush
             guard let compiledBrush else {
+                lastStrokeBeginAdmissionResult = .compiledBrushUnavailable
                 report(.compiledBrushUnavailable(
                     tool == .draw ? .draw : .erase
                 ))
@@ -306,6 +339,7 @@ final class EditorSessionController {
                 style: style
             )
             activeStrokeLayerID = layerID
+            lastStrokeBeginAdmissionResult = .accepted
         case .moved:
             guard isCollectingStroke else { return }
             trackPendingEstimatedProperties(in: sample)
@@ -345,6 +379,9 @@ final class EditorSessionController {
         Samples.Element == StrokeSample
     {
         if hasDeferredPointerStream {
+            if samples.contains(where: { $0.phase == .began }) {
+                lastStrokeBeginAdmissionResult = .deferredPointerStream
+            }
             enqueueDeferredPointerBatch(
                 samples,
                 inputGeneration: inputGeneration,
@@ -364,6 +401,7 @@ final class EditorSessionController {
            transaction.state == .idle,
            !renderer.isIdle
         {
+            lastStrokeBeginAdmissionResult = .rendererBusyDeferred
             enqueueDeferredPointerBatch(
                 samples,
                 inputGeneration: inputGeneration,
@@ -627,7 +665,7 @@ final class EditorSessionController {
             else { return }
             try renderer.activateDrawBrush(compiled)
             activeDrawBrush = compiled
-            model.confirmRecipe(resolvedID)
+            try model.confirmRecipe(resolvedID)
             selectionStore?.writeSelectedBrushID(resolvedID.rawValue)
         } catch let error as MetalRendererError {
             if generation == selectionGeneration {
@@ -669,7 +707,7 @@ final class EditorSessionController {
         else {
             throw MetalRendererError.invalidCompiledBrush
         }
-        model.confirmRecipe(id)
+        try model.confirmRecipe(id)
         selectionStore?.writeSelectedBrushID(id.rawValue)
     }
 
@@ -698,7 +736,7 @@ final class EditorSessionController {
         replacement.model.confirmTool(model.tool)
         replacement.model.confirmInkColor(model.inkColor)
         replacement.model.confirmBrushDiameter(model.brushDiameter)
-        replacement.model.confirmRecipe(model.selectedRecipeID)
+        try replacement.model.confirmRecipe(model.selectedRecipeID)
         replacement.handleGridVisibility(model.showGrid)
         _ = nextSelectionGeneration()
         return replacement
@@ -1171,7 +1209,7 @@ final class EditorSessionController {
         case let .updateBrushDiameter(diameter):
             model.confirmBrushDiameter(diameter)
         case let .updateRecipe(recipeID):
-            model.confirmRecipe(recipeID)
+            try model.confirmRecipe(recipeID)
         case let .updateGridVisibility(visible):
             model.confirmGridVisibility(visible)
             renderer.setInteractiveGridVisibility(visible)

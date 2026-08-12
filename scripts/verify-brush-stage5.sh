@@ -410,14 +410,14 @@ run_logged bootstrap ./scripts/bootstrap.sh
 
 run_logged mac-build xcodebuild \
   -project App/PatternSpike.xcodeproj \
-  -scheme PatternSpikeMac \
+  -scheme PatternSpikeMacHarness \
   -configuration Debug \
   -destination platform=macOS \
   -derivedDataPath "$derived_mac" \
   build CODE_SIGNING_ALLOWED=NO
 run_logged mac-analyze xcodebuild \
   -project App/PatternSpike.xcodeproj \
-  -scheme PatternSpikeMac \
+  -scheme PatternSpikeMacHarness \
   -configuration Debug \
   -destination platform=macOS \
   -derivedDataPath "$derived_mac" \
@@ -437,7 +437,7 @@ run_logged ipad-analyze xcodebuild \
   -derivedDataPath "$derived_pad" \
   analyze CODE_SIGNING_ALLOWED=NO
 
-app_binary="$derived_mac/Build/Products/Debug/PatternSpike.app/Contents/MacOS/PatternSpike"
+app_binary="$derived_mac/Build/Products/Debug/PatternSpikeHarness.app/Contents/MacOS/PatternSpikeHarness"
 [[ -x "$app_binary" ]] \
   || fail "Mac professional harness binary is unavailable"
 cp "$app_binary" "$artifacts/runtime/PatternSpike"

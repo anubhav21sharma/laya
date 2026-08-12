@@ -228,28 +228,62 @@ struct DepositionStampInstanceTests {
         let page = RadialPageCoordinate(x: -3, y: 8)
         let first = ProjectedDepositionRecord(
             identity: 9,
+            componentOrdinal: 0,
             instance: firstInstance,
             radialPage: page
         )
 
         #expect(first == ProjectedDepositionRecord(
             identity: 9,
+            componentOrdinal: 0,
             instance: firstInstance,
             radialPage: page
         ))
         #expect(first != ProjectedDepositionRecord(
             identity: 10,
+            componentOrdinal: 0,
             instance: firstInstance,
             radialPage: page
         ))
         #expect(first != ProjectedDepositionRecord(
             identity: 9,
+            componentOrdinal: 1,
+            instance: firstInstance,
+            radialPage: page
+        ))
+        #expect(first != ProjectedDepositionRecord(
+            identity: 9,
+            componentOrdinal: 0,
             instance: firstInstance,
             radialPage: RadialPageCoordinate(x: -3, y: 9)
         ))
         #expect(first != ProjectedDepositionRecord(
             identity: 9,
+            componentOrdinal: 0,
             instance: secondInstance,
+            radialPage: page
+        ))
+
+        let prepared = StrokePreparedProjectedRecord(
+            depositionRecord: ProjectedDepositionRecord(
+                identity: 9,
+                componentOrdinal: 1,
+                instance: firstInstance,
+                radialPage: page
+            ),
+            dirtyRect: try #require(PixelRect(
+                minX: 1,
+                minY: 2,
+                maxX: 4,
+                maxY: 6
+            )),
+            radialPage: page
+        )
+        #expect(prepared.componentOrdinal == 1)
+        #expect(prepared.depositionRecord == ProjectedDepositionRecord(
+            identity: 9,
+            componentOrdinal: 1,
+            instance: firstInstance,
             radialPage: page
         ))
     }

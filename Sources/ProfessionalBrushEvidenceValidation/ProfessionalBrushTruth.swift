@@ -119,22 +119,21 @@ enum ProfessionalBrushTruth {
         "professional-graphite-pencil": .init(
             family: "Graphite Pencil",
             definitionID: "builtin.professional-graphite-pencil",
-            residentBytes: 114_687,
+            residentBytes: 196_607,
             resourceLevels: [
                 "builtin.grain.graphite": 9,
-                "builtin.grain.paper": 7,
+                "builtin.grain.graphite-paper": 9,
                 "builtin.shape.graphite-tip": 8,
             ]
         ),
         "professional-natural-charcoal": .init(
             family: "Natural Charcoal",
             definitionID: "builtin.professional-natural-charcoal",
-            residentBytes: 120_148,
+            residentBytes: 196_607,
             resourceLevels: [
                 "builtin.grain.charcoal": 9,
-                "builtin.grain.paper": 7,
+                "builtin.grain.charcoal-fine-paper": 9,
                 "builtin.shape.charcoal-tip": 8,
-                "builtin.shape.soft-round": 7,
             ]
         ),
         "professional-technical-ink": .init(

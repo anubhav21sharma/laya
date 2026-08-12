@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 artifacts="$repo_root/.build/slice1-artifacts"
 scenes="$repo_root/App/PatternSpike/Harness/Scenes"
-binary="$repo_root/.build/DerivedData/Build/Products/Debug/PatternSpike.app/Contents/MacOS/PatternSpike"
+binary="$repo_root/.build/DerivedData/Build/Products/Debug/PatternSpikeHarness.app/Contents/MacOS/PatternSpikeHarness"
 
 cd "$repo_root"
 rm -rf "$artifacts"

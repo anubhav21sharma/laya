@@ -12,7 +12,7 @@ struct FrameSchedulerTests {
             authoritativeCapacity: 8,
             predictedCapacity: 4
         )
-        var scheduler = FrameScheduler(budget: budget)
+        let scheduler = FrameScheduler(budget: budget)
 
         try scheduler.enqueueAuthoritative(records(0..<5))
         try scheduler.replacePrediction(records(100..<103))
@@ -49,7 +49,7 @@ struct FrameSchedulerTests {
             authoritativeCapacity: 4,
             predictedCapacity: 4
         )
-        var scheduler = FrameScheduler(budget: budget)
+        let scheduler = FrameScheduler(budget: budget)
         try scheduler.enqueueAuthoritative(records(0..<3))
         try scheduler.replacePrediction(records(100..<102))
 
@@ -72,7 +72,7 @@ struct FrameSchedulerTests {
             authoritativeCapacity: 4,
             predictedCapacity: 2
         )
-        var scheduler = FrameScheduler(budget: budget)
+        let scheduler = FrameScheduler(budget: budget)
         try scheduler.enqueueAuthoritative(records(10..<12))
         try scheduler.replacePrediction(records(100..<102))
 
@@ -100,7 +100,7 @@ struct FrameSchedulerTests {
             authoritativeCapacity: 4,
             predictedCapacity: 3
         )
-        var scheduler = FrameScheduler(budget: budget)
+        let scheduler = FrameScheduler(budget: budget)
         try scheduler.enqueueAuthoritative(records(0..<4))
         try scheduler.replacePrediction(records(100..<102))
         try scheduler.replacePrediction(records(200..<203))
@@ -122,7 +122,7 @@ struct FrameSchedulerTests {
             authoritativeCapacity: 4,
             predictedCapacity: 1
         )
-        var scheduler = FrameScheduler(budget: budget)
+        let scheduler = FrameScheduler(budget: budget)
         try scheduler.enqueueAuthoritative(records(0..<4))
 
         #expect(
@@ -151,7 +151,7 @@ struct FrameSchedulerTests {
             authoritativeCapacity: 2,
             predictedCapacity: 2
         )
-        var scheduler = FrameScheduler(budget: budget)
+        let scheduler = FrameScheduler(budget: budget)
         try scheduler.replacePrediction(records(100..<102))
 
         #expect(scheduler.authoritativeIsDrained)
@@ -169,7 +169,7 @@ struct FrameSchedulerTests {
             authoritativeCapacity: 3,
             predictedCapacity: 3
         )
-        var scheduler = FrameScheduler(budget: budget)
+        let scheduler = FrameScheduler(budget: budget)
         try scheduler.enqueueAuthoritative(records(0..<3))
         try scheduler.replacePrediction(records(100..<103))
 
@@ -230,7 +230,7 @@ struct FrameSchedulerTests {
             authoritativeCapacity: 514,
             predictedCapacity: 1
         )
-        var scheduler = FrameScheduler(budget: budget)
+        let scheduler = FrameScheduler(budget: budget)
         var produced = 0
         var expectedIdentity: UInt64 = 0
 
@@ -263,7 +263,7 @@ struct FrameSchedulerTests {
         _ source: [ProjectedDepositionRecord],
         budget: DepositionFrameBudget
     ) throws -> [UInt64] {
-        var scheduler = FrameScheduler(budget: budget)
+        let scheduler = FrameScheduler(budget: budget)
         try scheduler.enqueueAuthoritative(source)
         var result: [UInt64] = []
         while !scheduler.authoritativeIsDrained {

@@ -24,34 +24,26 @@ func editorCatalogKeepsProfessionalPresetsOutOfTheProductPicker() {
     #expect(EditorBrushCatalog.eraser == AnchorBrushCatalog.eraser)
 }
 
-@Test(arguments: [
-    ("builtin.native-ink", "builtin.native-ink"),
-    ("builtin.technical-ink", "builtin.native-ink"),
-    ("builtin.native-dry-media", "builtin.native-dry-media"),
-    ("builtin.dry-pencil", "builtin.native-dry-media"),
-    ("builtin.native-marker", "builtin.native-marker"),
-    ("builtin.glaze-marker", "builtin.native-marker"),
-    ("builtin.native-glaze", "builtin.native-glaze"),
-    ("builtin.native-airbrush", "builtin.native-airbrush"),
-])
-func editorCatalogMigratesEveryLegacyDrawSelection(
-    incoming: String,
-    expected: String
-) {
-    #expect(EditorBrushCatalog.resolveSelection(BrushRecipeID(incoming))
-        == BrushRecipeID(expected))
-}
-
 @Test
-func editorCatalogAcceptsCurrentSelectionsAndRejectsUnknownIDs() {
+func editorCatalogAcceptsCurrentSelectionsAndRejectsUnknownIDs() throws {
     for entry in EditorBrushCatalog.drawEntries {
         #expect(EditorBrushCatalog.resolveSelection(entry.id) == entry.id)
         #expect(EditorBrushCatalog.drawEntry(for: entry.id) == entry)
+        #expect(try EditorBrushCatalog.resolveCurrentSelection(entry.id) == entry.id)
     }
-    #expect(EditorBrushCatalog.resolveSelection(
-        BrushRecipeID("builtin.unknown-professional-brush")
-    ) == nil)
+    let unknownID = BrushRecipeID("builtin.unknown-professional-brush")
+    #expect(EditorBrushCatalog.resolveSelection(unknownID) == nil)
+    #expect(try EditorBrushCatalog.resolveCurrentSelection(unknownID) == nil)
     #expect(EditorBrushCatalog.drawEntry(for: AnchorBrushCatalog.eraser.id) == nil)
+}
+
+@Test
+func editorCatalogReportsRetiredNativeSelectionWithoutAnAlias() {
+    let retiredID = BrushRecipeID("builtin.bounded-wash")
+
+    #expect(throws: EditorBrushSelectionError.retiredIdentifier(retiredID)) {
+        _ = try EditorBrushCatalog.resolveCurrentSelection(retiredID)
+    }
 }
 
 @Test(arguments: [

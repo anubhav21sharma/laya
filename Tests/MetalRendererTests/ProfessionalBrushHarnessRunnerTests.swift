@@ -7,6 +7,7 @@ import ImageIO
 import Metal
 import PatternEngine
 @testable import MetalRenderer
+@testable import MetalRendererDiagnostics
 @testable import ProfessionalBrushEvidenceValidation
 import Testing
 import UniformTypeIdentifiers
@@ -371,7 +372,9 @@ struct ProfessionalBrushHarnessRunnerTests {
         )
         #expect(
             finalIdentityFrame.encodedGPUInstanceCount
-                > longEvidence.replayMaximumProjectedInstances
+                >= finalIdentityFrame.generatedProjectedInstanceHighWater
+                    - finalIdentityFrame
+                        .previousGeneratedProjectedInstanceHighWater
         )
         #expect(
             (longRaw["cpuPreparationMilliseconds"] as? [Double])?
@@ -578,11 +581,11 @@ struct ProfessionalBrushHarnessRunnerTests {
                 .split(separator: ":")
                 .map(String.init)
         )
-        #expect(currentPipelineFields.count == 10)
+        #expect(currentPipelineFields.count == 9)
         var invalidPipelineFields = currentPipelineFields
-        invalidPipelineFields[7] = "abi999"
+        invalidPipelineFields[6] = "abi999"
         var wrongFormatFields = currentPipelineFields
-        wrongFormatFields[8] = "format80"
+        wrongFormatFields[7] = "format80"
         for (label, pipeline) in [
             ("wrong pipeline ABI", invalidPipelineFields.joined(separator: ":")),
             ("wrong working format", wrongFormatFields.joined(separator: ":")),
@@ -1187,7 +1190,7 @@ private let professionalEntries = [
         entry: ProfessionalBrushCatalog.graphitePencil,
         resources: [
             "builtin.grain.graphite": 9,
-            "builtin.grain.paper": 7,
+            "builtin.grain.graphite-paper": 9,
             "builtin.shape.graphite-tip": 8,
         ]
     ),
@@ -1196,9 +1199,8 @@ private let professionalEntries = [
         entry: ProfessionalBrushCatalog.naturalCharcoal,
         resources: [
             "builtin.grain.charcoal": 9,
-            "builtin.grain.paper": 7,
+            "builtin.grain.charcoal-fine-paper": 9,
             "builtin.shape.charcoal-tip": 8,
-            "builtin.shape.soft-round": 7,
         ]
     ),
     ProfessionalEntryFixture(
@@ -1220,9 +1222,9 @@ private func professionalEvidenceFixture(
             mipCount: 9
         ),
         ProfessionalBrushResolvedResource(
-            identity: "builtin.grain.paper",
+            identity: "builtin.grain.graphite-paper",
             kind: "grain",
-            mipCount: 7
+            mipCount: 9
         ),
         ProfessionalBrushResolvedResource(
             identity: "builtin.shape.graphite-tip",
@@ -1256,12 +1258,12 @@ private func professionalEvidenceFixture(
         definitionID: "builtin.professional-graphite-pencil",
         definitionSemanticHash: try package.contentHash,
         pipelineKey:
-            "deposition:flow:dryBreakup:s0:g1:h1:d0"
+            "deposition:flow:dryBreakup:s0:g1:h1"
             + ":abi\(DepositionABI.version)"
             + ":format\(DocumentColorPipeline.workingPixelFormat.rawValue)"
             + ":samples1",
         abiVersion: DepositionABI.version,
-        residentResourceBytes: 114_687,
+        residentResourceBytes: 196_607,
         resolvedResources: resources,
         logicalDabCount: 4,
         projectedInstanceCount: 4,
@@ -1397,7 +1399,7 @@ func professionalSceneIdentitiesForValidation()
             definitionSemanticHash:
                 characterization.definitionSemanticHash,
             pipelineKey:
-                "deposition:flow:none:s0:g0:h0:d0:abi\(PatternDepositionABIVersion):format\(MTLPixelFormat.rgba16Float.rawValue):samples1",
+                "deposition:flow:none:s0:g0:h0:abi\(PatternDepositionABIVersion):format\(MTLPixelFormat.rgba16Float.rawValue):samples1",
             abiVersion: Int(PatternDepositionABIVersion)
         )
     }

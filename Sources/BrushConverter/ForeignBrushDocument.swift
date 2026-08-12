@@ -9,7 +9,17 @@ public struct ForeignBrushDocument: Equatable, Sendable {
         ir: ForeignBrushIR,
         resourceData: [String: Data]
     ) throws {
-        let expected = Set(ir.resources.map(\.id))
+        let ids = ir.resources.map(\.id)
+        guard Set(ids).count == ids.count else {
+            let duplicate = ids.first { id in
+                ids.filter { $0 == id }.count > 1
+            }!
+            throw ForeignBrushValidationError.duplicate(
+                field: "ir.resources",
+                value: duplicate
+            )
+        }
+        let expected = Set(ids)
         let actual = Set(resourceData.keys)
         guard expected == actual else {
             throw ForeignBrushValidationError.resourceTableMismatch(

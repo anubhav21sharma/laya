@@ -4,6 +4,7 @@ import Foundation
 import Metal
 import PatternEngine
 @testable import MetalRenderer
+@testable import MetalRendererDiagnostics
 import Testing
 
 @Suite("Native deposition harness runner", .serialized)
@@ -14,6 +15,7 @@ struct DepositionHarnessRunnerTests {
             DepositionEvidenceValidator.positiveSceneNames == [
                 "deposition-airbrush",
                 "deposition-cache-pinning",
+                "deposition-composite",
                 "deposition-custom-asymmetric",
                 "deposition-dry",
                 "deposition-erase",
@@ -40,7 +42,7 @@ struct DepositionHarnessRunnerTests {
             DepositionEvidenceValidator.sceneNames
                 == DepositionEvidenceValidator.sceneNames.sorted()
         )
-        #expect(DepositionEvidenceValidator.sceneNames.count == 32)
+        #expect(DepositionEvidenceValidator.sceneNames.count == 34)
     }
 
     @Test
@@ -49,7 +51,7 @@ struct DepositionHarnessRunnerTests {
             from: repositorySceneDirectory()
         )
 
-        #expect(scenes.count == 32)
+        #expect(scenes.count == 34)
         #expect(scenes.map(\.name) == DepositionEvidenceValidator.sceneNames)
         #expect(scenes.allSatisfy { $0.schemaVersion == 6 })
         try DepositionEvidenceValidator.validateSceneSet(scenes)
@@ -338,6 +340,10 @@ struct DepositionHarnessRunnerTests {
             "deposition-cache-pinning",
             "activeBrushSurvivesPressureAndFailure"
         ),
+        (
+            "deposition-composite",
+            "compositeTwoComponentContract"
+        ),
     ])
     @MainActor
     func strengthenedEvidenceGuaranteeIsObservable(
@@ -371,6 +377,52 @@ struct DepositionHarnessRunnerTests {
 
         #expect(evidence.invariantResults[invariant] == true)
     }
+
+    @Test(arguments: CompositeHarnessControlMutation.allCases)
+    @MainActor
+    func everyCompositeNegativeMutationFailsOnlyItsSpecificGate(
+        _ mutation: CompositeHarnessControlMutation
+    ) async throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let sourceScene = try repositoryScene(named: "deposition-composite")
+        var expectations = sourceScene.depositionInvariantExpectations
+        expectations[mutation.invariantName] = false
+        let scene = try replacingExpectations(
+            expectations,
+            in: sourceScene
+        )
+        let output = temporaryDirectory(
+            named: "composite-control-\(mutation.rawValue)"
+        )
+        defer { try? FileManager.default.removeItem(at: output) }
+
+        _ = try await depositionHarnessRunner(
+            device: device,
+            library: depositionHarnessTestLibrary(device: device),
+            compositeControlMutation: mutation
+        ).run(
+            scene: scene,
+            outputDirectory: output,
+            build: BenchmarkBuild(
+                configuration: "Testing",
+                gitCommit: String(repeating: "e", count: 40)
+            )
+        )
+        let evidence = try DepositionSceneEvidence.decode(
+            Data(
+                contentsOf: output.appendingPathComponent(
+                    "deposition-composite.deposition-evidence.json"
+                )
+            )
+        )
+        let failed = Set(
+            evidence.invariantResults.compactMap { key, value in
+                value ? nil : key
+            }
+        )
+
+        #expect(failed == Set([mutation.invariantName]))
+    }
 }
 
 private func repositorySceneDirectory() -> URL {
@@ -390,6 +442,21 @@ func repositoryScene(named name: String) throws -> HarnessScene {
     )
 }
 
+private func replacingExpectations(
+    _ expectations: [String: Bool],
+    in scene: HarnessScene
+) throws -> HarnessScene {
+    var object = try #require(
+        JSONSerialization.jsonObject(
+            with: try JSONEncoder().encode(scene)
+        ) as? [String: Any]
+    )
+    object["depositionInvariantExpectations"] = expectations
+    return try HarnessScene.decode(
+        JSONSerialization.data(withJSONObject: object)
+    )
+}
+
 func temporaryDirectory(named name: String) -> URL {
     FileManager.default.temporaryDirectory.appendingPathComponent(
         "laya-deposition-\(name)-\(UUID().uuidString)",
@@ -400,19 +467,29 @@ func temporaryDirectory(named name: String) -> URL {
 @MainActor
 func depositionHarnessRunner(
     device: any MTLDevice,
-    library: any MTLLibrary
+    library: any MTLLibrary,
+    compositeControlMutation: CompositeHarnessControlMutation? = nil
 ) -> DepositionHarnessRunner {
-    DepositionHarnessRunner(
+    let anchors = [
+        "deposition-airbrush": AnchorBrushCatalog.airbrush.definition,
+        "deposition-dry": AnchorBrushCatalog.dryMedia.definition,
+        "deposition-erase": AnchorBrushCatalog.eraser.definition,
+        "deposition-glaze": AnchorBrushCatalog.glaze.definition,
+        "deposition-ink": AnchorBrushCatalog.ink.definition,
+        "deposition-marker": AnchorBrushCatalog.marker.definition,
+    ]
+    if let compositeControlMutation {
+        return DepositionHarnessRunner(
+            device: device,
+            library: library,
+            productionAnchorDefinitions: anchors,
+            compositeControlMutation: compositeControlMutation
+        )
+    }
+    return DepositionHarnessRunner(
         device: device,
         library: library,
-        productionAnchorDefinitions: [
-            "deposition-airbrush": AnchorBrushCatalog.airbrush.definition,
-            "deposition-dry": AnchorBrushCatalog.dryMedia.definition,
-            "deposition-erase": AnchorBrushCatalog.eraser.definition,
-            "deposition-glaze": AnchorBrushCatalog.glaze.definition,
-            "deposition-ink": AnchorBrushCatalog.ink.definition,
-            "deposition-marker": AnchorBrushCatalog.marker.definition,
-        ]
+        productionAnchorDefinitions: anchors
     )
 }
 

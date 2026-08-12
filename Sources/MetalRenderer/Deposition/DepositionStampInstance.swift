@@ -6,8 +6,8 @@ enum DepositionIdentityFlags {
     static let predicted: UInt32 = 1 << 0
 }
 
-enum DepositionShapeFlags {
-    static let reflected: UInt32 = 1 << 0
+package enum DepositionShapeFlags {
+    package static let reflected: UInt32 = 1 << 0
 }
 
 enum DepositionGrainFlags {
@@ -35,23 +35,37 @@ enum DepositionStampPacker {
     }
 }
 
-struct ProjectedDepositionRecord: Equatable, Sendable {
-    let identity: UInt64
-    let instance: PatternDepositionStampInstance
-    let radialPage: RadialPageCoordinate?
+package struct ProjectedDepositionRecord: Equatable, Sendable {
+    package let identity: UInt64
+    package let componentOrdinal: UInt8
+    package let instance: PatternDepositionStampInstance
+    package let radialPage: RadialPageCoordinate?
 
-    static func == (
+    package init(
+        identity: UInt64,
+        componentOrdinal: UInt8 = 0,
+        instance: PatternDepositionStampInstance,
+        radialPage: RadialPageCoordinate?
+    ) {
+        self.identity = identity
+        self.componentOrdinal = componentOrdinal
+        self.instance = instance
+        self.radialPage = radialPage
+    }
+
+    package static func == (
         lhs: ProjectedDepositionRecord,
         rhs: ProjectedDepositionRecord
     ) -> Bool {
         lhs.identity == rhs.identity
+            && lhs.componentOrdinal == rhs.componentOrdinal
             && lhs.radialPage == rhs.radialPage
             && lhs.instance.hasSameFrozenFields(as: rhs.instance)
     }
 }
 
 extension PatternDepositionStampInstance {
-    init(
+    package init(
         fragment: CellFragment,
         dab: LogicalDab,
         logicalOrdinal: UInt64,

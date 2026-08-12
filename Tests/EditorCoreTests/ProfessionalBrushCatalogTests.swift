@@ -15,9 +15,13 @@ func professionalCatalogKeepsEveryPersistedPresetLaboratoryOnly(
     let id = BrushRecipeID(persistedID)
     let entry = try #require(ProfessionalBrushCatalog.entry(for: id))
 
-    #expect(entry.status == .correctiveRebuildRequired)
+    #expect(entry.status.engineIntegrated)
+    #expect(entry.status.softwarePerformancePassed)
+    #expect(!entry.status.manualQualityPassed)
+    #expect(!entry.status.physicalProfilePassed)
+    #expect(!entry.status.productAccepted)
     #expect(entry.status.laboratoryOnlyMessage ==
-        "Available only in Brush Lab while a corrective rebuild is required.")
+        "Available only in Brush Lab while manual quality and physical profile validation are pending.")
     #expect(EditorBrushCatalog.drawEntry(for: id) == nil)
     #expect(EditorBrushCatalog.resolveSelection(id) == nil)
     #expect(EditorBrushCatalog.resolvePersistedSelection(id)
@@ -29,7 +33,7 @@ func professionalCatalogExposesTechnicalInkAsACompiledNativeBrush() throws {
     let entry = ProfessionalBrushCatalog.technicalInk
 
     #expect(ProfessionalBrushCatalog.all.allSatisfy {
-        $0.definition.schemaVersion == 1
+        $0.definition.schemaVersion == BrushDefinition.currentSchemaVersion
     })
     #expect(ProfessionalBrushCatalog.all.first == entry)
     #expect(entry.id.rawValue == "builtin.professional-technical-ink")
@@ -38,7 +42,7 @@ func professionalCatalogExposesTechnicalInkAsACompiledNativeBrush() throws {
     #expect(ProfessionalBrushCatalog.entry(for: BrushRecipeID("missing.brush")) == nil)
     #expect(try BrushProgramCompiler.compile(entry.definition) == entry.program)
     #expect(entry.program.requestedBackend == .deposition)
-    #expect(entry.definition.resources == [
+    #expect(entry.definition.components[0].resources == [
         BrushResourceReference(
             identifier: "builtin.shape.technical-nib",
             kind: .shape,
@@ -57,7 +61,7 @@ func professionalCatalogResolvesGraphitePencilWithItsStableIdentity() throws {
     #expect(entry.id == graphiteID)
     #expect(entry.displayName == "Graphite Pencil")
     #expect(entry.program == compiled)
-    #expect(compiled.definition.resources == [
+    #expect(compiled.primaryComponent.definition.resources == [
         BrushResourceReference(
             identifier: "builtin.grain.graphite",
             kind: .grain,
@@ -65,10 +69,10 @@ func professionalCatalogResolvesGraphitePencilWithItsStableIdentity() throws {
             fallback: .builtIn(identifier: "builtin.grain.graphite")
         ),
         BrushResourceReference(
-            identifier: "builtin.grain.paper",
+            identifier: "builtin.grain.graphite-paper",
             kind: .grain,
             required: false,
-            fallback: .builtIn(identifier: "builtin.grain.paper")
+            fallback: .builtIn(identifier: "builtin.grain.graphite-paper")
         ),
         BrushResourceReference(
             identifier: "builtin.shape.graphite-tip",
@@ -77,15 +81,15 @@ func professionalCatalogResolvesGraphitePencilWithItsStableIdentity() throws {
             fallback: .builtIn(identifier: "builtin.shape.graphite-tip")
         ),
     ])
-    #expect(compiled.definition.material.accumulation == .flow)
-    #expect(compiled.definition.material.accumulationLimit == 1)
+    #expect(compiled.primaryComponent.definition.material.accumulation == .flow)
+    #expect(compiled.primaryComponent.definition.material.accumulationLimit == 1)
 }
 
 @Test
 func graphitePencilDeclaresItsDualGrainCapabilityAsRequired() throws {
     let definition = ProfessionalBrushCatalog.graphitePencil.definition
 
-    #expect(definition.coverage.grains.count == 2)
+    #expect(definition.components[0].coverage.grains.count == 2)
     #expect(definition.capabilities == [
         BrushCapabilityDeclaration(identifier: "dualGrain", required: true),
     ])
@@ -119,7 +123,7 @@ func professionalCatalogResolvesNaturalCharcoalWithOrderedDualLayers() throws {
         BrushCapabilityDeclaration(identifier: "dualShape", required: true),
     ])
     #expect(compiled.requiredCapabilities == [.dualGrain, .dualShape])
-    #expect(compiled.definition.resources == [
+    #expect(compiled.primaryComponent.definition.resources == [
         BrushResourceReference(
             identifier: "builtin.grain.charcoal",
             kind: .grain,
@@ -127,10 +131,10 @@ func professionalCatalogResolvesNaturalCharcoalWithOrderedDualLayers() throws {
             fallback: .builtIn(identifier: "builtin.grain.charcoal")
         ),
         BrushResourceReference(
-            identifier: "builtin.grain.paper",
+            identifier: "builtin.grain.charcoal-fine-paper",
             kind: .grain,
             required: false,
-            fallback: .builtIn(identifier: "builtin.grain.paper")
+            fallback: .builtIn(identifier: "builtin.grain.charcoal-fine-paper")
         ),
         BrushResourceReference(
             identifier: "builtin.shape.charcoal-tip",
@@ -139,33 +143,33 @@ func professionalCatalogResolvesNaturalCharcoalWithOrderedDualLayers() throws {
             fallback: .builtIn(identifier: "builtin.shape.charcoal-tip")
         ),
     ])
-    #expect(compiled.definition.coverage.shapes.map(\.shape) == [
+    #expect(compiled.primaryComponent.definition.coverage.shapes.map(\.shape) == [
         .asset("builtin.shape.charcoal-tip"),
         .softRound,
     ])
-    #expect(compiled.definition.coverage.shapes.map(\.combination) == [
+    #expect(compiled.primaryComponent.definition.coverage.shapes.map(\.combination) == [
         .replace,
-        .multiply,
+        .maximum,
     ])
-    #expect(compiled.definition.coverage.grains.map(\.grain) == [
+    #expect(compiled.primaryComponent.definition.coverage.grains.map(\.grain) == [
         .asset("builtin.grain.charcoal"),
-        .asset("builtin.grain.paper"),
+        .asset("builtin.grain.charcoal-fine-paper"),
     ])
-    #expect(compiled.definition.coverage.grains.map(\.coordinateMode) == [
+    #expect(compiled.primaryComponent.definition.coverage.grains.map(\.coordinateMode) == [
         .brushLocal,
         .canonical,
     ])
-    #expect(compiled.definition.coverage.grains.map(\.grainFollowsBrushRotation) == [
+    #expect(compiled.primaryComponent.definition.coverage.grains.map(\.grainFollowsBrushRotation) == [
         true,
         false,
     ])
-    #expect(compiled.definition.coverage.grains.map(\.grainMovementFraction) == [0.12, 0.12])
-    #expect(compiled.definition.material.accumulation == .flow)
-    #expect(compiled.definition.material.edgeTreatment == .dryBreakup)
-    #expect(compiled.definition.material.interaction == .none)
-    #expect(compiled.definition.material.strength == 1)
-    #expect(compiled.definition.material.accumulationLimit == 1)
-    #expect(compiled.definition.performanceIntent == .realtime120)
+    #expect(compiled.primaryComponent.definition.coverage.grains.map(\.grainMovementFraction) == [0.12, 0.12])
+    #expect(compiled.primaryComponent.definition.material.accumulation == .flow)
+    #expect(compiled.primaryComponent.definition.material.edgeTreatment == .dryBreakup)
+    #expect(compiled.primaryComponent.definition.material.interaction == .none)
+    #expect(compiled.primaryComponent.definition.material.strength == 1)
+    #expect(compiled.primaryComponent.definition.material.accumulationLimit == 1)
+    #expect(compiled.definition.performanceIntent == .realtime60)
 }
 
 @Test
@@ -177,7 +181,7 @@ func professionalCatalogResolvesChiselMarkerWithItsExactFallbackAndMaterial() th
     #expect(entry.id == markerID)
     #expect(entry.displayName == "Chisel Marker")
     #expect(entry.program == compiled)
-    #expect(compiled.definition.resources == [
+    #expect(compiled.primaryComponent.definition.resources == [
         BrushResourceReference(
             identifier: "builtin.shape.marker-chisel",
             kind: .shape,
@@ -185,16 +189,18 @@ func professionalCatalogResolvesChiselMarkerWithItsExactFallbackAndMaterial() th
             fallback: .builtIn(identifier: "builtin.shape.marker-chisel")
         ),
     ])
-    #expect(compiled.definition.coverage.shapes.map(\.shape) == [
+    #expect(compiled.primaryComponent.definition.coverage.shapes.map(\.shape) == [
         .asset("builtin.shape.marker-chisel"),
     ])
-    #expect(compiled.definition.coverage.grains.isEmpty)
-    #expect(compiled.definition.coverage.baseHardness == 0.96)
-    #expect(compiled.definition.coverage.aspectRatio == 0.22)
-    #expect(compiled.definition.placement.strokeOpacity == 0.82)
-    #expect(compiled.definition.placement.baseSpacingFraction == 0.035)
-    #expect(compiled.definition.placement.maximumSpacingFraction == 0.10)
-    #expect(compiled.definition.dynamics.spacing == BrushMappingDefinition(
+    #expect(compiled.primaryComponent.definition.coverage.shapes.map(\.rotation)
+        == [0])
+    #expect(compiled.primaryComponent.definition.coverage.grains.isEmpty)
+    #expect(compiled.primaryComponent.definition.coverage.baseHardness == 0.96)
+    #expect(compiled.primaryComponent.definition.coverage.aspectRatio == 1)
+    #expect(compiled.primaryComponent.definition.placement.strokeOpacity == 0.82)
+    #expect(compiled.primaryComponent.definition.placement.baseSpacingFraction == 0.035)
+    #expect(compiled.primaryComponent.definition.placement.maximumSpacingFraction == 0.10)
+    #expect(compiled.primaryComponent.definition.dynamics.spacing == BrushMappingDefinition(
         input: .pressure,
         response: .constant(1),
         scale: 1,
@@ -205,23 +211,30 @@ func professionalCatalogResolvesChiselMarkerWithItsExactFallbackAndMaterial() th
         jitter: 0,
         missingInputValue: 1
     ))
-    #expect(compiled.definition.material.accumulation == .uniformGlaze)
-    #expect(compiled.definition.material.edgeTreatment == .markerOverlap)
-    #expect(compiled.definition.material.interaction == .none)
-    #expect(compiled.definition.material.strength == 0.95)
-    #expect(compiled.definition.material.accumulationLimit == 0.82)
-    #expect(compiled.definition.performanceIntent == .realtime120)
-    #expect(compiled.definition.stabilization == 0.12)
-    #expect(compiled.definition.taper.start == .diameterMultiples(0.35))
-    #expect(compiled.definition.taper.end == .diameterMultiples(0.35))
-    #expect(compiled.definition.taper.minimumSize == 0.85)
-    #expect(compiled.definition.taper.minimumFlow == 0.85)
+    #expect(compiled.primaryComponent.definition.material.accumulation == .uniformGlaze)
+    #expect(compiled.primaryComponent.definition.material.edgeTreatment == .markerOverlap)
+    #expect(compiled.primaryComponent.definition.material.interaction == .none)
+    #expect(compiled.primaryComponent.definition.material.strength == 0.95)
+    #expect(compiled.primaryComponent.definition.material.accumulationLimit == 0.82)
+    #expect(compiled.definition.performanceIntent == .realtime60)
+    #expect(compiled.definition.stabilization == 0)
+    #expect(compiled.primaryComponent.definition.taper.start == .diameterMultiples(0.35))
+    #expect(compiled.primaryComponent.definition.taper.end == .diameterMultiples(0.35))
+    #expect(compiled.primaryComponent.definition.taper.minimumSize == 0.85)
+    #expect(compiled.primaryComponent.definition.taper.minimumFlow == 0.85)
     #expect(ProfessionalBrushCatalog.all.map(\.id) == [
         BrushRecipeID("builtin.professional-technical-ink"),
         BrushRecipeID("builtin.professional-graphite-pencil"),
         BrushRecipeID("builtin.professional-natural-charcoal"),
         markerID,
     ])
+}
+
+@Test
+func professionalCandidatesDoNotClaimUnverifiedRealtime120Intent() {
+    #expect(ProfessionalBrushCatalog.all.allSatisfy {
+        $0.definition.performanceIntent == .realtime60
+    })
 }
 
 @Test

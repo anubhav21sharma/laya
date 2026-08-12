@@ -2,6 +2,7 @@ import CShaderTypes
 import Foundation
 import Metal
 @testable import MetalRenderer
+@testable import MetalRendererDiagnostics
 import PatternEngine
 import Testing
 
@@ -70,7 +71,8 @@ struct DepositionShaderSourceTests {
                 + "patternProjectedDepositionVertex("
         ))
         #expect(source.contains(
-            "fragment float4 patternDepositionFragment("
+            "fragment PatternDepositionFragmentOutput "
+                + "patternDepositionFragment("
         ))
     }
 
@@ -197,6 +199,8 @@ struct DepositionShaderSourceTests {
                     descriptor.vertexFunction = vertex
                     descriptor.fragmentFunction = fragment
                     descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+                    descriptor.colorAttachments[1].pixelFormat =
+                        DepositionComponentCoverage.pixelFormat
                     _ = try device.makeRenderPipelineState(
                         descriptor: descriptor
                     )
@@ -297,6 +301,8 @@ struct DepositionShaderSourceTests {
                 descriptor.vertexFunction = vertex
                 descriptor.fragmentFunction = fragment
                 descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+                descriptor.colorAttachments[1].pixelFormat =
+                    DepositionComponentCoverage.pixelFormat
                 let pipeline = try device.makeRenderPipelineState(
                     descriptor: descriptor
                 )
@@ -594,6 +600,12 @@ struct DepositionShaderSourceTests {
         let target = try #require(device.makeTexture(
             descriptor: targetDescriptor
         ))
+        let componentCoverage = try #require(device.makeTexture(
+            descriptor: DepositionComponentCoverage.textureDescriptor(
+                width: 1,
+                height: 1
+            )
+        ))
         var frame = PatternGridFrameUniforms(
             drawableSize: SIMD2(1, 1),
             worldCenter: .zero,
@@ -643,6 +655,15 @@ struct DepositionShaderSourceTests {
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
         pass.colorAttachments[0].clearColor = .init(
+            red: 0,
+            green: 0,
+            blue: 0,
+            alpha: 0
+        )
+        pass.colorAttachments[1].texture = componentCoverage
+        pass.colorAttachments[1].loadAction = .clear
+        pass.colorAttachments[1].storeAction = .store
+        pass.colorAttachments[1].clearColor = .init(
             red: 0,
             green: 0,
             blue: 0,

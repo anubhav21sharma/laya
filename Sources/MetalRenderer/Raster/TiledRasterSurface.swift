@@ -1000,6 +1000,7 @@ public final class TiledRasterSurface: RasterSurface, @unchecked Sendable {
     func makeProvisionalBindings(
         for lease: PaintTileLease,
         coordinates: [PaintTileCoordinate],
+        modifiedCoordinates: [PaintTileCoordinate]? = nil,
         workspace: PaintTileProvisionalWorkspace
     ) throws -> PaintTileProvisionalReservation {
         guard referenceView == nil else {
@@ -1017,6 +1018,7 @@ public final class TiledRasterSurface: RasterSurface, @unchecked Sendable {
                 surfaceID: surfaceID,
                 currentGeneration: currentGeneration,
                 coordinates: coordinates,
+                modifiedCoordinates: modifiedCoordinates ?? coordinates,
                 workspace: workspace
             )
         }

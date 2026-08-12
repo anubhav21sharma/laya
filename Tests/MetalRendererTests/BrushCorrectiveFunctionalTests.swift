@@ -2,6 +2,7 @@ import BrushFormat
 import EditorCore
 import Foundation
 @testable import MetalRenderer
+@testable import MetalRendererDiagnostics
 import Metal
 import PatternEngine
 import Testing
@@ -365,7 +366,6 @@ struct BrushCorrectiveFunctionalTests {
                 nominalDiameter: 40,
                 alphaThreshold: 8
             )
-
             #expect(
                 measurement.changedPixelCount >= 128,
                 "\(trace.name) changed only \(measurement.changedPixelCount) pixels"

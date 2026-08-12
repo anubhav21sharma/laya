@@ -20,7 +20,6 @@ struct DepositionPipelineLibraryTests {
             key(usesSecondaryShape: true),
             key(usesPrimaryGrain: true),
             key(usesSecondaryGrain: true),
-            key(usesDestinationSampling: true),
         ]
 
         #expect(key() == baseline)
@@ -124,8 +123,7 @@ struct DepositionPipelineLibraryTests {
         edgeTreatment: BrushEdgeTreatment = .none,
         usesSecondaryShape: Bool = false,
         usesPrimaryGrain: Bool = false,
-        usesSecondaryGrain: Bool = false,
-        usesDestinationSampling: Bool = false
+        usesSecondaryGrain: Bool = false
     ) -> DepositionPipelineKey {
         DepositionPipelineKey(
             brush: BrushPipelineKey(
@@ -135,8 +133,7 @@ struct DepositionPipelineLibraryTests {
                 functionConstants: BrushFunctionConstants(
                     usesSecondaryShape: usesSecondaryShape,
                     usesGrain: usesPrimaryGrain,
-                    usesSecondaryGrain: usesSecondaryGrain,
-                    usesDestinationSampling: usesDestinationSampling
+                    usesSecondaryGrain: usesSecondaryGrain
                 )
             ),
             abiVersion: abiVersion,

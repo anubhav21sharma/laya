@@ -115,7 +115,7 @@ public enum StageFourAnchorDefinitions {
                 replayLimits: nil, seedPolicy: .perStroke, limits: limits,
                 performanceIntent: .realtime120,
                 compatibility: BrushCompatibilityMetadata(
-                    nativeFeatureVersion: 1, sourceSettingKeys: [],
+                    sourceSettingKeys: [],
                     requiredSemanticKeys: []
                 )
             )

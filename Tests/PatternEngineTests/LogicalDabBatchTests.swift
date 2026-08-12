@@ -3,6 +3,8 @@ import Testing
 
 private func logicalDab(
     ordinal: UInt64,
+    componentOrdinal: UInt8 = 0,
+    componentDabOrdinal: UInt64? = nil,
     isPredicted: Bool = false,
     brushToWorld: Affine2D = .identity,
     primaryGrainToWorld: Affine2D? = nil,
@@ -32,6 +34,8 @@ private func logicalDab(
         materialContribution: 1,
         sourceDistance: Float(ordinal),
         ordinal: ordinal,
+        componentOrdinal: componentOrdinal,
+        componentDabOrdinal: componentDabOrdinal ?? ordinal,
         isPredicted: isPredicted,
         secondaryColorMix: 0,
         primaryGrainToWorld: primaryGrainToWorld,
@@ -39,6 +43,30 @@ private func logicalDab(
         materialInputs: materialInputs,
         randomValues: randomValues
     )
+}
+
+@Test
+func batchKeepsGlobalContinuityWhileCarryingIndependentComponentIdentity() throws {
+    let secondary = logicalDab(
+        ordinal: 0,
+        componentOrdinal: 1,
+        componentDabOrdinal: 0
+    )
+    let primary = logicalDab(
+        ordinal: 1,
+        componentOrdinal: 0,
+        componentDabOrdinal: 0
+    )
+    let batch = try LogicalDabBatch(
+        seed: 73,
+        startingOrdinal: 0,
+        isPredicted: false,
+        dabs: [secondary, primary]
+    )
+
+    #expect(batch.ordinalRange == 0..<2)
+    #expect(batch.dabs.map(\.componentOrdinal) == [1, 0])
+    #expect(batch.dabs.map(\.componentDabOrdinal) == [0, 0])
 }
 
 @Test

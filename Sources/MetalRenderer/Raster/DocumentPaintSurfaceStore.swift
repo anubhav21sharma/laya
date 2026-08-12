@@ -311,6 +311,7 @@ struct StrokeTileSurfaceNamespaceLease: Sendable {
 
 enum DocumentPaintStrokeSurfaceError: Error, Equatable, Sendable {
     case store(PaintTileStoreError)
+    case residency(PaintTileResidencyError)
     case surface(TiledRasterSurfaceError)
     case unexpected(String)
     case foreignCapability
@@ -325,6 +326,9 @@ enum DocumentPaintStrokeSurfaceError: Error, Equatable, Sendable {
     static func wrapping(_ error: Error) -> Self {
         if let error = error as? Self { return error }
         if let error = error as? PaintTileStoreError { return .store(error) }
+        if let error = error as? PaintTileResidencyError {
+            return .residency(error)
+        }
         if let error = error as? TiledRasterSurfaceError {
             return .surface(error)
         }
@@ -350,6 +354,8 @@ struct DocumentPaintStrokeProvisionalBinding: @unchecked Sendable {
     let descriptor: PaintTileDescriptor
     let sourceTexture: any MTLTexture
     let candidateTexture: any MTLTexture
+    let sourceComponentCoverageTexture: (any MTLTexture)?
+    let candidateComponentCoverageTexture: any MTLTexture
     let sourceIsKnownClear: Bool
 }
 
@@ -483,6 +489,12 @@ final class DocumentPaintStrokeSurfaceCapability: @unchecked Sendable {
             residentByteCount: matching.reduce(into: 0) {
                 if $1.isResident {
                     $0 += PaintTileDescriptor.residentByteCount
+                }
+                if $1.hasComponentCoverageTexture {
+                    $0 += DepositionComponentCoverage.residentByteCount(
+                        width: PaintTileDescriptor.side,
+                        height: PaintTileDescriptor.side
+                    ) ?? 0
                 }
             },
             fullCanvasTextureCount: 0
@@ -652,6 +664,7 @@ final class DocumentPaintStrokeSurfaceCapability: @unchecked Sendable {
     func makeProvisionalBindings(
         frame: DocumentPaintStrokeFrameReservation,
         coordinates: [PaintTileCoordinate],
+        modifiedCoordinates: [PaintTileCoordinate]? = nil,
         workspace: PaintTileProvisionalWorkspace
     ) throws -> DocumentPaintStrokeProvisionalReservation {
         try withLock {
@@ -661,6 +674,7 @@ final class DocumentPaintStrokeSurfaceCapability: @unchecked Sendable {
             let raw = try surface.makeProvisionalBindings(
                 for: lease,
                 coordinates: coordinates,
+                modifiedCoordinates: modifiedCoordinates ?? coordinates,
                 workspace: workspace
             )
             let token = UUID()
@@ -1025,6 +1039,10 @@ final class DocumentPaintStrokeSurfaceCapability: @unchecked Sendable {
                 descriptor: $0.descriptor,
                 sourceTexture: $0.sourceTexture,
                 candidateTexture: $0.candidateTexture,
+                sourceComponentCoverageTexture:
+                    $0.sourceComponentCoverageTexture,
+                candidateComponentCoverageTexture:
+                    $0.candidateComponentCoverageTexture,
                 sourceIsKnownClear: $0.sourceIsKnownClear
             ))
         }
@@ -1645,7 +1663,7 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         generation: UInt64 = 0
     ) throws {
         let (transferHeadroom, multiplicationOverflow) = byteBudget
-            .multipliedReportingOverflow(by: 3)
+            .multipliedReportingOverflow(by: 4)
         let (transferByteCapacity, additionOverflow) = transferHeadroom
             .addingReportingOverflow(PaintTileDescriptor.residentByteCount)
         guard !multiplicationOverflow, !additionOverflow else {

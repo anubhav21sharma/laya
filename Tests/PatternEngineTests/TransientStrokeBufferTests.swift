@@ -147,7 +147,7 @@ func zeroDabDirectionalBeginRemainsAReplayStateTransition() throws {
     let begin = transientSample(0, capabilities: [])
     let beforeBegin = generator
     var beginDabs: [DabAttributes] = []
-    generator.begin(begin) { beginDabs.append($0) }
+    generator.consumeCurrentSample(begin) { beginDabs.append($0) }
     let afterBegin = generator
     #expect(beginDabs.isEmpty)
 
@@ -168,7 +168,7 @@ func zeroDabDirectionalBeginRemainsAReplayStateTransition() throws {
 
     let moved = transientSample(10, capabilities: [])
     var movedDabs: [DabAttributes] = []
-    try generator.append(
+    try generator.consumeCurrentSample(
         moved,
         maximumPathSubdivisionCount: 4_096
     ) { movedDabs.append($0) }
@@ -255,17 +255,15 @@ func directSettlementAdvancesBoundaryBeforeFirstRetainedEstimate() throws {
     #expect(plan.generatorBeforeReplacement == settledGenerator)
 }
 
-private func declaredReplayRecipe(
-    id: String,
+private func declaredReplayContract(
     mode: BrushReplayMode = .replayTail,
     maximumSamples: Int,
     maximumDabs: Int,
     maximumProjectedInstances: Int
-) throws -> BrushRecipe {
-    try BrushRecipe(
-        id: BrushRecipeID(id),
-        replayMode: mode,
-        replayLimits: BrushReplayLimits(
+) -> BrushReplayContract {
+    BrushReplayContract(
+        mode: mode,
+        limits: BrushReplayLimits(
             maximumSamples: maximumSamples,
             maximumDabs: maximumDabs,
             maximumProjectedInstances: maximumProjectedInstances
@@ -283,51 +281,42 @@ private func transientBuffer(
         limits = nil
     case .replayTail:
         limits = BrushRecipePolicy.replayTailLimits
-    case .boundedWholeStroke:
-        limits = BrushRecipePolicy.wholeStrokeLimits
     }
-    let recipe = try! BrushRecipe(
-        id: BrushRecipeID("test.buffer.\(mode)"),
-        replayMode: mode,
-        replayLimits: limits
-    )
     return TransientStrokeBuffer(
-        replayContract: recipe.replayContract,
+        replayContract: BrushReplayContract(mode: mode, limits: limits),
         initialGeneratorSnapshot: initialGeneratorSnapshot
     )
 }
 
 @Test
 func replayTailEnforcesTheRecipeDeclaredSampleLimit() throws {
-    let recipe = try declaredReplayRecipe(
-        id: "test.buffer.declared-samples",
+    let contract = declaredReplayContract(
         maximumSamples: 2,
         maximumDabs: 100,
         maximumProjectedInstances: 100
     )
     var buffer = TransientStrokeBuffer(
-        replayContract: recipe.replayContract
+        replayContract: contract
     )
 
     _ = buffer.appendActual(transientChunk(0, dabCount: 0))
     _ = buffer.appendActual(transientChunk(1, dabCount: 0))
     let update = buffer.appendActual(transientChunk(2, dabCount: 0))
 
-    #expect(buffer.replayContract == recipe.replayContract)
+    #expect(buffer.replayContract == contract)
     #expect(buffer.actualSampleCount == 2)
     #expect(update.settledPrefix.map(\.sample.position.x) == [0])
 }
 
 @Test
 func replayTailEnforcesTheRecipeDeclaredDabLimit() throws {
-    let recipe = try declaredReplayRecipe(
-        id: "test.buffer.declared-dabs",
+    let contract = declaredReplayContract(
         maximumSamples: 100,
         maximumDabs: 3,
         maximumProjectedInstances: 100
     )
     var buffer = TransientStrokeBuffer(
-        replayContract: recipe.replayContract
+        replayContract: contract
     )
 
     _ = buffer.appendActual(transientChunk(0, dabCount: 2))
@@ -339,14 +328,13 @@ func replayTailEnforcesTheRecipeDeclaredDabLimit() throws {
 
 @Test
 func replayTailEnforcesTheRecipeDeclaredProjectedInstanceLimit() throws {
-    let recipe = try declaredReplayRecipe(
-        id: "test.buffer.declared-projected",
+    let contract = declaredReplayContract(
         maximumSamples: 100,
         maximumDabs: 100,
         maximumProjectedInstances: 5
     )
     var buffer = TransientStrokeBuffer(
-        replayContract: recipe.replayContract
+        replayContract: contract
     )
 
     _ = buffer.appendActual(
@@ -445,80 +433,6 @@ func replayTailEnforcesTheSampleAndDabCapsByOldestWholeChunk() {
     #expect(dabBound.actualDabCount == 2_046)
     #expect(promotedDabs == 154)
     #expect(dabBound.actualSamples.first?.position.x == 14)
-}
-
-@Test
-func wholeStrokeDegradesAtItsCapsAndPromotesDeterministicPrefix() {
-    var first = transientBuffer(mode: .boundedWholeStroke)
-    var second = transientBuffer(mode: .boundedWholeStroke)
-    var firstLast = TransientStrokeBufferUpdate.noChange
-    var secondLast = TransientStrokeBufferUpdate.noChange
-
-    for index in 0...TransientStrokeBufferContract.wholeStrokeSampleCapacity {
-        let chunk = transientChunk(index, projectedInstancesPerDab: 0)
-        firstLast = first.appendActual(chunk)
-        secondLast = second.appendActual(chunk)
-    }
-
-    #expect(first == second)
-    #expect(firstLast == secondLast)
-    #expect(first.mode == .replayTail)
-    #expect(first.degradationReason == .wholeStrokeCapacity)
-    #expect(first.degradationCount == 1)
-    #expect(first.actualSampleCount == 256)
-    #expect(first.actualDabCount == 256)
-    #expect(first.actualSamples.first?.position.x == 3_841)
-    #expect(firstLast.settledPrefix.count == 3_841)
-    #expect(first.settledPrefixPromotionCount == 1)
-}
-
-@Test
-func wholeStrokeAcceptsExactly4096DabsThenDegradesOnTheNext() {
-    var buffer = transientBuffer(mode: .boundedWholeStroke)
-    _ = buffer.appendActual(
-        transientChunk(
-            0,
-            dabCount: TransientStrokeBufferContract.wholeStrokeDabCapacity,
-            projectedInstancesPerDab: 0
-        )
-    )
-
-    #expect(buffer.mode == .boundedWholeStroke)
-    #expect(buffer.actualDabCount == 4_096)
-
-    let update = buffer.appendActual(
-        transientChunk(1, projectedInstancesPerDab: 0)
-    )
-
-    #expect(buffer.mode == .replayTail)
-    #expect(buffer.degradationReason == .wholeStrokeCapacity)
-    #expect(update.settledPrefix.map(\.sample.position.x) == [0])
-    #expect(buffer.actualDabCount == 1)
-}
-
-@Test
-func visibleEpochProjectedInstanceCapDegradesAndShortensReplay() {
-    var buffer = transientBuffer(mode: .boundedWholeStroke)
-    _ = buffer.appendActual(
-        transientChunk(0, projectedInstancesPerDab: 2_048)
-    )
-    _ = buffer.appendActual(
-        transientChunk(1, projectedInstancesPerDab: 2_048)
-    )
-    #expect(buffer.mode == .boundedWholeStroke)
-    #expect(buffer.visibleProjectedInstanceCount == 4_096)
-
-    let update = buffer.appendActual(
-        transientChunk(2, projectedInstancesPerDab: 1)
-    )
-
-    #expect(buffer.mode == .replayTail)
-    #expect(buffer.degradationReason == .projectedInstanceCapacity)
-    #expect(update.settledPrefix.map(\.sample.position.x) == [0])
-    #expect(buffer.visibleProjectedInstanceCount == 2_049)
-    #expect(buffer.visibleProjectedInstanceCount <= 4_096)
-    #expect(buffer.replayWindowShorteningCount == 1)
-    #expect(update.replayWindowShortened)
 }
 
 @Test
@@ -671,6 +585,108 @@ func estimatedUpdatePlansAuthoritativeSuffixAndPreservesIdentity() throws {
     #expect(plan.mergedSample.estimationUpdateIndex == 7)
     #expect(plan.mergedSample.estimatedProperties.isEmpty)
     #expect(plan.samplesToReplay == [buffer.actualSamples[2]])
+}
+
+@Test
+func compositeEstimatedReplayRebuildsBothComponentsFromOneSnapshot()
+    throws
+{
+    let limits = BrushReplayLimits(
+        maximumSamples: 8,
+        maximumDabs: 64,
+        maximumProjectedInstances: 256
+    )
+    let program = try independentCompositeProgram(
+        id: "test.buffer.composite-estimated-replay",
+        replayMode: .replayTail,
+        replayLimits: limits
+    )
+    let initial = BrushStrokeGenerator(
+        program: program,
+        nominalDiameter: 20,
+        color: .black,
+        seed: 0xC1_18_09
+    )
+    func generatedChunk(
+        _ sample: WorldStrokeSample,
+        generator: inout BrushStrokeGenerator
+    ) throws -> TransientStrokeChunk {
+        let dabs = try generator.currentSampleDabs(sample).map {
+            TransientStrokeDab(attributes: $0, projectedInstanceCount: 1)
+        }
+        return TransientStrokeChunk(
+            sample: sample,
+            dabs: dabs,
+            generatorSnapshotAfterSample: generator,
+            inputDeriverSnapshotBeforeSample: BrushInputDeriver()
+        )
+    }
+
+    let estimated = transientSample(
+        0,
+        estimationUpdateIndex: 1809,
+        estimatedProperties: [.pressure],
+        expecting: [.pressure],
+        pressure: 0.2
+    )
+    let suffix = transientSample(5, pressure: 0.2)
+    var original = initial
+    let estimatedChunk = try generatedChunk(
+        estimated,
+        generator: &original
+    )
+    let suffixChunk = try generatedChunk(suffix, generator: &original)
+    var buffer = transientBuffer(
+        mode: .replayTail,
+        initialGeneratorSnapshot: initial
+    )
+    _ = buffer.appendActual(estimatedChunk)
+    _ = buffer.appendActual(suffixChunk)
+
+    let update = transientSample(
+        99,
+        kind: .estimatedUpdate,
+        estimationUpdateIndex: 1809,
+        estimatedProperties: [.pressure],
+        pressure: 0.9
+    )
+    let plan = try buffer.planEstimatedUpdate(update)
+    #expect(plan.generatorBeforeReplacement == initial)
+    #expect(plan.samplesToReplay == [suffix])
+
+    var replayedGenerator = try #require(
+        plan.generatorBeforeReplacement
+    )
+    var rebuilt: [TransientStrokeChunk] = []
+    for sample in [plan.mergedSample] + plan.samplesToReplay {
+        rebuilt.append(try generatedChunk(
+            sample,
+            generator: &replayedGenerator
+        ))
+    }
+    let replayedDabs = rebuilt.flatMap { Array($0.dabs) }
+    #expect(Set(replayedDabs.map(\.attributes.componentOrdinal)) == [0, 1])
+    #expect(
+        replayedDabs.map(\.attributes.ordinal)
+            == Array(0..<UInt64(replayedDabs.count))
+    )
+    #expect(
+        replayedDabs.filter { $0.attributes.componentOrdinal == 1 }
+            .map(\.attributes.componentDabOrdinal)
+            == Array(0..<UInt64(replayedDabs.filter {
+                $0.attributes.componentOrdinal == 1
+            }.count))
+    )
+
+    _ = try buffer.replaceEstimatedSuffix(using: plan, with: rebuilt)
+    #expect(buffer.authoritativeGeneratorSnapshot == replayedGenerator)
+
+    var baseline = initial
+    let baselineChunks = try ([plan.mergedSample] + plan.samplesToReplay).map {
+        try generatedChunk($0, generator: &baseline)
+    }
+    #expect(rebuilt == baselineChunks)
+    #expect(replayedGenerator == baseline)
 }
 
 @Test
@@ -1284,14 +1300,13 @@ func estimatedUpdateFlagsCanOnlyResolveExistingProperties() throws {
 
 @Test
 func estimatedReplacementCapacityFailureRollsBackEveryField() throws {
-    let recipe = try declaredReplayRecipe(
-        id: "test.buffer.estimated-capacity",
+    let contract = declaredReplayContract(
         maximumSamples: 2,
         maximumDabs: 1,
         maximumProjectedInstances: 10
     )
     var buffer = TransientStrokeBuffer(
-        replayContract: recipe.replayContract
+        replayContract: contract
     )
     _ = buffer.appendActual(
         estimatedTransientChunk(
@@ -1320,32 +1335,6 @@ func estimatedReplacementCapacityFailureRollsBackEveryField() throws {
         try buffer.replaceEstimatedSuffix(using: plan, with: [oversized])
     }
     #expect(buffer == before)
-}
-
-@Test
-func cancelRestoresRequestedModeAndClearsAllRuntimeState() {
-    var buffer = transientBuffer(mode: .boundedWholeStroke)
-    for index in 0...TransientStrokeBufferContract.wholeStrokeSampleCapacity {
-        _ = buffer.appendActual(
-            transientChunk(index, projectedInstancesPerDab: 0)
-        )
-    }
-    #expect(buffer.mode == .replayTail)
-
-    buffer.cancel()
-
-    #expect(buffer.mode == .boundedWholeStroke)
-    #expect(buffer.actualChunks.isEmpty)
-    #expect(buffer.predictedChunks.isEmpty)
-    #expect(buffer.replayEpoch == 0)
-    #expect(buffer.degradationReason == nil)
-    #expect(buffer.degradationCount == 0)
-    #expect(buffer.settledPrefixPromotionCount == 0)
-    #expect(buffer.replayWindowShorteningCount == 0)
-    #expect(buffer.authoritativeGeneratorSnapshot == nil)
-    #expect(buffer.predictedGeneratorSnapshot == nil)
-
-    requireSendable(buffer)
 }
 
 @Test
@@ -1522,7 +1511,7 @@ func arenaRetirementResumesWithoutScanningUnoccupiedCapacity() throws {
 }
 
 @Test
-func mixedLegacyAndResumableReservationsRollbackEveryOwnedSlot() throws {
+func mixedDirectAndResumableReservationsRollbackEveryOwnedSlot() throws {
     let arena = TransientStrokeDabArena()
     let transaction = try arena.beginTransaction(
         replacingPrediction: true

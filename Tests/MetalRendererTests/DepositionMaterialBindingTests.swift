@@ -105,6 +105,35 @@ struct DepositionMaterialBindingTests {
         )
     }
 
+    @Test
+    func analyticSoftRoundAndChiselUseDistinctTexturelessShaderKinds() throws {
+        let softRound = try DepositionMaterialBinding(
+            uniformTemplate: template(
+                shapes: [shape(.softRound, combination: .replace)],
+                grains: []
+            ),
+            textures: [:]
+        )
+        let chisel = try DepositionMaterialBinding(
+            uniformTemplate: template(
+                shapes: [shape(.chisel, combination: .replace)],
+                grains: []
+            ),
+            textures: [:]
+        )
+
+        #expect(softRound.textures.boundSlots.isEmpty)
+        #expect(chisel.textures.boundSlots.isEmpty)
+        #expect(
+            softRound.uniforms.options.z
+                == PatternDepositionShapeKindSoftRound
+        )
+        #expect(
+            chisel.uniforms.options.z
+                == PatternDepositionShapeKindRectangle
+        )
+    }
+
     private func template(
         shapes: [BrushShapeLayerDefinition],
         grains: [BrushGrainLayerDefinition]

@@ -13,25 +13,28 @@ struct SyntheticV1BrushMapperTests {
         let document = try syntheticDocument()
         let result = try SyntheticV1BrushMapper().map(document)
         let definition = result.package.definition
+        let component = definition.components[0]
 
-        #expect(definition.schemaVersion == 1)
+        #expect(
+            definition.schemaVersion == BrushDefinition.currentSchemaVersion
+        )
         #expect(definition.compatibility.sourceSettingKeys == SyntheticV1SemanticKeys.dry)
         #expect(definition.compatibility.requiredSemanticKeys == [])
-        #expect(definition.coverage.shapes[0].shape == .asset("shape.synthetic"))
-        #expect(definition.coverage.grains[0].grain == .asset("grain.synthetic"))
-        #expect(definition.placement.baseSpacingFraction == 0.125)
-        #expect(definition.placement.maximumSpacingFraction == 0.375)
-        #expect(definition.placement.baseFlow == 0.625)
-        #expect(definition.placement.strokeOpacity == 0.75)
-        #expect(definition.placement.baseScatterFraction == 0.25)
-        #expect(abs(definition.placement.baseRotation - (.pi / 2)) < 0.000_001)
-        #expect(definition.material.accumulation == .uniformGlaze)
-        #expect(definition.dynamics.size.input == .pressure)
-        #expect(definition.dynamics.size.response == .linear)
-        #expect(definition.dynamics.size.offset == 0.25)
-        #expect(definition.dynamics.size.scale == 0.75)
-        #expect(definition.dynamics.size.lowerClamp == 0.25)
-        #expect(definition.dynamics.size.upperClamp == 1)
+        #expect(component.coverage.shapes[0].shape == .asset("shape.synthetic"))
+        #expect(component.coverage.grains[0].grain == .asset("grain.synthetic"))
+        #expect(component.placement.baseSpacingFraction == 0.125)
+        #expect(component.placement.maximumSpacingFraction == 0.375)
+        #expect(component.placement.baseFlow == 0.625)
+        #expect(component.placement.strokeOpacity == 0.75)
+        #expect(component.placement.baseScatterFraction == 0.25)
+        #expect(abs(component.placement.baseRotation - (.pi / 2)) < 0.000_001)
+        #expect(component.material.accumulation == .uniformGlaze)
+        #expect(component.dynamics.size.input == .pressure)
+        #expect(component.dynamics.size.response == .linear)
+        #expect(component.dynamics.size.offset == 0.25)
+        #expect(component.dynamics.size.scale == 0.75)
+        #expect(component.dynamics.size.lowerClamp == 0.25)
+        #expect(component.dynamics.size.upperClamp == 1)
 
         let report = result.report
         #expect(report.entries.map(\.sourceSemanticKey) == SyntheticV1SemanticKeys.dry)
@@ -44,7 +47,10 @@ struct SyntheticV1BrushMapperTests {
                 $0.sourceSemanticKey
                     == SyntheticV1SemanticKeys.accumulation
             }?.nativeSemanticKeys
-                == ["material.accumulation", "material.edgeTreatment"]
+                == [
+                    "components[0].material.accumulation",
+                    "components[0].material.edgeTreatment",
+                ]
         )
         let packageHash = try result.package.contentHash
         #expect(report.targetPackageContentHash == packageHash)
@@ -57,58 +63,15 @@ struct SyntheticV1BrushMapperTests {
     }
 
     @Test
-    func retainsUnsupportedWetAndRoundTripsWithoutClaimingAMapping() throws {
-        let result = try SyntheticV1BrushMapper().map(
-            syntheticDocument(includeWet: true)
-        )
-
-        #expect(
-            result.package.definition.compatibility.sourceSettingKeys
-                == SyntheticV1SemanticKeys.all
-        )
-        #expect(
-            result.package.definition.compatibility.requiredSemanticKeys
-                == [SyntheticV1SemanticKeys.wet]
-        )
-        #expect(result.package.definition.material.interaction == .wetMix)
-        #expect(
-            result.package.definition.capabilities
-                == [
-                    BrushCapabilityDeclaration(
-                        identifier: BrushCapability.wetMix.rawValue,
-                        required: true
-                    ),
-                ]
-        )
-        #expect(
-            result.package.definition.material.interactionParameters != nil
-        )
-        let wet = try #require(
-            result.report.entries.first {
-                $0.sourceSemanticKey == SyntheticV1SemanticKeys.wet
-            }
-        )
-        #expect(wet.disposition == .unsupported)
-        #expect(
-            wet.nativeSemanticKeys
-                == [
-                    "capabilities",
-                    "material.interaction",
-                    "material.interactionParameters",
-                ]
-        )
-        #expect(wet.targetSummary != nil)
-        #expect(wet.requiredForFaithfulRendering)
-        #expect(result.report.summary.unsupported == 1)
-
-        let decoded = try BrushPackageCodec.decode(
-            BrushPackageCodec.encode(result.package)
-        )
-        #expect(decoded == result.package)
-        #expect(
-            decoded.definition.compatibility.requiredSemanticKeys
-                == [SyntheticV1SemanticKeys.wet]
-        )
+    func rejectsWetIntentAtTheNativeSchemaThreeBoundary() throws {
+        #expect(throws: SyntheticV1MappingError.invalidSetting(
+            key: SyntheticV1SemanticKeys.wet,
+            reason: "unsupported-by-native-schema-3"
+        )) {
+            try SyntheticV1BrushMapper().map(
+                syntheticDocument(includeWet: true)
+            )
+        }
     }
 
     @Test
@@ -121,6 +84,40 @@ struct SyntheticV1BrushMapperTests {
         #expect(
             try BrushPackageCodec.encode(first.package)
                 == BrushPackageCodec.encode(second.package)
+        )
+    }
+
+    @Test
+    func boundedWashTokenRemainsForeignMaterialInputNotANativeRecipeID()
+        throws
+    {
+        let setting = try syntheticSetting(
+            SyntheticV1SemanticKeys.accumulation,
+            domain: .token,
+            value: .token("bounded-wash")
+        )
+        let document = try syntheticDocument(
+            replacing: SyntheticV1SemanticKeys.accumulation,
+            with: setting
+        )
+        let result = try SyntheticV1BrushMapper().map(document)
+
+        #expect(
+            document.ir.settings.first {
+                $0.semanticKey == SyntheticV1SemanticKeys.accumulation
+            }?.value == .token("bounded-wash")
+        )
+        #expect(result.package.definition.id.rawValue.hasPrefix(
+            "converted.synthetic."
+        ))
+        #expect(result.package.definition.id.rawValue != "builtin.bounded-wash")
+        #expect(
+            result.package.definition.components[0].material.accumulation
+                == .flow
+        )
+        #expect(
+            result.package.definition.components[0].material.edgeTreatment
+                == .wetConcentration
         )
     }
 
@@ -190,11 +187,13 @@ struct SyntheticV1BrushMapperTests {
             )
         )
         #expect(
-            wideSpacing.package.definition.placement.baseSpacingFraction
+            wideSpacing.package.definition.components[0].placement
+                .baseSpacingFraction
                 == 1.25
         )
         #expect(
-            wideSpacing.package.definition.placement.maximumSpacingFraction
+            wideSpacing.package.definition.components[0].placement
+                .maximumSpacingFraction
                 == 3.5
         )
 

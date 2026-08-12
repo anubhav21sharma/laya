@@ -87,12 +87,14 @@ public struct LogicalDab: Equatable, Sendable {
     public let grainRotation: Float
     public let color: InkColor
     public let colorAdjustment: BrushColorAdjustment
-    /// Native secondary-color blend amount. Legacy brushes leave this neutral.
+    /// Native secondary-color blend amount. Zero leaves this channel neutral.
     public let secondaryColorMix: Float
     public let materialFamily: BrushMaterialFamily
     public let materialContribution: Float
     public let sourceDistance: Float
     public let ordinal: UInt64
+    public let componentOrdinal: UInt8
+    public let componentDabOrdinal: UInt64
     public let isPredicted: Bool
     public let primaryGrainToWorld: Affine2D?
     public let secondaryGrainToWorld: Affine2D?
@@ -147,6 +149,69 @@ public struct LogicalDab: Equatable, Sendable {
             materialContribution: materialContribution,
             sourceDistance: sourceDistance,
             ordinal: ordinal,
+            componentOrdinal: 0,
+            componentDabOrdinal: ordinal,
+            isPredicted: isPredicted,
+            secondaryColorMix: secondaryColorMix,
+            primaryGrainToWorld: primaryGrainToWorld,
+            secondaryGrainToWorld: secondaryGrainToWorld,
+            materialInputs: materialInputs,
+            randomValues: randomValues,
+            secondaryShapeToWorld: nil
+        )
+    }
+
+    public init(
+        position: WorldPoint,
+        brushToWorld: Affine2D,
+        radius: Float,
+        diameter: Float,
+        spacing: Float,
+        flow: Float,
+        strokeOpacity: Float,
+        rotation: Float,
+        scatter: SIMD2<Float>,
+        hardness: Float,
+        grainOffset: SIMD2<Float>,
+        grainScale: Float,
+        grainRotation: Float,
+        color: InkColor,
+        colorAdjustment: BrushColorAdjustment,
+        materialFamily: BrushMaterialFamily,
+        materialContribution: Float,
+        sourceDistance: Float,
+        ordinal: UInt64,
+        componentOrdinal: UInt8,
+        componentDabOrdinal: UInt64,
+        isPredicted: Bool,
+        secondaryColorMix: Float = 0,
+        primaryGrainToWorld: Affine2D? = nil,
+        secondaryGrainToWorld: Affine2D? = nil,
+        materialInputs: BrushMaterialInputs = .neutral,
+        randomValues: BrushLogicalRandomValues = .neutral
+    ) {
+        self.init(
+            position: position,
+            brushToWorld: brushToWorld,
+            radius: radius,
+            diameter: diameter,
+            spacing: spacing,
+            flow: flow,
+            strokeOpacity: strokeOpacity,
+            rotation: rotation,
+            scatter: scatter,
+            hardness: hardness,
+            grainOffset: grainOffset,
+            grainScale: grainScale,
+            grainRotation: grainRotation,
+            color: color,
+            colorAdjustment: colorAdjustment,
+            materialFamily: materialFamily,
+            materialContribution: materialContribution,
+            sourceDistance: sourceDistance,
+            ordinal: ordinal,
+            componentOrdinal: componentOrdinal,
+            componentDabOrdinal: componentDabOrdinal,
             isPredicted: isPredicted,
             secondaryColorMix: secondaryColorMix,
             primaryGrainToWorld: primaryGrainToWorld,
@@ -177,6 +242,8 @@ public struct LogicalDab: Equatable, Sendable {
         materialContribution: Float,
         sourceDistance: Float,
         ordinal: UInt64,
+        componentOrdinal: UInt8 = 0,
+        componentDabOrdinal: UInt64? = nil,
         isPredicted: Bool,
         secondaryColorMix: Float,
         primaryGrainToWorld: Affine2D?,
@@ -205,6 +272,8 @@ public struct LogicalDab: Equatable, Sendable {
         self.materialContribution = materialContribution
         self.sourceDistance = sourceDistance
         self.ordinal = ordinal
+        self.componentOrdinal = componentOrdinal
+        self.componentDabOrdinal = componentDabOrdinal ?? ordinal
         self.isPredicted = isPredicted
         self.primaryGrainToWorld = primaryGrainToWorld
         self.secondaryGrainToWorld = secondaryGrainToWorld
@@ -219,6 +288,57 @@ public struct LogicalDab: Equatable, Sendable {
 
     public var flowContribution: Float { flow }
     public var strokeOpacityContribution: Float { strokeOpacity }
+
+    func assigningIdentity(
+        ordinal: UInt64,
+        componentOrdinal: UInt8,
+        componentDabOrdinal: UInt64
+    ) -> LogicalDab {
+        var copy = self
+        copy = LogicalDab(
+            copying: copy,
+            ordinal: ordinal,
+            componentOrdinal: componentOrdinal,
+            componentDabOrdinal: componentDabOrdinal
+        )
+        return copy
+    }
+
+    private init(
+        copying dab: LogicalDab,
+        ordinal: UInt64,
+        componentOrdinal: UInt8,
+        componentDabOrdinal: UInt64
+    ) {
+        position = dab.position
+        brushToWorld = dab.brushToWorld
+        radius = dab.radius
+        diameter = dab.diameter
+        spacing = dab.spacing
+        flow = dab.flow
+        strokeOpacity = dab.strokeOpacity
+        rotation = dab.rotation
+        scatter = dab.scatter
+        hardness = dab.hardness
+        grainOffset = dab.grainOffset
+        grainScale = dab.grainScale
+        grainRotation = dab.grainRotation
+        color = dab.color
+        colorAdjustment = dab.colorAdjustment
+        secondaryColorMix = dab.secondaryColorMix
+        materialFamily = dab.materialFamily
+        materialContribution = dab.materialContribution
+        sourceDistance = dab.sourceDistance
+        self.ordinal = ordinal
+        self.componentOrdinal = componentOrdinal
+        self.componentDabOrdinal = componentDabOrdinal
+        isPredicted = dab.isPredicted
+        primaryGrainToWorld = dab.primaryGrainToWorld
+        secondaryGrainToWorld = dab.secondaryGrainToWorld
+        materialInputs = dab.materialInputs
+        randomValues = dab.randomValues
+        worldBounds = dab.worldBounds
+    }
 
     var hasFiniteBatchValues: Bool {
         position.x.isFinite
@@ -306,6 +426,11 @@ public struct LogicalDab: Equatable, Sendable {
 
 public typealias DabAttributes = LogicalDab
 
+struct BrushCursorDynamicsEvaluation: Sendable {
+    let dab: LogicalDab
+    let maximumPlacementOffset: Float
+}
+
 /// Pure, renderer-free evaluation of one attributed path point.
 public struct BrushDynamicsEngine: Sendable {
     public init() {}
@@ -317,36 +442,175 @@ public struct BrushDynamicsEngine: Sendable {
         random: BrushRandomValues,
         strokeSeed: UInt64
     ) -> DabAttributes {
+        evaluate(
+            sample: sample,
+            context: context,
+            program: program,
+            component: program.primaryComponent,
+            random: random,
+            strokeSeed: strokeSeed
+        )
+    }
+
+    func evaluate(
+        sample: InterpolatedStrokeSample,
+        context: BrushStrokeContext,
+        program: BrushProgram,
+        component: BrushComponentProgram,
+        random: BrushRandomValues,
+        strokeSeed: UInt64
+    ) -> DabAttributes {
         let dynamics = evaluatedDynamics(
             sample: sample,
             context: context,
             program: program,
+            component: component,
             strokeSeed: strokeSeed,
         )
         return evaluateNative(
             sample: sample,
             context: context,
             program: program,
+            component: component,
             random: random,
             strokeSeed: strokeSeed,
-            evaluatedDynamics: dynamics
+            evaluatedDynamics: dynamics,
+            placementJitterOverride: nil
         )
+    }
+
+    func evaluateCursor(
+        sample: InterpolatedStrokeSample,
+        context: BrushStrokeContext,
+        program: BrushProgram
+    ) -> BrushCursorDynamicsEvaluation {
+        evaluateCursor(
+            sample: sample,
+            context: context,
+            program: program,
+            component: program.primaryComponent
+        )
+    }
+
+    func evaluateCursor(
+        sample: InterpolatedStrokeSample,
+        context: BrushStrokeContext,
+        program: BrushProgram,
+        component: BrushComponentProgram
+    ) -> BrushCursorDynamicsEvaluation {
+        let strokeSeed: UInt64 = 1
+        let dynamics = evaluatedDynamics(
+            sample: sample,
+            context: context,
+            program: program,
+            component: component,
+            strokeSeed: strokeSeed
+        )
+        let definition = component.definition
+        let maximumScatterFactor = conservativeScatterUpperBound(
+            component.stageC.compiledSensorProgram.scatter
+        )
+        let maximumScatter = context.nominalDiameter
+            * definition.placement.baseScatterFraction
+            * maximumScatterFactor
+            * definition.dynamics.randomization.scatter
+        let maximumJitter = context.nominalDiameter
+            * definition.placement.baseJitterFraction
+        return BrushCursorDynamicsEvaluation(
+            dab: evaluateNative(
+                sample: sample,
+                context: context,
+                program: program,
+                component: component,
+                random: .centered,
+                strokeSeed: strokeSeed,
+                evaluatedDynamics: dynamics,
+                placementJitterOverride: .zero
+            ),
+            maximumPlacementOffset: maximumScatter + maximumJitter
+        )
+    }
+
+    private func conservativeScatterUpperBound(
+        _ program: CompiledBrushOutputProgram
+    ) -> Float {
+        var interval = (
+            lower: Double(program.baseValue),
+            upper: Double(program.baseValue)
+        )
+        if let term = program.term0 {
+            interval = conservativeInterval(after: interval, term: term)
+        }
+        if let term = program.term1 {
+            interval = conservativeInterval(after: interval, term: term)
+        }
+        if let term = program.term2 {
+            interval = conservativeInterval(after: interval, term: term)
+        }
+        if let term = program.term3 {
+            interval = conservativeInterval(after: interval, term: term)
+        }
+        return contractedOrderedValue(
+            interval.upper,
+            output: .scatter,
+            maximumOpacity: 1
+        )
+    }
+
+    private func conservativeInterval(
+        after accumulator: (lower: Double, upper: Double),
+        term: CompiledBrushSensorTerm
+    ) -> (lower: Double, upper: Double) {
+        let termInterval = (
+            lower: Double(term.responseLowerClamp),
+            upper: Double(term.responseUpperClamp)
+        )
+        switch term.operation {
+        case .replace:
+            return termInterval
+        case .add:
+            return (
+                accumulator.lower + termInterval.lower,
+                accumulator.upper + termInterval.upper
+            )
+        case .multiply:
+            let first = accumulator.lower * termInterval.lower
+            let second = accumulator.lower * termInterval.upper
+            let third = accumulator.upper * termInterval.lower
+            let fourth = accumulator.upper * termInterval.upper
+            return (
+                min(min(first, second), min(third, fourth)),
+                max(max(first, second), max(third, fourth))
+            )
+        case .minimum:
+            return (
+                min(accumulator.lower, termInterval.lower),
+                min(accumulator.upper, termInterval.upper)
+            )
+        case .maximum:
+            return (
+                max(accumulator.lower, termInterval.lower),
+                max(accumulator.upper, termInterval.upper)
+            )
+        }
     }
 
     private func evaluateNative(
         sample: InterpolatedStrokeSample,
         context: BrushStrokeContext,
         program: BrushProgram,
+        component: BrushComponentProgram,
         random: BrushRandomValues,
         strokeSeed: UInt64,
-        evaluatedDynamics: BrushOrderedDynamicValues
+        evaluatedDynamics: BrushOrderedDynamicValues,
+        placementJitterOverride: SIMD2<Float>?
     ) -> DabAttributes {
-        let definition = program.definition
+        let definition = component.definition
         let sizeFactor = evaluatedDynamics.size
         let taperEnvelope = taperEnvelope(
             context: context,
             taper: definition.taper,
-            includesEndTaper: program.termination.isLegacySchemaV1EndTaper
+            includesEndTaper: false
         )
         let sizeTaper = definition.taper.effects.contains(.size)
             ? interpolate(from: definition.taper.minimumSize, to: 1, fraction: taperEnvelope)
@@ -377,18 +641,18 @@ public struct BrushDynamicsEngine: Sendable {
             symmetric(random.scatterX) * maximumScatter,
             symmetric(random.scatterY) * maximumScatter
         )
-        let offsetScale: Float = program.stageC == nil
-            ? 1 : context.nominalDiameter
+        let offsetScale = context.nominalDiameter
         let offset = SIMD2(
             evaluatedDynamics.offsetX * offsetScale,
             evaluatedDynamics.offsetY * offsetScale
         ) + definition.placement.baseOffset
-        let placementJitter = nativePlacementJitter(
-            fraction: definition.placement.baseJitterFraction,
-            nominalDiameter: context.nominalDiameter,
-            strokeSeed: strokeSeed,
-            ordinal: context.ordinal
-        )
+        let placementJitter = placementJitterOverride
+            ?? nativePlacementJitter(
+                fraction: definition.placement.baseJitterFraction,
+                nominalDiameter: context.nominalDiameter,
+                strokeSeed: strokeSeed,
+                ordinal: context.ordinal
+            )
         let position = WorldPoint(sample.position.simd + scatter + offset + placementJitter)
         let cosine = cos(rotation)
         let sine = sin(rotation)
@@ -425,8 +689,8 @@ public struct BrushDynamicsEngine: Sendable {
         let secondaryShapeToWorld =
             secondaryShape?.concatenating(tipToWorld)
         let spacing: Float
-        if let stageC = program.stageC {
-            do {
+        let stageC = component.stageC
+        do {
                 let primary = try BrushTipSupportLayer(
                     definition: stageC.tipSupports[0],
                     xAxis: primarySupportFrame.xAxis,
@@ -470,20 +734,10 @@ public struct BrushDynamicsEngine: Sendable {
                     throw BrushFootprintSpacingError.arithmeticOverflow
                 }
                 spacing = Float(carry)
-            } catch {
-                preconditionFailure(
-                    "Validated schema-v2 footprint spacing failed: \(error)"
-                )
-            }
-        } else {
-            let randomizedSpacing = diameter
-                * definition.placement.baseSpacingFraction
-                * dynamicSpacing
-            let spacingUpperBound = max(
-                1,
-                min(8, diameter * definition.placement.maximumSpacingFraction)
+        } catch {
+            preconditionFailure(
+                "Validated schema-v2 footprint spacing failed: \(error)"
             )
-            spacing = min(spacingUpperBound, max(1, randomizedSpacing))
         }
         let hardness = clamp01(
             definition.coverage.baseHardness
@@ -583,134 +837,6 @@ public struct BrushDynamicsEngine: Sendable {
         )
     }
 
-    /// Exact schema-v1 compatibility behavior. Native causal programs cannot
-    /// enter this path because only the legacy adapter can produce the
-    /// corresponding compiled termination case.
-    public func applyingLegacySchemaV1EndTaper(
-        _ dab: DabAttributes,
-        totalDistance: Float,
-        nominalDiameter: Float,
-        program: BrushProgram,
-        retainedReplayStartDistance: Float? = nil
-    ) -> DabAttributes {
-        guard case let .legacySchemaV1EndTaper(taper, _) =
-            program.termination
-        else {
-            return dab
-        }
-        return applyingLegacySchemaV1EndTaper(
-            dab,
-            totalDistance: totalDistance,
-            nominalDiameter: nominalDiameter,
-            taper: taper,
-            retainedReplayStartDistance: retainedReplayStartDistance
-        )
-    }
-
-    private func applyingLegacySchemaV1EndTaper(
-        _ dab: DabAttributes,
-        totalDistance: Float,
-        nominalDiameter: Float,
-        taper: BrushTaperConfiguration,
-        retainedReplayStartDistance: Float? = nil
-    ) -> DabAttributes {
-        precondition(totalDistance.isFinite && totalDistance >= 0)
-        if let retainedReplayStartDistance {
-            precondition(
-                retainedReplayStartDistance.isFinite
-                    && retainedReplayStartDistance >= 0
-                    && retainedReplayStartDistance <= totalDistance,
-                "Retained replay start distance must be finite and within the stroke"
-            )
-        }
-        let startEnvelope = envelope(
-            distance: dab.sourceDistance,
-            length: taper.start,
-            nominalDiameter: nominalDiameter
-        )
-        let absoluteEndEnvelope = envelope(
-            distance: max(0, totalDistance - dab.sourceDistance),
-            length: taper.end,
-            nominalDiameter: nominalDiameter
-        )
-        let endEnvelope: Float
-        if let retainedReplayStartDistance {
-            let boundaryEnvelope = envelope(
-                distance: max(0, totalDistance - retainedReplayStartDistance),
-                length: taper.end,
-                nominalDiameter: nominalDiameter
-            )
-            endEnvelope = boundaryEnvelope > 0
-                ? clamp01(absoluteEndEnvelope / boundaryEnvelope)
-                : 1
-        } else {
-            endEnvelope = absoluteEndEnvelope
-        }
-        let originalEnvelope = startEnvelope
-        let finalEnvelope = min(startEnvelope, endEnvelope)
-        let originalSize = taper.effects.contains(.size)
-            ? interpolate(
-                from: taper.minimumSize,
-                to: 1,
-                fraction: originalEnvelope
-            )
-            : 1
-        let finalSize = taper.effects.contains(.size)
-            ? interpolate(
-                from: taper.minimumSize,
-                to: 1,
-                fraction: finalEnvelope
-            )
-            : 1
-        let sizeRatio = originalSize > 0 ? finalSize / originalSize : 1
-        let originalFlow = taper.effects.contains(.flow)
-            ? interpolate(
-                from: taper.minimumFlow,
-                to: 1,
-                fraction: originalEnvelope
-            )
-            : 1
-        let finalFlow = taper.effects.contains(.flow)
-            ? interpolate(
-                from: taper.minimumFlow,
-                to: 1,
-                fraction: finalEnvelope
-            )
-            : 1
-        let flowRatio = originalFlow > 0 ? finalFlow / originalFlow : 1
-        let affine = Affine2D(
-            xAxis: dab.brushToWorld.xAxis * sizeRatio,
-            yAxis: dab.brushToWorld.yAxis * sizeRatio,
-            translation: dab.brushToWorld.translation
-        )
-        return DabAttributes(
-            position: dab.position,
-            brushToWorld: affine,
-            radius: dab.radius * sizeRatio,
-            diameter: dab.diameter * sizeRatio,
-            spacing: dab.spacing,
-            flow: clamp01(dab.flow * flowRatio),
-            strokeOpacity: dab.strokeOpacity,
-            rotation: dab.rotation,
-            scatter: dab.scatter,
-            hardness: dab.hardness,
-            grainOffset: dab.grainOffset,
-            grainScale: dab.grainScale,
-            grainRotation: dab.grainRotation,
-            color: dab.color,
-            colorAdjustment: dab.colorAdjustment,
-            materialFamily: dab.materialFamily,
-            materialContribution: dab.materialContribution,
-            sourceDistance: dab.sourceDistance,
-            ordinal: dab.ordinal,
-            isPredicted: dab.isPredicted,
-            secondaryColorMix: dab.secondaryColorMix,
-            primaryGrainToWorld: dab.primaryGrainToWorld,
-            secondaryGrainToWorld: dab.secondaryGrainToWorld,
-            materialInputs: dab.materialInputs,
-            randomValues: dab.randomValues
-        )
-    }
 }
 
 private extension BrushDynamicsEngine {
@@ -734,61 +860,6 @@ private extension BrushDynamicsEngine {
         let hasTangentialPressure: Bool
         let age: Float
         let distance: Float
-
-        init(
-            sample: InterpolatedStrokeSample,
-            context: BrushStrokeContext,
-            pressure: Float
-        ) {
-            self.pressure = clamp01(pressure)
-            hasPressure = sample.capabilities.contains(.pressure)
-            speed = clamp01(sample.velocity / context.speedReference)
-            direction = normalizedAngle(context.direction)
-            if sample.capabilities.contains(.altitude),
-               let altitude = sample.altitude
-            {
-                tilt = clamp01(1 - altitude / (.pi / 2))
-                hasTilt = true
-            } else {
-                tilt = 0
-                hasTilt = false
-            }
-            if sample.capabilities.contains(.azimuth),
-               let sampleAzimuth = sample.azimuth
-            {
-                azimuth = normalizedAngle(sampleAzimuth)
-                hasAzimuth = true
-            } else {
-                azimuth = 0
-                hasAzimuth = false
-            }
-            if sample.capabilities.contains(.roll), let sampleRoll = sample.roll {
-                roll = normalizedAngle(sampleRoll)
-                hasRoll = true
-            } else {
-                roll = 0
-                hasRoll = false
-            }
-            if sample.capabilities.contains(.tangentialPressure),
-               let sampleTangentialPressure = sample.tangentialPressure
-            {
-                tangentialPressure = clamp01(
-                    (sampleTangentialPressure + 1) * 0.5
-                )
-                hasTangentialPressure = true
-            } else {
-                tangentialPressure = 0
-                hasTangentialPressure = false
-            }
-            age = clamp01(context.strokeAge / context.ageReference)
-            distance = clamp01(
-                context.traveledDistance / context.distanceReference
-            )
-        }
-
-        init(sample: InterpolatedStrokeSample, context: BrushStrokeContext) {
-            self.init(sample: sample, context: context, pressure: sample.pressure)
-        }
 
         init(
             sample: InterpolatedStrokeSample,
@@ -974,9 +1045,8 @@ private extension BrushDynamicsEngine {
         )) * amplitude
     }
 
-    /// Selects one precompiled dynamics representation before evaluating any
-    /// output channel. Keeping the schema-v1 and schema-v2 paths disjoint
-    /// prevents both implementations from occupying the live input stack.
+    /// Evaluates the single precompiled current sensor program before any
+    /// output channel is consumed by dab construction.
     @inline(never)
     func evaluatedDynamics(
         sample: InterpolatedStrokeSample,
@@ -984,94 +1054,33 @@ private extension BrushDynamicsEngine {
         program: BrushProgram,
         strokeSeed: UInt64
     ) -> BrushOrderedDynamicValues {
-        if let stageC = program.stageC {
-            return evaluateOrdered(
-                stageC.compiledSensorProgram,
-                inputs: Inputs(
-                    sample: sample,
-                    context: context,
-                    normalization: stageC.normalization
-                ),
-                strokeSeed: strokeSeed,
-                ordinal: context.ordinal,
-                maximumOpacity: program.definition.limits.maximumOpacity
-            )
-        }
-        return evaluateLegacyDynamics(
-            program.dynamics,
-            inputs: Inputs(sample: sample, context: context),
-            strokeSeed: strokeSeed,
-            ordinal: context.ordinal
+        evaluatedDynamics(
+            sample: sample,
+            context: context,
+            program: program,
+            component: program.primaryComponent,
+            strokeSeed: strokeSeed
         )
     }
 
-    /// Evaluates every legacy channel exactly once and returns the same fixed
-    /// layout used by the ordered Stage C evaluator.
-    @inline(never)
-    func evaluateLegacyDynamics(
-        _ dynamics: borrowing BrushDynamicsProgram,
-        inputs: borrowing Inputs,
-        strokeSeed: UInt64,
-        ordinal: UInt64
+    func evaluatedDynamics(
+        sample: InterpolatedStrokeSample,
+        context: BrushStrokeContext,
+        program: BrushProgram,
+        component: BrushComponentProgram,
+        strokeSeed: UInt64
     ) -> BrushOrderedDynamicValues {
-        BrushOrderedDynamicValues(
-            size: evaluate(
-                dynamics.size, inputs: inputs, strokeSeed: strokeSeed,
-                ordinal: ordinal, channel: .size
+        let stageC = component.stageC
+        return evaluateOrdered(
+            stageC.compiledSensorProgram,
+            inputs: Inputs(
+                sample: sample,
+                context: context,
+                normalization: stageC.normalization
             ),
-            flow: evaluate(
-                dynamics.flow, inputs: inputs, strokeSeed: strokeSeed,
-                ordinal: ordinal, channel: .flow
-            ),
-            opacity: evaluate(
-                dynamics.opacity, inputs: inputs, strokeSeed: strokeSeed,
-                ordinal: ordinal, channel: .opacity
-            ),
-            spacing: evaluate(
-                dynamics.spacing, inputs: inputs, strokeSeed: strokeSeed,
-                ordinal: ordinal, channel: .spacing
-            ),
-            rotation: evaluate(
-                dynamics.rotation, inputs: inputs, strokeSeed: strokeSeed,
-                ordinal: ordinal, channel: .rotation
-            ),
-            scatter: evaluate(
-                dynamics.scatter, inputs: inputs, strokeSeed: strokeSeed,
-                ordinal: ordinal, channel: .scatter
-            ),
-            hardness: evaluate(
-                dynamics.hardness, inputs: inputs, strokeSeed: strokeSeed,
-                ordinal: ordinal, channel: .hardness
-            ),
-            grain: evaluate(
-                dynamics.grain, inputs: inputs, strokeSeed: strokeSeed,
-                ordinal: ordinal, channel: .grain
-            ),
-            offsetX: evaluate(
-                dynamics.offsetX, inputs: inputs, strokeSeed: strokeSeed,
-                ordinal: ordinal, channel: .offsetX
-            ),
-            offsetY: evaluate(
-                dynamics.offsetY, inputs: inputs, strokeSeed: strokeSeed,
-                ordinal: ordinal, channel: .offsetY
-            ),
-            hue: evaluate(
-                dynamics.hue, inputs: inputs, strokeSeed: strokeSeed,
-                ordinal: ordinal, channel: .hue
-            ),
-            saturation: evaluate(
-                dynamics.saturation, inputs: inputs, strokeSeed: strokeSeed,
-                ordinal: ordinal, channel: .saturation
-            ),
-            brightness: evaluate(
-                dynamics.brightness, inputs: inputs, strokeSeed: strokeSeed,
-                ordinal: ordinal, channel: .brightness
-            ),
-            secondaryColorMix: evaluate(
-                dynamics.secondaryColorMix, inputs: inputs,
-                strokeSeed: strokeSeed, ordinal: ordinal,
-                channel: .secondaryColorMix
-            )
+            strokeSeed: strokeSeed,
+            ordinal: context.ordinal,
+            maximumOpacity: program.definition.limits.maximumOpacity
         )
     }
 
@@ -1324,68 +1333,6 @@ private extension BrushDynamicsEngine {
             return Float(value - floor(value))
         case .saturation, .brightness:
             return Float(min(1, max(-1, value)))
-        }
-    }
-
-    func evaluate(
-        _ response: CompiledBrushResponse,
-        inputs: Inputs,
-        strokeSeed: UInt64,
-        ordinal: UInt64,
-        channel: BrushProgramRandomChannel
-    ) -> Float {
-        switch response {
-        case let .constant(value):
-            return value
-        case let .legacyLinear(input, minimum, maximum, missingInputValue):
-            return interpolate(
-                from: minimum,
-                to: maximum,
-                fraction: inputs.value(
-                    for: input,
-                    missingInputValue: missingInputValue,
-                    randomValue: BrushRandom.extensionUnitFloat(
-                        strokeSeed: strokeSeed,
-                        logicalDabOrdinal: ordinal,
-                        outputChannel: channel
-                    )
-                )
-            )
-        case let .legacyBoundedPower(
-            input, minimum, maximum, exponent, missingInputValue
-        ):
-            return interpolate(
-                from: minimum,
-                to: maximum,
-                fraction: pow(inputs.value(
-                    for: input,
-                    missingInputValue: missingInputValue,
-                    randomValue: BrushRandom.extensionUnitFloat(
-                        strokeSeed: strokeSeed,
-                        logicalDabOrdinal: ordinal,
-                        outputChannel: channel
-                    )
-                ), exponent)
-            )
-        case let .sampledCurve(
-            input, samples, scale, offset, lowerClamp, upperClamp, inverted,
-            jitter, missingInputValue
-        ):
-            let extensionValue = BrushRandom.extensionUnitFloat(
-                strokeSeed: strokeSeed,
-                logicalDabOrdinal: ordinal,
-                outputChannel: channel
-            )
-            let normalized = inputs.value(
-                for: input,
-                missingInputValue: missingInputValue,
-                randomValue: extensionValue
-            )
-            let response = sampledValue(samples, at: normalized)
-            let oriented = inverted ? 1 - response : response
-            let mapped = offset + scale * oriented
-            let jittered = mapped + symmetric(extensionValue) * jitter
-            return min(upperClamp, max(lowerClamp, jittered))
         }
     }
 

@@ -378,14 +378,14 @@ run_logged bootstrap ./scripts/bootstrap.sh
 
 run_logged mac-build xcodebuild \
   -project App/PatternSpike.xcodeproj \
-  -scheme PatternSpikeMac \
+  -scheme PatternSpikeMacHarness \
   -configuration Debug \
   -destination platform=macOS \
   -derivedDataPath "$derived_mac" \
   build CODE_SIGNING_ALLOWED=NO
 run_logged mac-analyze xcodebuild \
   -project App/PatternSpike.xcodeproj \
-  -scheme PatternSpikeMac \
+  -scheme PatternSpikeMacHarness \
   -configuration Debug \
   -destination platform=macOS \
   -derivedDataPath "$derived_mac" \
@@ -405,7 +405,7 @@ run_logged ipad-analyze xcodebuild \
   -derivedDataPath "$derived_pad" \
   analyze CODE_SIGNING_ALLOWED=NO
 
-app_binary="$derived_mac/Build/Products/Debug/PatternSpike.app/Contents/MacOS/PatternSpike"
+app_binary="$derived_mac/Build/Products/Debug/PatternSpikeHarness.app/Contents/MacOS/PatternSpikeHarness"
 [[ -x "$app_binary" ]] \
   || fail "Mac harness binary is unavailable: $app_binary"
 
@@ -495,7 +495,7 @@ storageDiagnostics|Sources/PatternEngine/TilingProjection.swift
 allocationEventCountAfterWarmup|Sources/MetalRenderer/InputPathStorageAudit.swift
 recordCollectionStorageAllocation|Sources/MetalRenderer/InputPathStorageAudit.swift
 authoritativeBacklogRemaining|Sources/MetalRenderer/GridRenderer.swift
-auditLiveFlushIdentity|Sources/MetalRenderer/Capture/HarnessRunner.swift
+auditLiveFlushIdentity|Sources/MetalRendererDiagnostics/Capture/DepositionHarnessRunner.swift
 INSTRUMENTATION
 
 run_logged validator-linked-libraries otool -L "$validator"
@@ -514,8 +514,8 @@ fi
 
 run_logged app-linked-libraries otool -L "$app_binary"
 app_symbol_binary="$app_binary"
-debug_dylib="$(dirname "$app_binary")/PatternSpike.debug.dylib"
-if rg -q '@rpath/PatternSpike\.debug\.dylib' \
+debug_dylib="$(dirname "$app_binary")/PatternSpikeHarness.debug.dylib"
+if rg -q '@rpath/PatternSpikeHarness\.debug\.dylib' \
   "$logs/app-linked-libraries.stdout.log"; then
   [[ -f "$debug_dylib" ]] \
     || fail "app launcher references a missing debug dylib"

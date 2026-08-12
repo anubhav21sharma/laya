@@ -24,6 +24,8 @@ struct StrokeTileFailureInjection: Sendable {
 
 enum StrokeTileSurfaceError: Error, Equatable, Sendable {
     case invalidPipelinePixelFormat(expected: UInt, actual: UInt)
+    case invalidComponentBindingOrdinal(expected: UInt8, actual: UInt8)
+    case componentBindingUnavailable(UInt8)
     case invalidCapacity
     case recordBudgetExceeded(required: Int, maximum: Int)
     case tileBudgetExceeded(required: Int, maximum: Int)
@@ -342,7 +344,6 @@ final class StrokeTileSurfaceResources: @unchecked Sendable {
     let maximumRecordCount: Int
     let maximumTileReferenceCount: Int
     let capability: DocumentPaintStrokeSurfaceCapability
-    let pipeline: DepositionPipelineBinding
     fileprivate let commandQueue: any MTLCommandQueue
     fileprivate let uploadBuffer: any MTLBuffer
     fileprivate let depositionPassDescriptor: MTLRenderPassDescriptor
@@ -357,18 +358,10 @@ final class StrokeTileSurfaceResources: @unchecked Sendable {
         commandQueue: any MTLCommandQueue,
         capability: DocumentPaintStrokeSurfaceCapability,
         maximumRecordCount: Int,
-        maximumTileReferenceCount: Int,
-        pipeline: DepositionPipelineBinding
+        maximumTileReferenceCount: Int
     ) throws {
         guard maximumRecordCount > 0, maximumTileReferenceCount > 0 else {
             throw StrokeTileSurfaceError.invalidCapacity
-        }
-        let actualFormat = pipeline.key.colorPixelFormatRawValue
-        guard actualFormat == MTLPixelFormat.rgba16Float.rawValue else {
-            throw StrokeTileSurfaceError.invalidPipelinePixelFormat(
-                expected: MTLPixelFormat.rgba16Float.rawValue,
-                actual: actualFormat
-            )
         }
         guard (commandQueue.device as AnyObject) === (device as AnyObject)
         else { throw StrokeTileSurfaceError.commandQueueUnavailable }
@@ -389,7 +382,6 @@ final class StrokeTileSurfaceResources: @unchecked Sendable {
         self.maximumRecordCount = maximumRecordCount
         self.maximumTileReferenceCount = maximumTileReferenceCount
         self.capability = capability
-        self.pipeline = pipeline
         self.commandQueue = commandQueue
         self.uploadBuffer = uploadBuffer
         let pass = MTLRenderPassDescriptor()
@@ -401,13 +393,54 @@ final class StrokeTileSurfaceResources: @unchecked Sendable {
 
 }
 
-struct StrokeTileEncodingConfiguration: @unchecked Sendable {
-    let resources: StrokeTileSurfaceResources
+struct StrokeTileComponentEncodingBinding: @unchecked Sendable {
+    let ordinal: UInt8
+    let pipeline: DepositionPipelineBinding
     let materialUniforms: PatternDepositionMaterialUniforms
     let primaryShape: (any MTLTexture)?
     let secondaryShape: (any MTLTexture)?
     let primaryGrain: (any MTLTexture)?
     let secondaryGrain: (any MTLTexture)?
+
+    @MainActor
+    init(
+        ordinal: UInt8,
+        pipeline: DepositionPipelineBinding,
+        material: DepositionMaterialBinding
+    ) {
+        let textures = material.textures
+        self.ordinal = ordinal
+        self.pipeline = pipeline
+        materialUniforms = material.uniforms
+        primaryShape = textures[.primaryShape]
+        secondaryShape = textures[.secondaryShape]
+        primaryGrain = textures[.primaryGrain]
+        secondaryGrain = textures[.secondaryGrain]
+    }
+
+    init(
+        ordinal: UInt8,
+        pipeline: DepositionPipelineBinding,
+        materialUniforms: PatternDepositionMaterialUniforms,
+        primaryShape: (any MTLTexture)?,
+        secondaryShape: (any MTLTexture)?,
+        primaryGrain: (any MTLTexture)?,
+        secondaryGrain: (any MTLTexture)?
+    ) {
+        self.ordinal = ordinal
+        self.pipeline = pipeline
+        self.materialUniforms = materialUniforms
+        self.primaryShape = primaryShape
+        self.secondaryShape = secondaryShape
+        self.primaryGrain = primaryGrain
+        self.secondaryGrain = secondaryGrain
+    }
+}
+
+struct StrokeTileEncodingConfiguration: @unchecked Sendable {
+    let resources: StrokeTileSurfaceResources
+    let primaryComponent: StrokeTileComponentEncodingBinding
+    let secondaryComponent: StrokeTileComponentEncodingBinding?
     let frameUniforms: PatternGridFrameUniforms
     let radialLayout: RadialSectorLayout?
     let forceCommandFailure: Bool
@@ -416,6 +449,28 @@ struct StrokeTileEncodingConfiguration: @unchecked Sendable {
 
     init(
         resources: StrokeTileSurfaceResources,
+        primaryComponent: StrokeTileComponentEncodingBinding,
+        secondaryComponent: StrokeTileComponentEncodingBinding?,
+        frameUniforms: PatternGridFrameUniforms,
+        radialLayout: RadialSectorLayout?,
+        forceCommandFailure: Bool,
+        tileAllocationFailureInjection:
+            PaintTileAllocationFailureInjection? = nil,
+        failureInjection: StrokeTileFailureInjection? = nil
+    ) {
+        self.resources = resources
+        self.primaryComponent = primaryComponent
+        self.secondaryComponent = secondaryComponent
+        self.frameUniforms = frameUniforms
+        self.radialLayout = radialLayout
+        self.forceCommandFailure = forceCommandFailure
+        self.tileAllocationFailureInjection = tileAllocationFailureInjection
+        self.failureInjection = failureInjection
+    }
+
+    init(
+        resources: StrokeTileSurfaceResources,
+        pipeline: DepositionPipelineBinding,
         materialUniforms: PatternDepositionMaterialUniforms,
         primaryShape: (any MTLTexture)?,
         secondaryShape: (any MTLTexture)?,
@@ -428,17 +483,24 @@ struct StrokeTileEncodingConfiguration: @unchecked Sendable {
             PaintTileAllocationFailureInjection? = nil,
         failureInjection: StrokeTileFailureInjection? = nil
     ) {
-        self.resources = resources
-        self.materialUniforms = materialUniforms
-        self.primaryShape = primaryShape
-        self.secondaryShape = secondaryShape
-        self.primaryGrain = primaryGrain
-        self.secondaryGrain = secondaryGrain
-        self.frameUniforms = frameUniforms
-        self.radialLayout = radialLayout
-        self.forceCommandFailure = forceCommandFailure
-        self.tileAllocationFailureInjection = tileAllocationFailureInjection
-        self.failureInjection = failureInjection
+        self.init(
+            resources: resources,
+            primaryComponent: StrokeTileComponentEncodingBinding(
+                ordinal: 0,
+                pipeline: pipeline,
+                materialUniforms: materialUniforms,
+                primaryShape: primaryShape,
+                secondaryShape: secondaryShape,
+                primaryGrain: primaryGrain,
+                secondaryGrain: secondaryGrain
+            ),
+            secondaryComponent: nil,
+            frameUniforms: frameUniforms,
+            radialLayout: radialLayout,
+            forceCommandFailure: forceCommandFailure,
+            tileAllocationFailureInjection: tileAllocationFailureInjection,
+            failureInjection: failureInjection
+        )
     }
 }
 
@@ -910,6 +972,7 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
                 actual: generation
             )
         }
+        try Self.validateComponentBindings(configuration)
         self.configuration = configuration
         configuredGeneration = generation
         partitionScratch = StrokeTilePartitionScratch(
@@ -1015,6 +1078,12 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
         }
         guard outstandingLease == nil else {
             throw StrokeTileSurfaceError.outstandingLease
+        }
+        for record in records {
+            _ = try Self.componentBinding(
+                ordinal: record.componentOrdinal,
+                configuration: configuration
+            )
         }
         let clearsPrediction = layer == .prediction
             && predictionReplacementPending
@@ -1155,6 +1224,7 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
                     .makeProvisionalBindings(
                         frame: roleLease,
                         coordinates: bindingDeltaCoordinates,
+                        modifiedCoordinates: touchedCoordinates,
                         workspace: provisionalWorkspace
                 )
                 finishProbe()
@@ -1480,6 +1550,9 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
             {
                 requiresCopy = true
             }
+            if provisional.sourceComponentCoverageTexture != nil {
+                requiresCopy = true
+            }
         }
         if requiresCopy {
             guard let blit = commandBuffer.makeBlitCommandEncoder() else {
@@ -1508,6 +1581,25 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
                     destinationLevel: 0,
                     destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
                 )
+                if let sourceCoverage = provisional
+                    .sourceComponentCoverageTexture
+                {
+                    blit.copy(
+                        from: sourceCoverage,
+                        sourceSlice: 0,
+                        sourceLevel: 0,
+                        sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                        sourceSize: MTLSize(
+                            width: provisional.descriptor.logicalBounds.width,
+                            height: provisional.descriptor.logicalBounds.height,
+                            depth: 1
+                        ),
+                        to: provisional.candidateComponentCoverageTexture,
+                        destinationSlice: 0,
+                        destinationLevel: 0,
+                        destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                    )
+                }
             }
             blit.endEncoding()
         }
@@ -1542,12 +1634,24 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
             )
             let pass = configuration.resources.depositionPassDescriptor
             pass.colorAttachments[0].texture = provisional.candidateTexture
+            pass.colorAttachments[1].texture =
+                provisional.candidateComponentCoverageTexture
             let initializesFromClear = clear
                 || provisional.sourceIsKnownClear
             pass.colorAttachments[0].loadAction = initializesFromClear
                 ? .clear : .load
             if initializesFromClear {
                 pass.colorAttachments[0].clearColor = MTLClearColorMake(
+                    0, 0, 0, 0
+                )
+            }
+            let initializesCoverageFromClear = initializesFromClear
+                || provisional.sourceComponentCoverageTexture == nil
+            pass.colorAttachments[1].loadAction = initializesCoverageFromClear
+                ? .clear : .load
+            pass.colorAttachments[1].storeAction = .store
+            if initializesCoverageFromClear {
+                pass.colorAttachments[1].clearColor = MTLClearColorMake(
                     0, 0, 0, 0
                 )
             }
@@ -1569,51 +1673,44 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
                 height: provisional.descriptor.logicalBounds.height
             ))
             if let range, !range.recordRange.isEmpty {
-                encoder.setRenderPipelineState(
-                    configuration.resources.pipeline.state
-                )
                 var frame = configuration.frameUniforms
                 encoder.setVertexBytes(
                     &frame,
                     length: MemoryLayout<PatternGridFrameUniforms>.stride,
                     index: Int(PatternBufferIndexGridFrameUniforms)
                 )
-                encoder.setVertexBuffer(
-                    configuration.resources.uploadBuffer,
-                    offset: range.recordRange.lowerBound
-                        * MemoryLayout<PatternDepositionStampInstance>.stride,
-                    index: Int(PatternBufferIndexDabInstances)
-                )
-                var material = configuration.materialUniforms
-                encoder.setFragmentBytes(
-                    &material,
-                    length: MemoryLayout<
-                        PatternDepositionMaterialUniforms
-                    >.stride,
-                    index: Int(PatternBufferIndexBrushMaterial)
-                )
-                encoder.setFragmentTexture(
-                    configuration.primaryShape,
-                    index: DepositionTextureSlot.primaryShape.rawValue
-                )
-                encoder.setFragmentTexture(
-                    configuration.secondaryShape,
-                    index: DepositionTextureSlot.secondaryShape.rawValue
-                )
-                encoder.setFragmentTexture(
-                    configuration.primaryGrain,
-                    index: DepositionTextureSlot.primaryGrain.rawValue
-                )
-                encoder.setFragmentTexture(
-                    configuration.secondaryGrain,
-                    index: DepositionTextureSlot.secondaryGrain.rawValue
-                )
-                encoder.drawPrimitives(
-                    type: .triangle,
-                    vertexStart: 0,
-                    vertexCount: 6,
-                    instanceCount: range.recordRange.count
-                )
+                var runStart = range.recordRange.lowerBound
+                while runStart < range.recordRange.upperBound {
+                    let ordinal = records[references[runStart]]
+                        .componentOrdinal
+                    var runEnd = runStart + 1
+                    while runEnd < range.recordRange.upperBound,
+                          records[references[runEnd]].componentOrdinal
+                            == ordinal
+                    {
+                        runEnd += 1
+                    }
+                    let component = try Self.componentBinding(
+                        ordinal: ordinal,
+                        configuration: configuration
+                    )
+                    Self.bind(component, to: encoder)
+                    encoder.setVertexBuffer(
+                        configuration.resources.uploadBuffer,
+                        offset: runStart
+                            * MemoryLayout<
+                                PatternDepositionStampInstance
+                            >.stride,
+                        index: Int(PatternBufferIndexDabInstances)
+                    )
+                    encoder.drawPrimitives(
+                        type: .triangle,
+                        vertexStart: 0,
+                        vertexCount: 6,
+                        instanceCount: runEnd - runStart
+                    )
+                    runStart = runEnd
+                }
             }
             encoder.endEncoding()
         }
@@ -1636,6 +1733,84 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
                 outcome.message ?? "sparse stroke command failed"
             )
         }
+    }
+
+    private static func validateComponentBindings(
+        _ configuration: StrokeTileEncodingConfiguration
+    ) throws {
+        guard configuration.primaryComponent.ordinal == 0 else {
+            throw StrokeTileSurfaceError.invalidComponentBindingOrdinal(
+                expected: 0,
+                actual: configuration.primaryComponent.ordinal
+            )
+        }
+        try validatePipeline(configuration.primaryComponent.pipeline)
+        if let secondary = configuration.secondaryComponent {
+            guard secondary.ordinal == 1 else {
+                throw StrokeTileSurfaceError.invalidComponentBindingOrdinal(
+                    expected: 1,
+                    actual: secondary.ordinal
+                )
+            }
+            try validatePipeline(secondary.pipeline)
+        }
+    }
+
+    private static func validatePipeline(
+        _ pipeline: DepositionPipelineBinding
+    ) throws {
+        let actual = pipeline.key.colorPixelFormatRawValue
+        guard actual == MTLPixelFormat.rgba16Float.rawValue else {
+            throw StrokeTileSurfaceError.invalidPipelinePixelFormat(
+                expected: MTLPixelFormat.rgba16Float.rawValue,
+                actual: actual
+            )
+        }
+    }
+
+    private static func componentBinding(
+        ordinal: UInt8,
+        configuration: StrokeTileEncodingConfiguration
+    ) throws -> StrokeTileComponentEncodingBinding {
+        if ordinal == configuration.primaryComponent.ordinal {
+            return configuration.primaryComponent
+        }
+        if let secondary = configuration.secondaryComponent,
+           ordinal == secondary.ordinal
+        {
+            return secondary
+        }
+        throw StrokeTileSurfaceError.componentBindingUnavailable(ordinal)
+    }
+
+    private static func bind(
+        _ component: StrokeTileComponentEncodingBinding,
+        to encoder: any MTLRenderCommandEncoder
+    ) {
+        encoder.setRenderPipelineState(component.pipeline.state)
+        var material = component.materialUniforms
+        material.edgeParameters.y = Float(component.ordinal)
+        encoder.setFragmentBytes(
+            &material,
+            length: MemoryLayout<PatternDepositionMaterialUniforms>.stride,
+            index: Int(PatternBufferIndexBrushMaterial)
+        )
+        encoder.setFragmentTexture(
+            component.primaryShape,
+            index: DepositionTextureSlot.primaryShape.rawValue
+        )
+        encoder.setFragmentTexture(
+            component.secondaryShape,
+            index: DepositionTextureSlot.secondaryShape.rawValue
+        )
+        encoder.setFragmentTexture(
+            component.primaryGrain,
+            index: DepositionTextureSlot.primaryGrain.rawValue
+        )
+        encoder.setFragmentTexture(
+            component.secondaryGrain,
+            index: DepositionTextureSlot.secondaryGrain.rawValue
+        )
     }
 
     private static func mergeSortedUnique(
@@ -1718,8 +1893,7 @@ package enum StrokeTileAllocationProbeHarness {
                 functionConstants: BrushFunctionConstants(
                     usesSecondaryShape: false,
                     usesGrain: false,
-                    usesSecondaryGrain: false,
-                    usesDestinationSampling: false
+                    usesSecondaryGrain: false
                 )
             ),
             abiVersion: DepositionABI.version,
@@ -1748,9 +1922,20 @@ package enum StrokeTileAllocationProbeHarness {
             pipeline: pipeline
         )
         let encoder = StrokeTileSurfaceEncoder()
-        try encoder.configure(configuration(first), generation: 1)
-        let actual = try record(ordinal: 1, predicted: false)
-        let predicted = try record(ordinal: 2, predicted: true)
+        try encoder.configure(
+            configuration(first, pipeline: pipeline),
+            generation: 1
+        )
+        let actual = try record(
+            ordinal: 1,
+            componentOrdinal: 0,
+            predicted: false
+        )
+        let predicted = try record(
+            ordinal: 2,
+            componentOrdinal: 1,
+            predicted: true
+        )
 
         // Warm every state shape before arming the release allocator probe.
         try await encodeAndAcknowledge(
@@ -1788,7 +1973,10 @@ package enum StrokeTileAllocationProbeHarness {
             layerID: layerID,
             pipeline: pipeline
         )
-        try encoder.configure(configuration(measured), generation: 2)
+        try encoder.configure(
+            configuration(measured, pipeline: pipeline),
+            generation: 2
+        )
         try await encodeAndAcknowledge(
             encoder: encoder,
             generation: 2,
@@ -1806,7 +1994,10 @@ package enum StrokeTileAllocationProbeHarness {
         )
         // Reconfigure the same namespace after warming every persistent store
         // and candidate shape; measured calls exercise only the warmed path.
-        try encoder.configure(configuration(measured), generation: 2)
+        try encoder.configure(
+            configuration(measured, pipeline: pipeline),
+            generation: 2
+        )
 
         let second = try makeResources(
             device: device,
@@ -1816,7 +2007,10 @@ package enum StrokeTileAllocationProbeHarness {
             pipeline: pipeline
         )
         let secondWarmer = StrokeTileSurfaceEncoder()
-        try secondWarmer.configure(configuration(second), generation: 2)
+        try secondWarmer.configure(
+            configuration(second, pipeline: pipeline),
+            generation: 2
+        )
         try await encodeAndAcknowledge(
             encoder: secondWarmer,
             generation: 2,
@@ -1861,7 +2055,10 @@ package enum StrokeTileAllocationProbeHarness {
         )
         withExtendedLifetime(unpublishedLease) {}
 
-        try encoder.configure(configuration(second), generation: 2)
+        try encoder.configure(
+            configuration(second, pipeline: pipeline),
+            generation: 2
+        )
         try await encodeAndAcknowledge(
             encoder: encoder,
             generation: 2,
@@ -1893,21 +2090,36 @@ package enum StrokeTileAllocationProbeHarness {
             commandQueue: commandQueue,
             capability: capability,
             maximumRecordCount: 32,
-            maximumTileReferenceCount: 128,
-            pipeline: pipeline
+            maximumTileReferenceCount: 128
         )
     }
 
     private static func configuration(
-        _ resources: StrokeTileSurfaceResources
+        _ resources: StrokeTileSurfaceResources,
+        pipeline: DepositionPipelineBinding
     ) -> StrokeTileEncodingConfiguration {
-        StrokeTileEncodingConfiguration(
-            resources: resources,
+        let primary = StrokeTileComponentEncodingBinding(
+            ordinal: 0,
+            pipeline: pipeline,
             materialUniforms: PatternDepositionMaterialUniforms(),
             primaryShape: nil,
             secondaryShape: nil,
             primaryGrain: nil,
-            secondaryGrain: nil,
+            secondaryGrain: nil
+        )
+        let secondary = StrokeTileComponentEncodingBinding(
+            ordinal: 1,
+            pipeline: pipeline,
+            materialUniforms: PatternDepositionMaterialUniforms(),
+            primaryShape: nil,
+            secondaryShape: nil,
+            primaryGrain: nil,
+            secondaryGrain: nil
+        )
+        return StrokeTileEncodingConfiguration(
+            resources: resources,
+            primaryComponent: primary,
+            secondaryComponent: secondary,
             frameUniforms: PatternGridFrameUniforms(
                 drawableSize: SIMD2(repeating: 512),
                 worldCenter: SIMD2(repeating: 256),
@@ -1968,6 +2180,7 @@ package enum StrokeTileAllocationProbeHarness {
 
     private static func record(
         ordinal: UInt64,
+        componentOrdinal: UInt8,
         predicted: Bool
     ) throws -> StrokePreparedProjectedRecord {
         let dab = LogicalDab(
@@ -2008,6 +2221,7 @@ package enum StrokeTileAllocationProbeHarness {
         return StrokePreparedProjectedRecord(
             depositionRecord: ProjectedDepositionRecord(
                 identity: ordinal,
+                componentOrdinal: componentOrdinal,
                 instance: try PatternDepositionStampInstance(
                     fragment: fragment,
                     dab: dab,

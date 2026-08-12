@@ -186,7 +186,6 @@ public struct InterpolatedStrokeSample: Equatable, Sendable {
         return result
     }
 }
-
 private func lerp(_ start: Float, _ end: Float, _ fraction: Float) -> Float {
     start + (end - start) * fraction
 }
@@ -263,6 +262,7 @@ struct AttributedStrokePathAdvanceCursor: Equatable, Sendable {
     private let p1: InterpolatedStrokeSample
     private let current: InterpolatedStrokeSample
     private let subdivisionCount: Int
+    private let clampsToSegmentBounds: Bool
     private var nextStep: Int
     private var lineStart: InterpolatedStrokeSample
 
@@ -273,12 +273,14 @@ struct AttributedStrokePathAdvanceCursor: Equatable, Sendable {
         p1: InterpolatedStrokeSample,
         current: InterpolatedStrokeSample,
         subdivisionCount: Int,
+        clampsToSegmentBounds: Bool,
         completedPath: CentripetalCatmullRomPathInterpolator
     ) {
         self.p0 = p0
         self.p1 = p1
         self.current = current
         self.subdivisionCount = subdivisionCount
+        self.clampsToSegmentBounds = clampsToSegmentBounds
         nextStep = 1
         lineStart = p1
         self.completedPath = completedPath
@@ -296,7 +298,8 @@ struct AttributedStrokePathAdvanceCursor: Equatable, Sendable {
             p1: p1.position,
             p2: current.position,
             p3: current.position,
-            u: fraction
+            u: fraction,
+            clampsToSegmentBounds: clampsToSegmentBounds
         )
         let lineEnd = p1.interpolated(
             to: current,
@@ -322,6 +325,7 @@ public struct CentripetalCatmullRomPathInterpolator: Equatable, Sendable {
     public let maximumSegmentLength: Float
 
     private let minimumSubdivisionEstimate: Float
+    private let clampsToSegmentBounds: Bool
     private var beforePrevious: InterpolatedStrokeSample?
     private var previous: InterpolatedStrokeSample?
 
@@ -332,13 +336,28 @@ public struct CentripetalCatmullRomPathInterpolator: Equatable, Sendable {
         self.init(
             maximumSegmentLength: maximumSegmentLength,
             validatedMinimumSubdivisionEstimate:
-                minimumSubdivisionEstimate ?? maximumSegmentLength
+                minimumSubdivisionEstimate ?? maximumSegmentLength,
+            clampsToSegmentBounds: false
+        )
+    }
+
+    public init(
+        maximumSegmentLength: Float,
+        minimumSubdivisionEstimate: Float?,
+        clampsToSegmentBounds: Bool
+    ) {
+        self.init(
+            maximumSegmentLength: maximumSegmentLength,
+            validatedMinimumSubdivisionEstimate:
+                minimumSubdivisionEstimate ?? maximumSegmentLength,
+            clampsToSegmentBounds: clampsToSegmentBounds
         )
     }
 
     private init(
         maximumSegmentLength: Float,
-        validatedMinimumSubdivisionEstimate minimumSubdivisionEstimate: Float
+        validatedMinimumSubdivisionEstimate minimumSubdivisionEstimate: Float,
+        clampsToSegmentBounds: Bool
     ) {
         precondition(
             maximumSegmentLength.isFinite && maximumSegmentLength > 0,
@@ -351,6 +370,7 @@ public struct CentripetalCatmullRomPathInterpolator: Equatable, Sendable {
         )
         self.maximumSegmentLength = maximumSegmentLength
         self.minimumSubdivisionEstimate = minimumSubdivisionEstimate
+        self.clampsToSegmentBounds = clampsToSegmentBounds
         beforePrevious = nil
         previous = nil
     }
@@ -434,6 +454,7 @@ public struct CentripetalCatmullRomPathInterpolator: Equatable, Sendable {
             p1: p1,
             current: current,
             subdivisionCount: max(1, Int(rawSubdivisionCount)),
+            clampsToSegmentBounds: clampsToSegmentBounds,
             completedPath: completedPath
         )
     }
@@ -550,7 +571,8 @@ public struct CentripetalCatmullRomPathInterpolator: Equatable, Sendable {
                 p1: p1.position,
                 p2: current.position,
                 p3: current.position,
-                u: fraction
+                u: fraction,
+                clampsToSegmentBounds: clampsToSegmentBounds
             )
             let lineEnd = p1.interpolated(
                 to: current,
@@ -587,7 +609,8 @@ public struct CentripetalCatmullRomPathInterpolator: Equatable, Sendable {
                 p1: p1.position,
                 p2: current.position,
                 p3: current.position,
-                u: fraction
+                u: fraction,
+                clampsToSegmentBounds: clampsToSegmentBounds
             )
             let lineEnd = p1.interpolated(
                 to: current,
@@ -679,7 +702,8 @@ public struct CentripetalCatmullRomPathInterpolator: Equatable, Sendable {
         p1: WorldPoint,
         p2: WorldPoint,
         p3: WorldPoint,
-        u: Float
+        u: Float,
+        clampsToSegmentBounds: Bool = false
     ) -> WorldPoint {
         let incoming = p1.simd - p0.simd
         let outgoing = p2.simd - p1.simd
@@ -708,193 +732,16 @@ public struct CentripetalCatmullRomPathInterpolator: Equatable, Sendable {
         m2 *= dt1
         let u2 = u * u
         let u3 = u2 * u
-        return WorldPoint(
+        let position = WorldPoint(
             (2 * u3 - 3 * u2 + 1) * p1.simd
                 + (u3 - 2 * u2 + u) * m1
                 + (-2 * u3 + 3 * u2) * p2.simd
                 + (u3 - u2) * m2
         )
-    }
-}
-
-/// Fixed-spacing attributed compatibility walker.
-///
-/// Slice 4's generator consumes `CentripetalCatmullRomPathInterpolator`
-/// directly and owns dynamic spacing. This value exists to pin attributed
-/// interpolation and to keep legacy placement exact during migration.
-public struct AttributedStrokeInterpolator: Equatable, Sendable {
-    public let spacing: Float
-
-    private var path: CentripetalCatmullRomPathInterpolator
-    private var lastInputPosition: WorldPoint?
-    private var lastEmitted: InterpolatedStrokeSample?
-    private var distanceUntilNext: Float
-
-    public init(spacing: Float) {
-        precondition(
-            spacing.isFinite && spacing > 0,
-            "Stroke spacing must be finite and positive"
-        )
-        self.spacing = spacing
-        path = CentripetalCatmullRomPathInterpolator(
-            maximumSegmentLength: min(0.5, spacing * 0.2),
-            minimumSubdivisionEstimate: spacing
-        )
-        lastInputPosition = nil
-        lastEmitted = nil
-        distanceUntilNext = spacing
-    }
-
-    public mutating func begin(
-        at sample: InterpolatedStrokeSample,
-        emit: (InterpolatedStrokeSample) throws -> Void
-    ) rethrows {
-        resetState()
-        _ = path.begin(at: sample)
-        lastInputPosition = sample.position
-        lastEmitted = sample
-        distanceUntilNext = spacing
-        try emit(sample)
-    }
-
-    public mutating func append(
-        _ current: InterpolatedStrokeSample,
-        emit: (InterpolatedStrokeSample) throws -> Void
-    ) rethrows {
-        guard lastInputPosition != nil else {
-            return try begin(at: current, emit: emit)
-        }
-
-        var updatedPath = path
-        try updatedPath.append(current) { segment in
-            try consume(segment, emit: emit)
-        }
-        path = updatedPath
-        lastInputPosition = current.position
-    }
-
-    public mutating func finish(
-        at finalSample: InterpolatedStrokeSample,
-        emit: (InterpolatedStrokeSample) throws -> Void
-    ) rethrows {
-        if lastInputPosition != finalSample.position {
-            try append(finalSample, emit: emit)
-        }
-        if lastEmitted?.position != finalSample.position {
-            try emit(finalSample)
-            lastEmitted = finalSample
-        }
-        resetState()
-    }
-
-    public mutating func cancel() {
-        resetState()
-    }
-
-    private mutating func consume(
-        _ segment: AttributedStrokePathSegment,
-        emit: (InterpolatedStrokeSample) throws -> Void
-    ) rethrows {
-        var cursor = segment.start.position.simd
-        let terminal = segment.end.position.simd
-        let segmentLength = simd_distance(cursor, terminal)
-        var remainingLength = segmentLength
-
-        while remainingLength >= distanceUntilNext && remainingLength > 0 {
-            let direction = (terminal - cursor) / remainingLength
-            cursor += direction * distanceUntilNext
-            let fraction = segmentLength > 0
-                ? simd_distance(segment.start.position.simd, cursor)
-                    / segmentLength
-                : 1
-            let sample = segment.sample(
-                at: fraction,
-                exactPosition: WorldPoint(cursor)
-            )
-            try emit(sample)
-            lastEmitted = sample
-            remainingLength = simd_distance(cursor, terminal)
-            distanceUntilNext = spacing
-        }
-
-        distanceUntilNext -= remainingLength
-    }
-
-    private mutating func resetState() {
-        path.cancel()
-        lastInputPosition = nil
-        lastEmitted = nil
-        distanceUntilNext = spacing
-    }
-}
-
-/// Legacy position-only wrapper retained until the new stroke generator owns
-/// every renderer caller.
-public struct CentripetalCatmullRomStrokeInterpolator: Sendable {
-    public let spacing: Float
-
-    private var attributed: AttributedStrokeInterpolator
-    private var timestamp: TimeInterval
-
-    public init(radius: Float) {
-        precondition(radius > 0)
-        spacing = max(1, min(8, radius * 0.25))
-        attributed = AttributedStrokeInterpolator(spacing: spacing)
-        timestamp = 0
-    }
-
-    public mutating func begin(
-        at point: WorldPoint,
-        emit: (WorldPoint) throws -> Void
-    ) rethrows {
-        timestamp = 0
-        try attributed.begin(
-            at: legacySample(position: point, phase: .began)
-        ) { try emit($0.position) }
-    }
-
-    public mutating func append(
-        _ current: WorldPoint,
-        emit: (WorldPoint) throws -> Void
-    ) rethrows {
-        timestamp += 1
-        try attributed.append(
-            legacySample(position: current, phase: .moved)
-        ) { try emit($0.position) }
-    }
-
-    public mutating func finish(
-        at finalPoint: WorldPoint,
-        emit: (WorldPoint) throws -> Void
-    ) rethrows {
-        timestamp += 1
-        try attributed.finish(
-            at: legacySample(position: finalPoint, phase: .ended)
-        ) { try emit($0.position) }
-    }
-
-    public mutating func cancel() {
-        attributed.cancel()
-        timestamp = 0
-    }
-
-    private func legacySample(
-        position: WorldPoint,
-        phase: StrokePhase
-    ) -> InterpolatedStrokeSample {
-        InterpolatedStrokeSample(
-            position: position,
-            pressure: 0.5,
-            timestamp: timestamp,
-            altitude: nil,
-            azimuth: nil,
-            roll: nil,
-            velocity: 0,
-            artisticVelocity: 0,
-            phase: phase,
-            source: .mouse,
-            kind: .actual,
-            capabilities: []
+        guard clampsToSegmentBounds else { return position }
+        return WorldPoint(
+            x: min(max(position.x, min(p1.x, p2.x)), max(p1.x, p2.x)),
+            y: min(max(position.y, min(p1.y, p2.y)), max(p1.y, p2.y))
         )
     }
 }

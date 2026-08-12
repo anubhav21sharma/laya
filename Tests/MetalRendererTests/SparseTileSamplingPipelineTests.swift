@@ -716,7 +716,26 @@ struct SparseTileSamplingPipelineTests {
                     #expect(error as? SparseTileSamplingPipelineError
                         == .injectedFailure(phase.rawValue))
                 }
-                #expect(await cache.allocationSnapshot == before)
+                let afterFailure = await cache.allocationSnapshot
+                #expect(
+                    afterFailure.preparedContentCount
+                        == before.preparedContentCount
+                )
+                #expect(afterFailure.hitCount == before.hitCount)
+                #expect(afterFailure.missCount == before.missCount + 1)
+                #expect(
+                    afterFailure.cachedPlanMetalBufferBytes
+                        == before.cachedPlanMetalBufferBytes
+                )
+                #expect(
+                    afterFailure.planMetalBufferAllocationCount
+                        == before.planMetalBufferAllocationCount
+                )
+                #expect(
+                    afterFailure.planMetalBufferAllocationBytes
+                        == before.planMetalBufferAllocationBytes
+                )
+                #expect(afterFailure.uploadRing == before.uploadRing)
                 #expect(await cache.preparedCount == 1)
                 try candidateFixture.planLease.retire()
                 #expect(
@@ -1792,6 +1811,8 @@ struct SparseTileSamplingPipelineTests {
         #expect(warmed.highWaterSlotCount == 2)
         #expect(warmed.metalBufferAllocationCount == 1)
         #expect(warmedCache.planMetalBufferAllocationCount > 0)
+        #expect(warmedCache.hitCount == 102)
+        #expect(warmedCache.missCount == 1)
 
         await cache.invalidate(content: fixture.planLease.content)
         let rebuilt = try await cache.acquire(
@@ -1799,6 +1820,8 @@ struct SparseTileSamplingPipelineTests {
             pipeline: pipeline
         )
         let rebuiltCache = await cache.allocationSnapshot
+        #expect(rebuiltCache.hitCount == 102)
+        #expect(rebuiltCache.missCount == 2)
         #expect(
             rebuiltCache.planMetalBufferAllocationCount
                 == warmedCache.planMetalBufferAllocationCount * 2

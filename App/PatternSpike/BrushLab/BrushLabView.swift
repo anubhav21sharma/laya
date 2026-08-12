@@ -451,6 +451,7 @@ struct BrushLabView: View {
                     systemImage: "rectangle.stack"
                 )
             }
+            .accessibilityIdentifier("Brush Lab Review Card Menu")
 
             Button("Replay All Passes") {
                 Task {
@@ -463,6 +464,7 @@ struct BrushLabView: View {
                     }
                 }
             }
+            .accessibilityIdentifier("Brush Lab Replay All Passes")
             .disabled(
                 runtime.session.selectedReviewCardID == nil
                     || !runtime.controller.renderer.isIdle
@@ -523,6 +525,7 @@ struct BrushLabView: View {
                 }
             }
         }
+        .accessibilityIdentifier("Brush Lab Card \(cardID)")
     }
 
     private func selectedReviewLabel(_ session: BrushLabSession) -> String {
@@ -837,28 +840,49 @@ struct BrushLabView: View {
         inspectorHeader("Compiler")
         if let report = session.compilationReport {
             let compiled = session.compiledBrush
+            let primaryTextures = compiled?.primaryComponent.textures ?? [:]
+            let secondaryTextures =
+                compiled?.secondaryComponent?.textures ?? [:]
             keyValue("Backend", report.backend.rawValue)
             keyValue(
                 "Pipeline",
                 compiled.map {
-                    "\($0.pipelineKey.accumulation.rawValue) / "
-                        + $0.pipelineKey.edgeTreatment.rawValue
+                    "\($0.primaryComponent.pipelineKey.accumulation.rawValue) / "
+                        + $0.primaryComponent.pipelineKey.edgeTreatment.rawValue
                 } ?? "—"
             )
             keyValue(
                 "ABI",
                 compiled.map {
-                    "\($0.depositionPipeline.key.abiVersion)"
+                    "\($0.primaryComponent.depositionPipeline.key.abiVersion)"
                 } ?? "—"
             )
-            keyValue("Textures", "\(compiled?.textures.count ?? 0)")
+            keyValue(
+                "Textures",
+                "\(primaryTextures.count + secondaryTextures.count)"
+            )
             ForEach(
-                compiled?.textures.keys.sorted() ?? [],
+                primaryTextures.keys.sorted(),
                 id: \.self
             ) { id in
-                if let texture = compiled?.textures[id] {
+                if let texture = primaryTextures[id] {
                     keyValue(
-                        id,
+                        "Primary · \(id)",
+                        "\(texture.mipmapLevelCount) levels · "
+                            + ByteCountFormatter.string(
+                                fromByteCount: Int64(texture.allocatedSize),
+                                countStyle: .memory
+                            )
+                    )
+                }
+            }
+            ForEach(
+                secondaryTextures.keys.sorted(),
+                id: \.self
+            ) { id in
+                if let texture = secondaryTextures[id] {
+                    keyValue(
+                        "Secondary · \(id)",
                         "\(texture.mipmapLevelCount) levels · "
                             + ByteCountFormatter.string(
                                 fromByteCount: Int64(texture.allocatedSize),
@@ -925,6 +949,31 @@ struct BrushLabView: View {
             keyValue("Instances", "\(renderer.totalInstancesThisStroke)")
             keyValue("Dirty regions", "\(renderer.dirtyRegionCount)")
             keyValue("Replay count", "\(renderer.replayCount)")
+            keyValue(
+                "Stroke begin",
+                session.controller.lastStrokeBeginAdmissionResult.rawValue
+            )
+            keyValue(
+                "Viewport px / center / zoom",
+                String(
+                    format: "%.0f×%.0f / %.1f,%.1f / %.2f",
+                    renderer.viewportDrawableSize.width,
+                    renderer.viewportDrawableSize.height,
+                    renderer.viewportWorldCenter.x,
+                    renderer.viewportWorldCenter.y,
+                    renderer.viewportZoom
+                )
+            )
+            keyValue(
+                "Event pending / high",
+                "\(renderer.rendererEvents.pendingEventCount) / "
+                    + "\(renderer.rendererEvents.pendingHighWater)"
+            )
+            keyValue(
+                "Event stale / continuations",
+                "\(renderer.rendererEvents.staleGenerationDiscardCount) / "
+                    + "\(renderer.rendererEvents.scheduledContinuationCount)"
+            )
             keyValue(
                 "Backlog A / P",
                 "\(session.depositionMetrics.authoritativeBacklog) / "

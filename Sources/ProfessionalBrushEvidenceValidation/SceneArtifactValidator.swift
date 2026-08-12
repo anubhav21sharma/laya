@@ -288,12 +288,12 @@ enum SceneArtifactValidator {
 
     private static func isCurrentPipelineKey(_ value: String) -> Bool {
         let fields = value.split(separator: ":")
-        return fields.count == 10
+        return fields.count == 9
             && fields[0] == "deposition"
-            && fields[7] == "abi\(PatternDepositionABIVersion)"
-            && fields[8] == "format\(MTLPixelFormat.rgba16Float.rawValue)"
-            && fields[9].hasPrefix("samples")
-            && Int(fields[9].dropFirst("samples".count)).map { $0 > 0 }
+            && fields[6] == "abi\(PatternDepositionABIVersion)"
+            && fields[7] == "format\(MTLPixelFormat.rgba16Float.rawValue)"
+            && fields[8].hasPrefix("samples")
+            && Int(fields[8].dropFirst("samples".count)).map { $0 > 0 }
                 == true
     }
 

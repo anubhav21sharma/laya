@@ -6,7 +6,7 @@ artifacts="$repo_root/.build/slice2-artifacts"
 scenes="$repo_root/App/PatternSpike/Harness/Scenes"
 derived_data="$repo_root/.build/DerivedData"
 pad_derived_data="$repo_root/.build/DerivedDataPad"
-binary="$derived_data/Build/Products/Debug/PatternSpike.app/Contents/MacOS/PatternSpike"
+binary="$derived_data/Build/Products/Debug/PatternSpikeHarness.app/Contents/MacOS/PatternSpikeHarness"
 mutable_slice1_artifacts="$repo_root/.build/slice1-artifacts"
 accepted_baseline_pointer="$repo_root/.build/accepted-baselines/current-slice1"
 
@@ -944,7 +944,7 @@ run_gate() {
   fi
   if ! xcodebuild \
     -project App/PatternSpike.xcodeproj \
-    -scheme PatternSpikeMac \
+    -scheme PatternSpikeMacHarness \
     -destination 'platform=macOS' \
     -derivedDataPath "$derived_data" \
     build \

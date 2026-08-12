@@ -58,7 +58,7 @@ struct ForeignBrushIRTests {
             diagnostics: [diagnostic]
         )
 
-        #expect(ir.schemaVersion == 1)
+        #expect(ir.schemaVersion == 2)
         #expect(ir.provenance.sourceFormatFamily == "synthetic")
         #expect(ir.settings.map(\.semanticKey) == settings.map(\.semanticKey))
         #expect(ir.resources == [resource])
@@ -67,9 +67,9 @@ struct ForeignBrushIRTests {
 
     @Test
     func rejectsUnsupportedSchemaAndInvalidIdentityStrings() throws {
-        #expect(throws: ForeignBrushValidationError.unsupportedSchema(2)) {
+        #expect(throws: ForeignBrushValidationError.unsupportedSchema(3)) {
             _ = try ForeignBrushIR(
-                schemaVersion: 2,
+                schemaVersion: 3,
                 provenance: fixtureProvenance(),
                 sourceBrushIdentifier: "brush",
                 displayName: "Brush",
@@ -614,14 +614,19 @@ struct ForeignBrushResourceTests {
             try JSONSerialization.jsonObject(with: encoded)
                 as? [String: Any]
         )
+        let components = try #require(
+            object["components"] as? [[String: Any]]
+        )
         let diagnostics = try #require(
-            object["diagnostics"] as? [[String: Any]]
+            components[0]["diagnostics"] as? [[String: Any]]
         )
 
         var invalidCode = object
+        var invalidCodeComponents = components
         var invalidCodeDiagnostics = diagnostics
         invalidCodeDiagnostics[0]["code"] = "bad code"
-        invalidCode["diagnostics"] = invalidCodeDiagnostics
+        invalidCodeComponents[0]["diagnostics"] = invalidCodeDiagnostics
+        invalidCode["components"] = invalidCodeComponents
         #expect(
             throws: ForeignBrushValidationError.invalidDiagnosticCode(
                 "bad code"
@@ -633,12 +638,14 @@ struct ForeignBrushResourceTests {
         }
 
         var oversizedMessage = object
+        var oversizedMessageComponents = components
         var oversizedMessageDiagnostics = diagnostics
         oversizedMessageDiagnostics[0]["message"] = String(
             repeating: "m",
             count: ForeignBrushLimits.maximumDiagnosticMessageUTF8Bytes + 1
         )
-        oversizedMessage["diagnostics"] = oversizedMessageDiagnostics
+        oversizedMessageComponents[0]["diagnostics"] = oversizedMessageDiagnostics
+        oversizedMessage["components"] = oversizedMessageComponents
         #expect(
             throws: ForeignBrushValidationError.stringTooLong(
                 field: "diagnostic.message",

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 6,
+  "name": "deposition-composite",
+  "width": 128,
+  "height": 128,
+  "depositionInvariantExpectations": {
+    "compositeAggregateBoundsControl": true,
+    "compositeAggregateResourceControl": true,
+    "compositeAuthoredOrderControl": true,
+    "compositeFixedStorageControl": true,
+    "compositeRandomIsolationControl": true,
+    "compositeRetainedReplayControl": true,
+    "compositeTwoComponentContract": true,
+    "strokeCompilerCountersUnchanged": true
+  }
+}

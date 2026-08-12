@@ -149,8 +149,8 @@ func stageCAcceptanceV2CursorSurvivesEveryOutputPartition() throws {
         color: .black,
         seed: seed
     )
-    _ = try generator.beginBatch(samples[0])
-    _ = try generator.appendBatch(samples[1])
+    _ = try generator.currentSampleDabs(samples[0])
+    _ = try generator.currentSampleDabs(samples[1])
     let initialCursor = try generator.emissionCursor(
         for: samples[2],
         maximumPathSubdivisionCount: 4_096
@@ -285,19 +285,10 @@ private func stageCRunInputPartition(
             }
             for index in predictionIndices {
                 let predicted = stageCPredicted(samples[index])
-                let outcome: StrokePathInterpolationOutcome
-                if predicted.phase == .ended {
-                    outcome = try prediction.finishPredictionPrefix(
-                        predicted,
-                        maximumPathSubdivisionCount: 4_096
-                    ) { _ in observedPredictedDabCount += 1 }
-                } else {
-                    outcome = try prediction.appendPredictionPrefix(
-                        predicted,
-                        maximumPathSubdivisionCount: 4_096
-                    ) { _ in observedPredictedDabCount += 1 }
-                }
-                #expect(outcome == .completed)
+                try prediction.consumeCurrentSample(
+                    predicted,
+                    maximumPathSubdivisionCount: 4_096
+                ) { _ in observedPredictedDabCount += 1 }
             }
         }
 
@@ -350,16 +341,17 @@ private func stageCGenerateBatch(
     sample: WorldStrokeSample,
     generator: inout BrushStrokeGenerator
 ) throws -> LogicalDabBatch {
-    switch sample.phase {
-    case .began:
-        try generator.beginBatch(sample)
-    case .moved:
-        try generator.appendBatch(sample)
-    case .ended:
-        try generator.finishBatch(sample)
-    case .cancelled:
+    guard sample.phase != .cancelled else {
         preconditionFailure("A canonical emitted trace cannot contain cancel")
     }
+    let startingOrdinal = generator.emittedDabCount
+    let dabs = try generator.currentSampleDabs(sample)
+    return try LogicalDabBatch(
+        seed: generator.seed,
+        startingOrdinal: dabs.first?.ordinal ?? startingOrdinal,
+        isPredicted: sample.kind == .predicted,
+        dabs: dabs
+    )
 }
 
 private func stageCExpectEquivalent(

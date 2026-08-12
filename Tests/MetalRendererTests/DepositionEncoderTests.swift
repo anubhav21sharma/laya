@@ -89,6 +89,55 @@ struct DepositionEncoderTests {
     }
 
     @Test
+    func componentOrderProducesContiguousBindingRunsWithoutGlobalGrouping()
+        throws
+    {
+        guard var context = try makeContext(capacity: 8) else { return }
+        let primary = DepositionComponentBinding(
+            ordinal: 0,
+            pipeline: context.binding,
+            material: context.material
+        )
+        let secondary = DepositionComponentBinding(
+            ordinal: 1,
+            pipeline: context.binding,
+            material: context.material
+        )
+        let prepared = try context.encoder.preflight(
+            records: records(componentOrdinals: [0, 0, 1, 1, 0]),
+            primary: primary,
+            secondary: secondary,
+            target: context.target
+        )
+
+        #expect(prepared.bindingRunCount == 3)
+        #expect(prepared.componentOrdinals == [0, 0, 1, 1, 0])
+        context.encoder.abandon(prepared)
+    }
+
+    @Test
+    func unavailableComponentBindingFailsBeforeLeaseReservation() throws {
+        guard var context = try makeContext(capacity: 8) else { return }
+        let primary = DepositionComponentBinding(
+            ordinal: 0,
+            pipeline: context.binding,
+            material: context.material
+        )
+
+        #expect(
+            throws: DepositionEncodingError.componentBindingUnavailable(1)
+        ) {
+            _ = try context.encoder.preflight(
+                records: records(componentOrdinals: [0, 1]),
+                primary: primary,
+                secondary: nil,
+                target: context.target
+            )
+        }
+        #expect(context.pool.unavailableSlotCount == 0)
+    }
+
+    @Test
     func failedMultiLeasePreflightReturnsEveryLeaseItAcquired() throws {
         guard var context = try makeContext(capacity: 2) else { return }
         let held = try #require(context.pool.acquire(count: 2))
@@ -221,6 +270,41 @@ struct DepositionEncoderTests {
     }
 
     @Test
+    func analyticSecondaryShapePreflightsWithoutTextureBinding() throws {
+        guard var context = try makeContext(
+            capacity: 2,
+            secondaryShape: .softRound
+        ) else { return }
+
+        let prepared = try context.encoder.preflight(
+            records: records(count: 1),
+            binding: context.binding,
+            material: context.material,
+            target: context.target
+        )
+
+        #expect(context.material.textures[.secondaryShape] == nil)
+        context.encoder.abandon(prepared)
+        #expect(context.pool.unavailableSlotCount == 0)
+    }
+
+    @Test
+    func texturedSecondaryShapeFailsMaterialConstructionWithoutItsTexture() {
+        #expect(
+            throws: DepositionPreparationError.missingRequiredResource(
+                "shape.secondary"
+            )
+        ) {
+            _ = try DepositionMaterialBinding(
+                uniformTemplate: materialTemplate(
+                    secondaryShape: .asset("shape.secondary")
+                ),
+                textures: [:]
+            )
+        }
+    }
+
+    @Test
     func nonfiniteInstanceFailsBeforeAnyLeaseIsReserved() throws {
         guard var context = try makeContext(capacity: 2) else { return }
         var invalid = instance(identity: 7)
@@ -327,8 +411,7 @@ struct DepositionEncoderTests {
                 functionConstants: BrushFunctionConstants(
                     usesSecondaryShape: false,
                     usesGrain: true,
-                    usesSecondaryGrain: false,
-                    usesDestinationSampling: false
+                    usesSecondaryGrain: false
                 )
             ),
             abiVersion: DepositionABI.version,
@@ -507,6 +590,118 @@ struct DepositionEncoderTests {
         )
 
         #expect(prepared.textureLevelRange == 0...3)
+        context.encoder.abandon(prepared)
+    }
+
+    @Test
+    func texturedTipReportsProjectedMipRangeFromFrozenInstanceFootprint()
+        throws
+    {
+        guard var context = try makeContext(capacity: 2) else { return }
+        let shape = try texture(
+            device: context.device,
+            pixelFormat: .r8Unorm,
+            width: 256,
+            height: 128,
+            mipmapped: true,
+            usage: [.shaderRead]
+        )
+        let assetSupport = try BrushTipAssetSupportCompiler.compile(
+            baseLevel: Data([255]),
+            width: 1,
+            height: 1
+        )
+        let tip = CompiledBrushTipSupport(
+            semanticTipHash: "tip",
+            source: .texture(resourceID: "shape.test"),
+            definition: .analyticEllipse,
+            assetSupport: assetSupport,
+            sourceWidth: 256,
+            sourceHeight: 128,
+            mipLevelCount: shape.mipmapLevelCount
+        )
+        let material = try DepositionMaterialBinding(
+            uniformTemplate: materialTemplate(
+                primaryShape: .asset("shape.test")
+            ),
+            textures: ["shape.test": shape],
+            tipSupports: [tip]
+        )
+
+        let prepared = try context.encoder.preflight(
+            records: records(count: 1),
+            binding: context.binding,
+            material: material,
+            target: context.target
+        )
+
+        #expect(prepared.selectedTipLevelOfDetailRange == 7...7)
+        context.encoder.abandon(prepared)
+    }
+
+    @Test
+    func rotatedSecondaryAssetReportsItsTransformedAnisotropicMipLevel()
+        throws
+    {
+        guard var context = try makeContext(
+            capacity: 2,
+            secondaryShape: .softRound
+        ) else { return }
+        let shape = try texture(
+            device: context.device,
+            pixelFormat: .r8Unorm,
+            width: 256,
+            height: 128,
+            mipmapped: true,
+            usage: [.shaderRead]
+        )
+        let assetSupport = try BrushTipAssetSupportCompiler.compile(
+            baseLevel: Data([255]),
+            width: 1,
+            height: 1
+        )
+        let primary = CompiledBrushTipSupport(
+            semanticTipHash: "primary",
+            source: .analyticEllipse,
+            definition: .analyticEllipse,
+            assetSupport: nil,
+            sourceWidth: nil,
+            sourceHeight: nil,
+            mipLevelCount: 0
+        )
+        let secondary = CompiledBrushTipSupport(
+            semanticTipHash: "secondary",
+            source: .texture(resourceID: "shape.secondary"),
+            definition: .analyticEllipse,
+            assetSupport: assetSupport,
+            sourceWidth: 256,
+            sourceHeight: 128,
+            mipLevelCount: shape.mipmapLevelCount
+        )
+        let material = try DepositionMaterialBinding(
+            uniformTemplate: materialTemplate(
+                secondaryShape: .asset("shape.secondary"),
+                secondaryRotation: .pi / 2
+            ),
+            textures: ["shape.secondary": shape],
+            tipSupports: [primary, secondary]
+        )
+        var rotated = instance(identity: 0)
+        rotated.tipFrame0 = SIMD4(4, 0, 0, 1)
+        let record = ProjectedDepositionRecord(
+            identity: 0,
+            instance: rotated,
+            radialPage: nil
+        )
+
+        let prepared = try context.encoder.preflight(
+            records: [record],
+            binding: context.binding,
+            material: material,
+            target: context.target
+        )
+
+        #expect(prepared.selectedTipLevelOfDetailRange == 7...7)
         context.encoder.abandon(prepared)
     }
 
@@ -707,7 +902,8 @@ struct DepositionEncoderTests {
 
     private func makeContext(
         capacity: Int,
-        usesPrimaryGrain: Bool = false
+        usesPrimaryGrain: Bool = false,
+        secondaryShape: BrushShapeDescriptor? = nil
     ) throws -> EncoderTestContext? {
         guard let device = MTLCreateSystemDefaultDevice() else { return nil }
         let pool = try DabInstanceBufferPool(
@@ -720,10 +916,9 @@ struct DepositionEncoderTests {
                 accumulation: .flow,
                 edgeTreatment: .none,
                 functionConstants: BrushFunctionConstants(
-                    usesSecondaryShape: false,
+                    usesSecondaryShape: secondaryShape != nil,
                     usesGrain: usesPrimaryGrain,
-                    usesSecondaryGrain: false,
-                    usesDestinationSampling: false
+                    usesSecondaryGrain: false
                 )
             ),
             abiVersion: DepositionABI.version,
@@ -736,7 +931,9 @@ struct DepositionEncoderTests {
             state: try minimalPipeline(device: device)
         )
         let material = try DepositionMaterialBinding(
-            uniformTemplate: materialTemplate(),
+            uniformTemplate: materialTemplate(
+                secondaryShape: secondaryShape
+            ),
             textures: [:]
         )
         let target = try texture(
@@ -763,6 +960,19 @@ struct DepositionEncoderTests {
         (0..<count).map { index in
             ProjectedDepositionRecord(
                 identity: UInt64(index),
+                instance: instance(identity: UInt64(index)),
+                radialPage: nil
+            )
+        }
+    }
+
+    private func records(
+        componentOrdinals: [UInt8]
+    ) -> [ProjectedDepositionRecord] {
+        componentOrdinals.enumerated().map { index, componentOrdinal in
+            ProjectedDepositionRecord(
+                identity: UInt64(index),
+                componentOrdinal: componentOrdinal,
                 instance: instance(identity: UInt64(index)),
                 radialPage: nil
             )
@@ -904,6 +1114,10 @@ struct DepositionEncoderTests {
     }
 
     private func materialTemplate(
+        primaryShape: BrushShapeDescriptor = .hardRound,
+        secondaryShape: BrushShapeDescriptor? = nil,
+        secondaryScale: Float = 1,
+        secondaryRotation: Float = 0,
         primaryGrain: BrushGrainDescriptor? = nil
     ) -> BrushUniformTemplate {
         BrushUniformTemplate(
@@ -920,13 +1134,23 @@ struct DepositionEncoderTests {
             coverage: BrushCoverageDefinition(
                 shapes: [
                     BrushShapeLayerDefinition(
-                        shape: .hardRound,
+                        shape: primaryShape,
                         combination: .replace,
                         scale: 1,
                         rotation: 0,
                         offset: .zero
                     ),
-                ],
+                ] + (secondaryShape.map {
+                    [
+                        BrushShapeLayerDefinition(
+                            shape: $0,
+                            combination: .multiply,
+                            scale: secondaryScale,
+                            rotation: secondaryRotation,
+                            offset: .zero
+                        ),
+                    ]
+                } ?? []),
                 grains: primaryGrain.map {
                     [
                         BrushGrainLayerDefinition(

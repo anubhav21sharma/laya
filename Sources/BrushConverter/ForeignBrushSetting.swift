@@ -16,6 +16,7 @@ public enum ForeignBrushSettingUnit: String, Codable, CaseIterable, Sendable {
 public enum ForeignBrushSettingDomain:
     String, Codable, CaseIterable, Sendable
 {
+    case null
     case boolean
     case integer
     case scalar
@@ -103,6 +104,7 @@ public struct ForeignBrushColor: Codable, Equatable, Sendable {
 }
 
 public enum ForeignBrushSettingValue: Codable, Equatable, Sendable {
+    case null
     case boolean(Bool)
     case integer(Int64)
     case scalar(Double)
@@ -114,6 +116,7 @@ public enum ForeignBrushSettingValue: Codable, Equatable, Sendable {
 
     var domain: ForeignBrushSettingDomain {
         switch self {
+        case .null: .null
         case .boolean: .boolean
         case .integer: .integer
         case .scalar: .scalar
@@ -134,7 +137,7 @@ public enum ForeignBrushSettingValue: Codable, Equatable, Sendable {
 
     func validate() throws {
         switch self {
-        case .boolean, .integer:
+        case .null, .boolean, .integer:
             break
         case let .scalar(value):
             try ForeignBrushValidator.finite(
@@ -206,7 +209,7 @@ public enum ForeignBrushSettingValue: Codable, Equatable, Sendable {
 
     func canonicalized() -> Self {
         switch self {
-        case .boolean, .integer, .token, .resourceReference:
+        case .null, .boolean, .integer, .token, .resourceReference:
             return self
         case let .scalar(value):
             return .scalar(value == 0 ? 0 : value)
@@ -222,6 +225,7 @@ public enum ForeignBrushSettingValue: Codable, Equatable, Sendable {
     }
 
     private enum Kind: String, Codable {
+        case null
         case boolean
         case integer
         case scalar
@@ -235,6 +239,8 @@ public enum ForeignBrushSettingValue: Codable, Equatable, Sendable {
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
+        case .null:
+            try container.encode(Kind.null, forKey: .kind)
         case let .boolean(value):
             try container.encode(Kind.boolean, forKey: .kind)
             try container.encode(value, forKey: .value)
@@ -265,6 +271,8 @@ public enum ForeignBrushSettingValue: Codable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         switch try container.decode(Kind.self, forKey: .kind) {
+        case .null:
+            self = .null
         case .boolean:
             self = .boolean(try container.decode(Bool.self, forKey: .value))
         case .integer:
@@ -325,7 +333,7 @@ public struct ForeignBrushSetting: Codable, Equatable, Sendable {
             )
         }
         switch domain {
-        case .boolean, .token, .resource:
+        case .null, .boolean, .token, .resource:
             guard unit == .unitless else {
                 throw ForeignBrushValidationError.unitMismatch(
                     domain: domain,

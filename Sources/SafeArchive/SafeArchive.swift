@@ -108,10 +108,20 @@ public struct SafeArchiveLimits: Equatable, Sendable {
 public struct SafeArchive: Sendable {
     public let paths: [String]
 
-    private let storage: Data
+    private let storage: any SafeArchiveStorage
     private let records: [String: SafeArchiveEntryRecord]
 
     init(storage: Data, records: [String: SafeArchiveEntryRecord]) {
+        self.init(
+            storage: SafeArchiveMemoryStorage(data: storage),
+            records: records
+        )
+    }
+
+    init(
+        storage: any SafeArchiveStorage,
+        records: [String: SafeArchiveEntryRecord]
+    ) {
         self.storage = storage
         self.records = records
         paths = records.keys.sorted()
@@ -136,7 +146,11 @@ public struct SafeArchive: Sendable {
                 maximum: maximumByteCount
             )
         }
-        return storage.subdata(in: record.dataRange)
+        let data = try storage.read(record.dataRange)
+        guard CRC32.checksum(data) == record.checksum else {
+            throw SafeArchiveError.checksumMismatch(path)
+        }
+        return data
     }
 
     public func byteCount(for path: String) throws -> Int {
@@ -165,17 +179,20 @@ public struct SafeArchive: Sendable {
                 byteCount: UInt64(record.dataRange.count)
             )
             try consumer.beginEntry(entry)
+            var checksum = CRC32Accumulator()
             var cursor = record.dataRange.lowerBound
             while cursor < record.dataRange.upperBound {
                 let end = min(
                     record.dataRange.upperBound,
                     cursor + maximumChunkByteCount
                 )
-                try consumer.consume(
-                    storage.subdata(in: cursor..<end),
-                    for: path
-                )
+                let chunk = try storage.read(cursor..<end)
+                checksum.update(chunk)
+                try consumer.consume(chunk, for: path)
                 cursor = end
+            }
+            guard checksum.checksum == record.checksum else {
+                throw SafeArchiveError.checksumMismatch(path)
             }
             try consumer.finishEntry(entry)
         }
@@ -194,18 +211,40 @@ public struct SafeArchive: Sendable {
         guard let record = records[path] else {
             throw SafeArchiveError.missingEntry(path)
         }
+        var checksum = CRC32Accumulator()
         var cursor = record.dataRange.lowerBound
         while cursor < record.dataRange.upperBound {
             let end = min(
                 record.dataRange.upperBound,
                 cursor + maximumChunkByteCount
             )
-            try consume(storage.subdata(in: cursor..<end))
+            let chunk = try storage.read(cursor..<end)
+            checksum.update(chunk)
+            try consume(chunk)
             cursor = end
+        }
+        guard checksum.checksum == record.checksum else {
+            throw SafeArchiveError.checksumMismatch(path)
         }
     }
 }
 
 struct SafeArchiveEntryRecord: Sendable {
     let dataRange: Range<Int>
+    let checksum: UInt32
+}
+
+protocol SafeArchiveStorage: Sendable {
+    func read(_ range: Range<Int>) throws -> Data
+}
+
+private struct SafeArchiveMemoryStorage: SafeArchiveStorage {
+    let data: Data
+
+    func read(_ range: Range<Int>) throws -> Data {
+        guard range.lowerBound >= 0, range.upperBound <= data.count else {
+            throw SafeArchiveError.malformedArchive
+        }
+        return data.subdata(in: range)
+    }
 }

@@ -84,11 +84,12 @@ public struct BrushPackage: Equatable, Sendable {
 
 enum BrushPackageValidator {
     static func validate(_ package: BrushPackage) throws {
-        guard package.definition.schemaVersion == BrushDefinition.legacySchemaVersion
-                || package.definition.schemaVersion
-                    == BrushDefinition.currentSchemaVersion
+        guard package.definition.schemaVersion
+                == BrushDefinition.currentSchemaVersion
         else {
-            throw BrushFormatError.unsupportedDefinitionSchema
+            throw BrushFormatError.unsupportedDefinitionSchema(
+                package.definition.schemaVersion
+            )
         }
         let manifestIDs = Set(package.manifest.resources.map(\.id))
         guard Set(package.resourceData.keys) == manifestIDs else {
@@ -113,10 +114,22 @@ enum BrushPackageValidator {
             }
             expandedBytes = next
         }
-        let references = Dictionary(
-            uniqueKeysWithValues: package.definition.resources.map { ($0.identifier, $0) }
-        )
-        for reference in package.definition.resources {
+        var references: [String: BrushResourceReference] = [:]
+        for reference in package.definition.components.flatMap(\.resources) {
+            if let existing = references[reference.identifier] {
+                guard existing == reference else {
+                    throw BrushFormatError.invalidResource(
+                        id: reference.identifier,
+                        reason: "conflicting component reference"
+                    )
+                }
+            } else {
+                references[reference.identifier] = reference
+            }
+        }
+        for reference in references.values.sorted(by: {
+            $0.identifier < $1.identifier
+        }) {
             if let resource = package.manifest.resources.first(where: { $0.id == reference.identifier }) {
                 guard resource.kind == reference.kind else {
                     throw BrushFormatError.invalidResource(

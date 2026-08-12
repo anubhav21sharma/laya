@@ -26,6 +26,10 @@ public struct BrushLabRendererDiagnosticSnapshot: Equatable, Sendable {
     public let rasterRevisionResidentBytes: Int
     public let builtInTextureCount: Int
     public let assetFallbackCount: Int
+    public let viewportDrawableSize: PatternSize
+    public let viewportWorldCenter: WorldPoint
+    public let viewportZoom: Float
+    public let rendererEvents: BrushLabRendererEventDiagnosticSnapshot
     public let deposition: BrushLabRendererDepositionDiagnosticSnapshot
 
     public init(
@@ -39,6 +43,10 @@ public struct BrushLabRendererDiagnosticSnapshot: Equatable, Sendable {
         rasterRevisionResidentBytes: Int,
         builtInTextureCount: Int,
         assetFallbackCount: Int,
+        viewportDrawableSize: PatternSize,
+        viewportWorldCenter: WorldPoint,
+        viewportZoom: Float,
+        rendererEvents: BrushLabRendererEventDiagnosticSnapshot,
         deposition: BrushLabRendererDepositionDiagnosticSnapshot
     ) {
         self.totalDabsThisStroke = totalDabsThisStroke
@@ -51,7 +59,32 @@ public struct BrushLabRendererDiagnosticSnapshot: Equatable, Sendable {
         self.rasterRevisionResidentBytes = rasterRevisionResidentBytes
         self.builtInTextureCount = builtInTextureCount
         self.assetFallbackCount = assetFallbackCount
+        self.viewportDrawableSize = viewportDrawableSize
+        self.viewportWorldCenter = viewportWorldCenter
+        self.viewportZoom = viewportZoom
+        self.rendererEvents = rendererEvents
         self.deposition = deposition
+    }
+}
+
+public struct BrushLabRendererEventDiagnosticSnapshot:
+    Equatable, Sendable
+{
+    public let pendingEventCount: Int
+    public let pendingHighWater: Int
+    public let staleGenerationDiscardCount: UInt64
+    public let scheduledContinuationCount: UInt64
+
+    public init(
+        pendingEventCount: Int,
+        pendingHighWater: Int,
+        staleGenerationDiscardCount: UInt64,
+        scheduledContinuationCount: UInt64
+    ) {
+        self.pendingEventCount = pendingEventCount
+        self.pendingHighWater = pendingHighWater
+        self.staleGenerationDiscardCount = staleGenerationDiscardCount
+        self.scheduledContinuationCount = scheduledContinuationCount
     }
 }
 
@@ -92,22 +125,6 @@ public struct HarnessLiveFlushResult {
 public struct HarnessReplayRetentionSnapshot: Equatable, Sendable {
     public let retainedDabCount: Int
     public let visibleProjectedInstanceCount: Int
-}
-
-struct StrokeRuntimeReplayEpochTracker {
-    private(set) var lastEpoch: UInt64 = 0
-
-    mutating func beginStroke(at epoch: UInt64) {
-        lastEpoch = epoch
-    }
-
-    mutating func consume(currentEpoch: UInt64) -> UInt64 {
-        let delta = currentEpoch >= lastEpoch
-            ? currentEpoch - lastEpoch
-            : currentEpoch
-        lastEpoch = currentEpoch
-        return delta
-    }
 }
 
 package struct OffMainStrokeProductionTraceSnapshot: Sendable {
@@ -225,8 +242,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private var nextStrokeRuntimeFrameID: UInt64 = 1
     private var pendingStrokeRuntimeFrameIDs:
         Set<StrokeRuntimeFrameIdentity> = []
-    private var strokeRuntimeReplayEpochTracker =
-        StrokeRuntimeReplayEpochTracker()
     public private(set) var interactiveGridVisibility = false
     public var isIdle: Bool {
         activeStroke == nil
@@ -259,7 +274,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
         nextStrokeRuntimeFrameID = 1
         pendingStrokeRuntimeFrameIDs.removeAll(keepingCapacity: true)
-        strokeRuntimeReplayEpochTracker.beginStroke(at: 0)
         let generation = rendererEventDispatcher
             .advanceTelemetryGeneration()
         telemetryEventGeneration = generation
@@ -296,25 +310,33 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let telemetry = brushLabDepositionTelemetry.snapshot
         let timings = brushLabDepositionTelemetry.timings
         let pool = instancePool.diagnosticSnapshot
-        let liveDirty = liveStroke.dirtyRegions(
-            clippedTo: storagePixelSize
-        ).rectangles.count
-        let replayDirty = replayStroke.dirtyRegions(
-            clippedTo: storagePixelSize
-        ).rectangles.count
+        let rendererEvents = rendererEventDispatcher.diagnostics
+        let activeDirtyCoordinateCount = activePaintTransientSource?
+            .changedCoordinateSets.reduce(0) { $0 + $1.count } ?? 0
         return BrushLabRendererDiagnosticSnapshot(
             totalDabsThisStroke: counters.totalDabsThisStroke,
             totalInstancesThisStroke: counters.totalInstancesThisStroke,
             renderedFramesThisStroke: counters.renderedFramesThisStroke,
             actualDabCount: brushLabActualDabCount,
             predictedDabCount: brushLabPredictedDabCount,
-            replayCount: transientStrokeBuffer?.replayEpoch ?? 0,
-            dirtyRegionCount: liveDirty + replayDirty,
+            replayCount: 0,
+            dirtyRegionCount: activeDirtyCoordinateCount,
             rasterRevisionResidentBytes: paintRevisionResidentBytesState,
             builtInTextureCount:
-                (activeDrawBrush?.textures.count ?? 0)
-                    + (activeEraserBrush?.textures.count ?? 0),
+                (activeDrawBrush.map(uniqueTextureCount) ?? 0)
+                    + (activeEraserBrush.map(uniqueTextureCount) ?? 0),
             assetFallbackCount: 0,
+            viewportDrawableSize: viewport.drawableSize,
+            viewportWorldCenter: viewport.worldCenter,
+            viewportZoom: viewport.zoom,
+            rendererEvents: BrushLabRendererEventDiagnosticSnapshot(
+                pendingEventCount: rendererEvents.pendingEventCount,
+                pendingHighWater: rendererEvents.pendingHighWater,
+                staleGenerationDiscardCount:
+                    rendererEvents.staleGenerationDiscardCount,
+                scheduledContinuationCount:
+                    rendererEvents.scheduledContinuationCount
+            ),
             deposition: BrushLabRendererDepositionDiagnosticSnapshot(
                 authoritativePending:
                     scheduler?.authoritativePending
@@ -380,38 +402,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         var isFinishedTransiently: Bool
     }
 
-    struct ProjectedDabRecord {
-        let depositionRecord: ProjectedDepositionRecord
-        let dirtyRect: PixelRect
-        let radialPage: RadialPageCoordinate?
-    }
-
-    private struct PreparedGeneratedDab {
-        let attributes: DabAttributes
-        let projectedRange: Range<Int>
-
-        var transient: TransientStrokeDab {
-            TransientStrokeDab(
-                attributes: attributes,
-                projectedInstanceCount: projectedRange.count
-            )
-        }
-    }
-
-    private struct PredictionGenerationLimits {
-        let maximumDabCount: Int
-        let maximumProjectedInstanceCount: Int
-    }
-
-    private struct PreparedPredictionDabs {
-        let range: Range<Int>
-        let overload: PredictionOverloadReasons
-    }
-
-    private struct PredictionGenerationLimitReached: Error {
-        let reason: PredictionOverloadReasons
-    }
-
     struct PredictionSubmissionScratchSnapshot: Equatable, Sendable {
         let count: Int
         let highWater: Int
@@ -423,79 +413,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let lastShedSampleCount: Int
         let lastValidatedSampleCount: Int
         let lastTelemetrySampleCount: Int
-    }
-
-    /// Renderer-owned collection storage used by the synchronous input and
-    /// frame-drain paths. Every buffer is reserved before a stroke can arm the
-    /// allocation audit; hot-path reuse clears logical contents while keeping
-    /// the backing storage.
-    private final class DepositionInputScratch {
-        var preparedDabs: [PreparedGeneratedDab] = []
-        var transientDabs: [TransientStrokeDab] = []
-        var preparedChunkRanges: [Range<Int>] = []
-        var transientChunks: [TransientStrokeChunk] = []
-        var settledChunks: [TransientStrokeChunk] = []
-        var worldSamples: [WorldStrokeSample] = []
-        var projectedArena: [ProjectedDabRecord] = []
-        var flattenedProjected: [ProjectedDabRecord] = []
-        var depositionRecords: [ProjectedDepositionRecord] = []
-        var replayRecords: [ProjectedDabRecord] = []
-        var replayDirtyRegions: [PixelRect] = []
-        var authoritativeFrame: [ProjectedDepositionRecord] = []
-        var predictedFrame: [ProjectedDepositionRecord] = []
-        var encodedLogicalIdentities: [UInt64] = []
-
-        init() {
-            preparedDabs.reserveCapacity(
-                TransientStrokeBufferContract.wholeStrokeDabCapacity
-            )
-            transientDabs.reserveCapacity(
-                TransientStrokeBufferContract.wholeStrokeDabCapacity
-            )
-            preparedChunkRanges.reserveCapacity(
-                TransientStrokeBufferContract.wholeStrokeSampleCapacity
-            )
-            transientChunks.reserveCapacity(
-                TransientStrokeBufferContract.wholeStrokeSampleCapacity
-            )
-            settledChunks.reserveCapacity(
-                TransientStrokeBufferContract.wholeStrokeSampleCapacity
-            )
-            worldSamples.reserveCapacity(
-                TransientStrokeBufferContract.wholeStrokeSampleCapacity
-            )
-            projectedArena.reserveCapacity(
-                TransientStrokeBufferContract
-                    .visibleEpochProjectedInstanceCapacity
-            )
-            flattenedProjected.reserveCapacity(
-                TransientStrokeBufferContract
-                    .visibleEpochProjectedInstanceCapacity
-            )
-            depositionRecords.reserveCapacity(
-                GridCanvasContract.pendingCapacity
-            )
-            replayRecords.reserveCapacity(
-                TransientStrokeBufferContract
-                    .visibleEpochProjectedInstanceCapacity
-            )
-            replayDirtyRegions.reserveCapacity(
-                TransientStrokeBufferContract
-                    .visibleEpochProjectedInstanceCapacity
-                + LiveStroke.maximumRetainedDirtyRectangleCount
-            )
-            authoritativeFrame.reserveCapacity(
-                GridCanvasContract.instanceCapacity
-            )
-            predictedFrame.reserveCapacity(
-                TransientStrokeBufferContract
-                    .visibleEpochProjectedInstanceCapacity
-            )
-            encodedLogicalIdentities.reserveCapacity(
-                TransientStrokeBufferContract
-                    .visibleEpochProjectedInstanceCapacity
-            )
-        }
     }
 
     let commandQueue: any MTLCommandQueue
@@ -515,6 +432,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private var pendingPaintHarnessDabCount = 0
     private var pendingPaintHarnessInstanceCount = 0
     private weak var paintDisplayView: MTKView?
+    private var exclusiveInteractiveCompletionDrainInProgress = false
     var depositionFrameBudget: DepositionFrameBudget
     private(set) var activeDrawBrush: CompiledBrush?
     private(set) var activeEraserBrush: CompiledBrush?
@@ -530,16 +448,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private var brushLabStrokeEncodedDabCount: UInt64 = 0
     private var brushLabPendingInputReceiptNanoseconds: UInt64?
     private var inputPathStorageAudit = InputPathStorageAudit()
-    private let depositionInputScratch = DepositionInputScratch()
-    let transientDabArena = TransientStrokeDabArena()
-    private let tilingProjectionScratch = TilingProjectionScratch(
-        maximumFragmentCount:
-            TransientStrokeBufferContract
-                .visibleEpochProjectedInstanceCapacity
-    )
-    var scheduledAuthoritativeIdentityHighWater: UInt64 = 0
+    package private(set) var scheduledAuthoritativeIdentityHighWater: UInt64 = 0
     private var encodedAuthoritativeIdentityHighWater: UInt64 = 0
-    private var lastEncodedAuthoritativeIdentityRange: Range<UInt64>?
+    private var pendingEncodedAuthoritativeIdentityRange: Range<UInt64>?
     private var activeStrokeTileSurfaceResources: StrokeTileSurfaceResources?
     var tileSize: PatternSize {
         PatternSize(
@@ -549,7 +460,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
     var tilingStrategy: TilingStrategy
     var activeStroke: ActiveStrokeExecution?
-    var strokeGenerator: BrushStrokeGenerator?
     private var strokePreparationBridge: StrokePreparationBridge?
     private var warmedStrokePreparationBridge: StrokePreparationBridge
     private enum StrokeWorkspaceState: Equatable {
@@ -585,18 +495,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         StrokePrivateSurfaceEncoderSnapshot?
     private var lastOffMainZeroWorkLeaseCount = 0
     private var lastOffMainPredictedInstanceCount = 0
-    var predictedStrokeGenerator: BrushStrokeGenerator?
-    var transientStrokeBuffer: TransientStrokeBuffer?
-    var brushInputDeriver = BrushInputDeriver()
-    var predictedInputDeriver: BrushInputDeriver?
-    var liveStroke = LiveStroke()
-    var replayStroke = LiveStroke(
-        capacity: TransientStrokeBufferContract
-            .visibleEpochProjectedInstanceCapacity
-    )
     private var nextHarnessTokenRawValue: UInt64 = 1
-    private var nextReplayEpoch: UInt64 = 1
-    private var knownStrokeTotalDistance: Float?
 
     private var forceOffMainStrokeCommandFailureForTesting = false
 
@@ -922,41 +821,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     private func validateCompiledBrush(_ brush: CompiledBrush) throws {
         let definition = brush.program.definition
-        let material = definition.material
-        guard brush.program.requestedBackend == .deposition,
-              brush.pipelineKey.backend == .deposition,
-              material.interaction == .none,
-              material.edgeTreatment != .wetConcentration
-        else {
-            throw MetalRendererError.unsupportedCompiledBrush
-        }
-        let expectedMaterial: DepositionMaterialBinding
-        do {
-            expectedMaterial = try DepositionMaterialBinding(
-                compiledBrush: brush
-            )
-        } catch {
-            throw MetalRendererError.invalidCompiledBrush
-        }
-        let pipelineKey = brush.depositionPipeline.key
         guard brush.renderIdentity.definitionID == definition.id,
               brush.report.definitionID == definition.id.rawValue,
               brush.report.packageContentHash
                 == brush.renderIdentity.semanticHash,
               brush.report.backend == brush.program.requestedBackend,
-              brush.pipelineKey == pipelineKey.brush,
-              pipelineKey.abiVersion == DepositionABI.version,
-              pipelineKey.colorPixelFormatRawValue
-                == DocumentColorPipeline.workingPixelFormat.rawValue,
-              pipelineKey.sampleCount
-                == DocumentColorPipeline.renderSampleCount,
-              brush.uniformTemplate.placement == definition.placement,
-              brush.uniformTemplate.coverage == definition.coverage,
-              brush.uniformTemplate.color == definition.color,
-              brush.uniformTemplate.material == definition.material,
-              depositionMaterial(
-                brush.depositionMaterial,
-                matches: expectedMaterial
+              brush.program.requestedBackend == .deposition,
+              (brush.program.secondaryComponent == nil)
+                == (brush.secondaryComponent == nil),
+              try compiledComponent(
+                brush.primaryComponent,
+                matches: brush.program.primaryComponent
               ),
               brush.residentByteCount >= 0,
               brush.report.residentResourceBytes
@@ -964,6 +839,62 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         else {
             throw MetalRendererError.invalidCompiledBrush
         }
+        if let compiledSecondary = brush.secondaryComponent,
+           let programSecondary = brush.program.secondaryComponent,
+           try !compiledComponent(
+               compiledSecondary,
+               matches: programSecondary
+           )
+        {
+            throw MetalRendererError.invalidCompiledBrush
+        }
+    }
+
+    private func compiledComponent(
+        _ compiled: CompiledBrushComponent,
+        matches program: BrushComponentProgram
+    ) throws -> Bool {
+        let definition = program.definition
+        guard compiled.pipelineKey.backend == .deposition,
+              definition.material.interaction == .none,
+              definition.material.edgeTreatment != .wetConcentration
+        else {
+            throw MetalRendererError.unsupportedCompiledBrush
+        }
+        let expectedMaterial = try DepositionMaterialBinding(
+            uniformTemplate: compiled.uniformTemplate,
+            textures: compiled.textures,
+            tipSupports: compiled.tipSupports
+        )
+        let pipelineKey = compiled.depositionPipeline.key
+        return compiled.identifier == definition.identifier
+            && compiled.ordinal == definition.ordinal
+            && compiled.pipelineKey == pipelineKey.brush
+            && pipelineKey.abiVersion == DepositionABI.version
+            && pipelineKey.colorPixelFormatRawValue
+                == DocumentColorPipeline.workingPixelFormat.rawValue
+            && pipelineKey.sampleCount
+                == DocumentColorPipeline.renderSampleCount
+            && compiled.uniformTemplate.placement == definition.placement
+            && compiled.uniformTemplate.coverage == definition.coverage
+            && compiled.uniformTemplate.color == definition.color
+            && compiled.uniformTemplate.material == definition.material
+            && depositionMaterial(
+                compiled.depositionMaterial,
+                matches: expectedMaterial
+            )
+    }
+
+    private func uniqueTextureCount(_ brush: CompiledBrush) -> Int {
+        guard let secondary = brush.secondaryComponent else {
+            return brush.primaryComponent.textures.count
+        }
+        return brush.primaryComponent.textures.count
+            + secondary.textures.keys.reduce(into: 0) { count, key in
+                if brush.primaryComponent.textures[key] == nil {
+                    count += 1
+                }
+            }
     }
 
     private func depositionMaterial(
@@ -1155,8 +1086,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     depositionFrameBudget.maximumPredictedInstances
                 ),
                 maximumTileReferenceCount:
-                    GridCanvasContract.maximumStrokeTileReferenceCount,
-                pipeline: brushRenderState.resources.depositionPipeline
+                    GridCanvasContract.maximumStrokeTileReferenceCount
             )
             activeStrokeTileSurfaceResources = tileSurfaces
             let metalResourceDescriptor = StrokeMetalResourceDescriptor(
@@ -1183,6 +1113,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                         nominalDiameter: style.diameter,
                         color: generatorColor,
                         seed: style.seed,
+                        componentRandomNamespaceMode:
+                            style.componentRandomNamespaceMode,
                         viewport: viewport,
                         tilingStrategy: tilingStrategy,
                         metalResourceDescriptor: metalResourceDescriptor,
@@ -1785,71 +1717,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         interactiveGridVisibility = visible
     }
 
-    private var paintAddressing: SparseTileAddressing {
-        if let layout = tilingStrategy.compiledSymmetry.domain.finite?.radial.layout {
-            return .radial(layout: layout)
-        }
-        switch tilingStrategy.documentConfiguration {
-        case .periodic:
-            return .periodic(period: storagePixelSize)
-        case .finite:
-            return .finite(storagePixelSize)
-        }
-    }
-
-    private func paintOutputMapping(
-        pixelSize: PixelSize
-    ) throws -> SparseTileSamplingOutputMapping {
-        let inverseZoom = 1 / viewport.zoom
-        let transform = SparseTileOutputToSourceTransform(
-            sourceOffset: viewport.worldCenter.simd - SIMD2(
-                Float(pixelSize.width) * 0.5 * inverseZoom,
-                Float(pixelSize.height) * 0.5 * inverseZoom
-            ),
-            sourceStep: SIMD2(repeating: inverseZoom)
-        )
-        if tilingStrategy.compiledSymmetry.domain.finite?.radial.layout != nil {
-            return try .finiteRadial(
-                strategy: tilingStrategy,
-                outputToWorldTransform: transform
-            )
-        }
-        return .affine(transform)
-    }
-
-    private func paintDisplayParameters(
-        outputMapping: SparseTileSamplingOutputMapping,
-        transient: Bool,
-        showGridLines: Bool? = nil
-    ) -> SparseTileSamplingEncodeParameters {
-        let displayGridLines = showGridLines ?? interactiveGridVisibility
-        guard transient, let style = activeStroke?.style else {
-            return SparseTileSamplingEncodeParameters(
-                outputMapping: outputMapping,
-                compositeMode: PatternCompositeWireDraw,
-                liveVisible: false,
-                strokeOpacity: 1,
-                accumulationLimit: 1,
-                eraserStrength: 1,
-                showGridLines: displayGridLines,
-                showCanvasBoundary: true
-            )
-        }
-        return SparseTileSamplingEncodeParameters(
-            outputMapping: outputMapping,
-            compositeMode: style.compositeMode.rawValue,
-            liveVisible: true,
-            strokeOpacity: style.color.alpha,
-            accumulationLimit:
-                style.program.definition.material.accumulationLimit,
-            eraserStrength:
-                style.compositeMode == .erase ? style.eraserStrength : 1,
-            showGridLines: displayGridLines,
-            showCanvasBoundary: true
-        )
-    }
-
-    private func invalidatePaintDisplayPreparation() {
+    private func invalidatePaintDisplayPreparation(
+        reschedule: Bool = true
+    ) {
         paintOutputGeometryRevision &+= 1
         if paintOutputGeometryRevision == 0 { paintOutputGeometryRevision = 1 }
         paintDisplayPreparationSequence &+= 1
@@ -1861,14 +1731,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
             self.preparedPaintDisplaySubmission = nil
         }
-        if let paintDisplayView {
+        if reschedule, let paintDisplayView {
             schedulePaintDisplayPreparation(in: paintDisplayView)
         }
     }
 
     private func schedulePaintDisplayPreparation(in view: MTKView) {
         paintDisplayView = view
-        guard paintDisplayPreparationTask == nil,
+        guard !exclusiveInteractiveCompletionDrainInProgress,
+              paintDisplayPreparationTask == nil,
               preparedPaintDisplaySubmission == nil
         else { return }
         let width = Int(view.drawableSize.width)
@@ -1923,25 +1794,19 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         transient: DocumentPaintTransientDisplaySource?,
         showGridLines: Bool? = nil
     ) async throws -> PreparedLayerCompositeDisplaySubmission {
-        let outputRegion = try SparseTileOutputRegion(
-            minX: 0,
-            minY: 0,
-            maxX: outputPixelSize.width,
-            maxY: outputPixelSize.height
-        )
-        let mapping = try paintOutputMapping(pixelSize: outputPixelSize)
-        return try await paintContext.prepareLayerDisplaySubmission(
+        let style = transient == nil ? nil : activeStroke?.style
+        return try await CanvasDisplayCompositor.prepare(
+            context: paintContext,
+            outputPixelSize: outputPixelSize,
+            viewport: viewport,
+            tilingStrategy: tilingStrategy,
+            storagePixelSize: storagePixelSize,
+            geometryRevision: paintOutputGeometryRevision,
             transient: transient,
-            addressing: paintAddressing,
-            addressingRevision: paintOutputGeometryRevision,
-            outputRegion: outputRegion,
-            outputGeometryRevision: paintOutputGeometryRevision,
-            outputMapping: mapping,
-            parameters: paintDisplayParameters(
-                outputMapping: mapping,
-                transient: transient != nil,
-                showGridLines: showGridLines
-            )
+            transientMode: style?.compositeMode,
+            strokeOpacity: style?.color.alpha ?? 1,
+            eraserStrength: style?.eraserStrength ?? 1,
+            showGridLines: showGridLines ?? interactiveGridVisibility
         )
     }
 
@@ -1953,10 +1818,127 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         #endif
     }
 
-    func paintStateSnapshotForTesting() async
-        -> DocumentPaintRenderContextSnapshot
+    package func paintStateSnapshotForTesting() async
+        -> RendererPaintDiagnosticSnapshot
     {
-        await paintContext.snapshot()
+        let snapshot = await paintContext.snapshot()
+        return RendererPaintDiagnosticSnapshot(
+            storeIdentity: snapshot.storeIdentity,
+            activeLayerID: snapshot.activeLayerID,
+            documentGeneration: snapshot.documentGeneration,
+            layerIDs: snapshot.layerIDs,
+            activeSnapshotTokenCount: snapshot.activeSnapshotTokenCount,
+            aggregateSnapshotReferenceCount:
+                snapshot.aggregateSnapshotReferenceCount,
+            activeTileLeaseCount: snapshot.activeTileLeaseCount,
+            snapshotMetadataByteCount: snapshot.snapshotMetadataByteCount,
+            snapshotPayloadLiabilityByteCount:
+                snapshot.snapshotPayloadLiabilityByteCount,
+            revisionResidentBytes: snapshot.revisionResidentBytes,
+            activeStrokeSurfaceCount: snapshot.activeStrokeSurfaceCount,
+            activeCommandOperationCount: snapshot.activeCommandOperationCount
+        )
+    }
+
+    public func stageDAcceptanceEvidence() async
+        -> StageDAcceptanceRendererEvidence
+    {
+        let snapshot = await paintContext.snapshot()
+        let cpuCaches = [
+            snapshot.visiblePlan.cpuPlanCache,
+            snapshot.stableCollectionRenderer.cpuCache,
+            snapshot.layerCompositor.cpuPlanCache,
+        ]
+        let gpuCaches = [
+            snapshot.visiblePlan.gpuPlanCache,
+            snapshot.stableCollectionRenderer.gpuCache,
+            snapshot.layerCompositor.gpuPlanCache,
+        ]
+        let completions = [
+            snapshot.stableCollectionRenderer.completion,
+            snapshot.layerCompositor.completion,
+        ]
+        let uploadRings = gpuCaches.compactMap(\.uploadRing)
+        let cachedPlanMetalBufferBytes = gpuCaches.reduce(0) {
+            $0 + $1.cachedPlanMetalBufferBytes
+        }
+        let uploadRingMetalBufferBytes = uploadRings.reduce(0) {
+            $0 + $1.metalBufferBytes
+        }
+        let fixedResourceBytes = snapshot.backingTileBytes
+            + snapshot.revisionResidentBytes
+            + snapshot.snapshotMetadataByteCount
+            + snapshot.snapshotPayloadLiabilityByteCount
+            + cachedPlanMetalBufferBytes
+            + uploadRingMetalBufferBytes
+        let residentResourceBytes = snapshot.residentTileBytes
+            + fixedResourceBytes
+        let residentResourceHighWaterBytes = max(
+            residentResourceBytes,
+            snapshot.residentTileHighWaterBytes + fixedResourceBytes
+        )
+        return StageDAcceptanceRendererEvidence(
+            storageAuthority: .sparseRGBA16Float,
+            backend: .productionSparseMetal,
+            documentGeneration: snapshot.documentGeneration,
+            layerCount: snapshot.layerIDs.count,
+            tileByteBudget: snapshot.tileByteBudget,
+            residentTileBytes: snapshot.residentTileBytes,
+            residentTileHighWaterBytes:
+                snapshot.residentTileHighWaterBytes,
+            backingTileBytes: snapshot.backingTileBytes,
+            tileIndexEntryCount: snapshot.tileIndexEntryCount,
+            cpuCachedPlanCount: cpuCaches.reduce(0) {
+                $0 + $1.cachedContentCount
+            },
+            gpuCachedPlanCount: gpuCaches.reduce(0) {
+                $0 + $1.preparedContentCount
+            },
+            cpuPlanCacheHitCount: cpuCaches.reduce(0) {
+                $0 + $1.hitCount
+            },
+            cpuPlanCacheMissCount: cpuCaches.reduce(0) {
+                $0 + $1.missCount
+            },
+            gpuPlanCacheHitCount: gpuCaches.reduce(0) {
+                $0 + $1.hitCount
+            },
+            gpuPlanCacheMissCount: gpuCaches.reduce(0) {
+                $0 + $1.missCount
+            },
+            cachedPlanMetalBufferBytes: cachedPlanMetalBufferBytes,
+            uploadRingMetalBufferBytes: uploadRingMetalBufferBytes,
+            residentResourceBytes: residentResourceBytes,
+            residentResourceHighWaterBytes: residentResourceHighWaterBytes,
+            planMetalBufferAllocationCount: gpuCaches.reduce(0) {
+                $0 + $1.planMetalBufferAllocationCount
+            },
+            activeUploadSlotCount: uploadRings.reduce(0) {
+                $0 + $1.activeSlotCount
+            },
+            uploadSlotHighWater: uploadRings.reduce(0) {
+                $0 + $1.highWaterSlotCount
+            },
+            pendingPlanCompletionCount:
+                snapshot.visiblePlan.pendingPlanCompletionCount
+                    + completions.reduce(0) {
+                        $0 + $1.pendingPlanCompletionCount
+                    },
+            pendingConsumerCompletionCount:
+                snapshot.visiblePlan.pendingConsumerCompletionCount
+                    + completions.reduce(0) {
+                        $0 + $1.pendingConsumerCompletionCount
+                    },
+            revisionResidentBytes: snapshot.revisionResidentBytes,
+            activeSnapshotTokenCount: snapshot.activeSnapshotTokenCount,
+            aggregateSnapshotReferenceCount:
+                snapshot.aggregateSnapshotReferenceCount,
+            activeTileLeaseCount: snapshot.activeTileLeaseCount,
+            activeStrokeSurfaceCount: snapshot.activeStrokeSurfaceCount,
+            activeCommandOperationCount: snapshot.activeCommandOperationCount,
+            pendingLayerDisplayAcknowledgementCount:
+                snapshot.pendingLayerDisplayAcknowledgementCount
+        )
     }
 
     public func releasePaintRevisions(
@@ -2375,6 +2357,20 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 gpuMilliseconds: 0
             )
         }
+        guard !exclusiveInteractiveCompletionDrainInProgress else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        exclusiveInteractiveCompletionDrainInProgress = true
+        let pendingDisplayPreparation = paintDisplayPreparationTask
+        invalidatePaintDisplayPreparation(reschedule: false)
+        defer {
+            exclusiveInteractiveCompletionDrainInProgress = false
+            if let paintDisplayView {
+                schedulePaintDisplayPreparation(in: paintDisplayView)
+            }
+        }
+        await pendingDisplayPreparation?.value
+        try await paintContext.retryLayerDisplayCompletions()
         while true {
             try drainCompletedInteractiveOperations()
             if activeStroke == nil, isIdle { break }
@@ -2444,6 +2440,30 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let deadline = DispatchTime.now().uptimeNanoseconds
             &+ 5_000_000_000
         while DispatchTime.now().uptimeNanoseconds < deadline {
+            try drainCompletedInteractiveOperations()
+            if let source = activePaintTransientSource {
+                switch source.acknowledgementStatus {
+                case .available, .pending:
+                    try await paintContext.abandonTransientDisplaySource(
+                        source
+                    )
+                    if activePaintTransientSource?.sourceIdentity
+                        == source.sourceIdentity
+                    {
+                        activePaintTransientSource = nil
+                    }
+                case .fulfilled:
+                    if activePaintTransientSource?.sourceIdentity
+                        == source.sourceIdentity
+                    {
+                        activePaintTransientSource = nil
+                    }
+                case let .failed(error):
+                    throw MetalRendererError.commandFailed(
+                        "transient display acknowledgement failed: \(error)"
+                    )
+                }
+            }
             try drainCompletedInteractiveOperations()
             if strokeWorkspaceState != .retiring(generation) { return }
             try await Task.sleep(nanoseconds: 1_000_000)
@@ -2619,15 +2639,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
               let execution = activeStroke,
               execution.commitRequested
         else { throw MetalRendererError.invalidStrokeLifecycle }
-        let parameters = DocumentPaintStrokeCompositeParameters(
+        let parameters = StrokeCommitter.parameters(
             mode: execution.style.compositeMode,
             strokeOpacity: execution.style.color.alpha,
-            accumulationLimit:
-                execution.style.program.definition.material
-                    .accumulationLimit,
-            eraserStrength:
-                execution.style.compositeMode == .erase
-                    ? execution.style.eraserStrength : 1
+            eraserStrength: execution.style.eraserStrength
         )
         let token = execution.token
         paintCommitTask = Task { @MainActor [weak self] in
@@ -2638,27 +2653,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 return
             }
             do {
-                let result: DocumentPaintSurfaceApplicationResult
-                switch mutation {
-                case let .source(source):
-                    result = try await self.paintContext.commitStroke(
-                        source,
-                        compositeParameters: parameters
-                    )
-                case .noOp:
-                    guard let capability = self
-                        .activeStrokeTileSurfaceResources?.capability,
-                          capability.isTerminal
-                    else {
-                        throw MetalRendererError.invalidStrokeLifecycle
-                    }
-                    result = DocumentPaintSurfaceApplicationResult(
-                        didPublish: false,
-                        layerID: capability.layerID,
-                        generation: capability.generation,
-                        historyPair: nil
-                    )
-                }
+                let result = try await StrokeCommitter.commit(
+                    mutation,
+                    context: self.paintContext,
+                    capability: self.activeStrokeTileSurfaceResources?
+                        .capability,
+                    parameters: parameters
+                )
                 guard let current = self.activeStroke,
                       current.token == token
                 else { throw MetalRendererError.invalidRendererOperationToken }
@@ -2814,7 +2815,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             }
             let source = try paintContext.adoptTransientDisplayFrame(
                 displayFrame,
-                addressing: paintAddressing
+                addressing: CanvasDisplayCompositor.addressing(
+                    tilingStrategy: tilingStrategy,
+                    storagePixelSize: storagePixelSize
+                )
             )
             activePaintTransientSource = source
             pendingPaintHarnessDabCount = batch.logicalDabs.count
@@ -2855,9 +2859,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         scheduledAuthoritativeIdentityHighWater = scheduledHighWater
         encodedAuthoritativeIdentityHighWater = encodedHighWater
-        lastEncodedAuthoritativeIdentityRange =
-            authoritativeInstanceCount == 0
-            ? nil : encodedRangeLowerBound..<encodedHighWater
+        if authoritativeInstanceCount != 0 {
+            let encodedRange = encodedRangeLowerBound..<encodedHighWater
+            if let pendingRange = pendingEncodedAuthoritativeIdentityRange {
+                precondition(pendingRange.upperBound == encodedRange.lowerBound)
+                pendingEncodedAuthoritativeIdentityRange =
+                    pendingRange.lowerBound..<encodedRange.upperBound
+            } else {
+                pendingEncodedAuthoritativeIdentityRange = encodedRange
+            }
+        }
         counters.newDabsThisEvent = batch.logicalDabs.count
         counters.newInstancesThisFrame = totalInstanceCount
         counters.totalDabsThisStroke += batch.logicalDabs.count
@@ -2877,6 +2888,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     public func draw(in view: MTKView) {
         paintDisplayView = view
+        guard !exclusiveInteractiveCompletionDrainInProgress else { return }
         guard let submission = preparedPaintDisplaySubmission else {
             schedulePaintDisplayPreparation(in: view)
             return
@@ -3139,7 +3151,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let frameMetrics = metrics(
             commandBuffer: commandBuffer,
             cpuMilliseconds: measuredSubmission.cpuPreparationMilliseconds,
-            submittedAtNanoseconds: transient == nil ? 0 : completion.4,
+            submittedAtNanoseconds: completion.4,
             completedAtNanoseconds: completion.5,
             encodedDabCount: encodedDabCount,
             encodedInstanceCount: encodedInstanceCount,
@@ -3290,209 +3302,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
 
-    private func ingestGeneratedSample(
-        _ sample: WorldStrokeSample,
-        dabs dabRange: Range<Int>,
-        generatorSnapshot: BrushStrokeGenerator,
-        inputDeriverBeforeSample: BrushInputDeriver,
-        isFinishing: Bool,
-        predictionInvalidationBoundary:
-            PredictionProvenanceBoundary? = nil
-    ) throws {
-        guard transientStrokeBuffer != nil,
-              let strokeExecution = activeStroke
-        else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        let dabs = depositionInputScratch.preparedDabs[dabRange]
-        let arenaTransaction = try transientDabArena.beginTransaction(
-            replacingPrediction: sample.kind == .predicted
-        )
-        defer { arenaTransaction.rollback() }
-        let transientDabs = try transientDabSlice(
-            for: dabRange,
-            predicted: sample.kind == .predicted,
-            transaction: arenaTransaction
-        )
-        let chunk = TransientStrokeChunk(
-            sample: sample,
-            dabs: transientDabs,
-            generatorSnapshotAfterSample: generatorSnapshot,
-            inputDeriverSnapshotBeforeSample: inputDeriverBeforeSample
-        )
-
-        if sample.kind == .predicted {
-            depositionInputScratch.transientChunks.removeAll(
-                keepingCapacity: true
-            )
-            depositionInputScratch.transientChunks.append(chunk)
-            depositionInputScratch.settledChunks.removeAll(
-                keepingCapacity: true
-            )
-            let replayProjectedInstanceCount =
-                try transientStrokeBuffer!.previewPredictedReplacement(
-                    with: depositionInputScratch.transientChunks,
-                    settledInto: &depositionInputScratch.settledChunks
-                )
-            try preflightStrokeMutation(
-                settledChunks: depositionInputScratch.settledChunks,
-                replayProjectedInstanceCount:
-                    replayProjectedInstanceCount
-            )
-            _ = try transientStrokeBuffer!.replacePredicted(
-                with: depositionInputScratch.transientChunks,
-                settledInto: &depositionInputScratch.settledChunks
-            )
-            try appendSettled(depositionInputScratch.settledChunks)
-            try rebuildReplayLayer(
-                preparedPredictedSingle: dabRange
-            )
-            try arenaTransaction.commit(
-                retainingActual: transientStrokeBuffer!.actualChunks,
-                retainingPredicted: transientStrokeBuffer!.predictedChunks
-            )
-            counters.newDabsThisEvent += dabs.count
-            counters.totalDabsThisStroke += dabs.count
-            deferLogicalDabsForPublication(dabs.lazy.map(\.attributes))
-            return
-        }
-
-        depositionInputScratch.settledChunks.removeAll(
-            keepingCapacity: true
-        )
-        let replayProjectedInstanceCount =
-            transientStrokeBuffer!.previewActualAppend(
-                chunk,
-                settledInto: &depositionInputScratch.settledChunks
-            )
-        if isFinishing {
-            let correction = transientStrokeBuffer!
-                .terminationCorrection(
-                    appending: chunk,
-                    settledPrefixCount:
-                        depositionInputScratch.settledChunks.count
-                )
-            _ = try BrushTerminationEvaluator(
-                program: strokeExecution.style.program.termination
-            ).evaluate(correction)
-        }
-        try preflightStrokeMutation(
-            settledChunks: depositionInputScratch.settledChunks,
-            replayProjectedInstanceCount: replayProjectedInstanceCount
-        )
-        let update = transientStrokeBuffer!.appendActual(
-            chunk,
-            settledInto: &depositionInputScratch.settledChunks
-        )
-        if case let .unresolvedSuffixExceedsCapacity(
-            sampleCount,
-            dabCount,
-            projectedInstanceCount
-        ) = update.rejection {
-            let limits = transientStrokeBuffer!.activeReplayLimits
-            if sampleCount > limits.maximumSamples {
-                throw MetalRendererError.strokeSampleCapacityExceeded(
-                    limits.maximumSamples
-                )
-            }
-            if dabCount > limits.maximumDabs {
-                throw MetalRendererError.generatedDabCapacityExceeded(
-                    limits.maximumDabs
-                )
-            }
-            if projectedInstanceCount > limits.maximumProjectedInstances {
-                throw MetalRendererError.projectedInstanceCapacityExceeded(
-                    limits.maximumProjectedInstances
-                )
-            }
-            preconditionFailure(
-                "Rejected unresolved suffix must exceed an active limit"
-            )
-        }
-        precondition(
-            update.rejection == nil,
-            "Renderer must handle every transient buffer rejection"
-        )
-        if update.clearedPredictedSuffix {
-            _ = activeStroke?.frozenHarnessScheduler?
-                .discardTruePrediction()
-        }
-        let buffer = transientStrokeBuffer!
-        if buffer.mode == .appendOnly,
-           depositionInputScratch.settledChunks.count == 1,
-           depositionInputScratch.settledChunks[0].dabs
-               == transientDabs
-        {
-            let capacityBefore =
-                depositionInputScratch.flattenedProjected.capacity
-            depositionInputScratch.flattenedProjected.removeAll(
-                keepingCapacity: true
-            )
-            precondition(
-                depositionInputScratch.flattenedProjected.capacity
-                    >= dabs.reduce(0) {
-                        $0 + $1.projectedRange.count
-                    },
-                "Projection scratch must be reserved before interactive input."
-            )
-            for dab in dabs {
-                depositionInputScratch.flattenedProjected.append(
-                    contentsOf:
-                        depositionInputScratch.projectedArena[
-                            dab.projectedRange
-                        ]
-                )
-            }
-            recordScratchAllocationIfNeeded(
-                capacityBefore: capacityBefore,
-                capacityAfter:
-                    depositionInputScratch.flattenedProjected.capacity
-            )
-            try appendSettledRecords(
-                depositionInputScratch.flattenedProjected
-            )
-        } else {
-            try appendSettled(
-                depositionInputScratch.settledChunks
-            )
-        }
-
-        if isFinishing,
-           case .legacySchemaV1EndTaper =
-               activeStroke?.style.program.termination
-        {
-            knownStrokeTotalDistance = max(
-                dabs.last?.attributes.sourceDistance ?? 0,
-                buffer.actualChunks.last?.dabs.last?
-                    .attributes.sourceDistance ?? 0
-            )
-        }
-        if buffer.mode != .appendOnly
-            || update.requiresReplayReplacement
-            || !buffer.predictedChunks.isEmpty
-        {
-            if buffer.mode == .appendOnly || isFinishing {
-                try rebuildReplayLayer(
-                    predictionInvalidationBoundary:
-                        predictionInvalidationBoundary
-                )
-            } else {
-                try rebuildReplayLayer(
-                    preparedActualSingle: dabRange,
-                    predictionInvalidationBoundary:
-                        predictionInvalidationBoundary
-                )
-            }
-        }
-        try arenaTransaction.commit(
-            retainingActual: transientStrokeBuffer!.actualChunks,
-            retainingPredicted: transientStrokeBuffer!.predictedChunks
-        )
-        counters.newDabsThisEvent += dabs.count
-        counters.totalDabsThisStroke += dabs.count
-        deferLogicalDabsForPublication(dabs.lazy.map(\.attributes))
-    }
-
     package func setStrokePreparationAllocationProbeForHarness(
         _ probe: StrokePreparationAllocationProbe?
     ) {
@@ -3561,8 +3370,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     func takeEncodedAuthoritativeIdentityRangesForHarness()
         -> [Range<UInt64>]
     {
-        defer { lastEncodedAuthoritativeIdentityRange = nil }
-        return lastEncodedAuthoritativeIdentityRange.map { [$0] } ?? []
+        defer { pendingEncodedAuthoritativeIdentityRange = nil }
+        return pendingEncodedAuthoritativeIdentityRange.map { [$0] } ?? []
     }
 
     package func setForceOffMainStrokeCommandFailureForTesting(
@@ -3695,8 +3504,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 depositionFrameBudget.maximumPredictedInstances
             ),
             maximumTileReferenceCount:
-                GridCanvasContract.maximumStrokeTileReferenceCount,
-            pipeline: brushRenderState.resources.depositionPipeline
+                GridCanvasContract.maximumStrokeTileReferenceCount
         )
         activeStrokeTileSurfaceResources = tileSurfaces
         let initialWorkspaceIdentity = tileSurfaces.identity
@@ -4103,7 +3911,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 watchdog.recordProgress()
             }
             let mailbox = bridge.mailbox.snapshot
-            // Replay-tail/whole-stroke brushes legitimately retain consumed
+            // Replay-tail brushes legitimately retain consumed
             // input without advancing committed metadata until promotion or
             // finish. Mailbox quiescence proves an intermediate message was
             // consumed; the final commit barrier below requires the exact
@@ -4255,691 +4063,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    private func deferPreparedLogicalDabsForPublication<Ranges: Collection>(
-        _ ranges: Ranges
-    ) where Ranges.Element == Range<Int> {
-        precondition(
-            rendererEventDispatcher.hasOpenOperation,
-            "Logical dabs must be recorded inside an input-operation scope"
-        )
-        guard let generation = strokeEventGeneration else {
-            preconditionFailure(
-                "Logical dabs require an active stroke event generation"
-            )
-        }
-        for range in ranges {
-            for index in range {
-                let dab =
-                    depositionInputScratch.preparedDabs[index].attributes
-                if dab.isPredicted {
-                    brushLabPredictedDabCount += 1
-                } else {
-                    brushLabActualDabCount += 1
-                }
-                rendererEventDispatcher.stage(
-                    .logicalDab(generation: generation, dab: dab)
-                )
-            }
-        }
-    }
-
-    private func appendSettled(
-        _ chunks: [TransientStrokeChunk]
-    ) throws {
-        try preflightSettledAppend(chunks)
-        let capacityBefore =
-            depositionInputScratch.flattenedProjected.capacity
-        depositionInputScratch.flattenedProjected.removeAll(
-            keepingCapacity: true
-        )
-        for chunk in chunks {
-            for dab in chunk.dabs {
-                try appendProjectedRecords(
-                    for: dab.attributes,
-                    to: &depositionInputScratch.flattenedProjected
-                )
-            }
-        }
-        recordScratchAllocationIfNeeded(
-            capacityBefore: capacityBefore,
-            capacityAfter:
-                depositionInputScratch.flattenedProjected.capacity
-        )
-        try appendSettledRecords(
-            depositionInputScratch.flattenedProjected
-        )
-    }
-
-    private func preflightSettledAppend(
-        _ chunks: [TransientStrokeChunk]
-    ) throws {
-        var projectedCount = 0
-        for chunk in chunks {
-            let (nextCount, overflow) = projectedCount.addingReportingOverflow(
-                chunk.projectedInstanceCount
-            )
-            guard !overflow else {
-                throw MetalRendererError.projectedInstanceCapacityExceeded(
-                    liveStroke.capacity
-                )
-            }
-            projectedCount = nextCount
-        }
-        guard let scheduler = activeStroke?.frozenHarnessScheduler else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        let availableCapacity = scheduler.authoritativeAvailableCapacity
-        guard projectedCount <= availableCapacity else {
-            throw MetalRendererError.projectedInstanceCapacityExceeded(
-                depositionFrameBudget.maximumPendingAuthoritativeInstances
-            )
-        }
-    }
-
-    private func preflightStrokeMutation(
-        settledChunks: [TransientStrokeChunk],
-        replayProjectedInstanceCount: Int
-    ) throws {
-        try preflightSettledAppend(settledChunks)
-        guard let scheduler = activeStroke?.frozenHarnessScheduler else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        guard replayProjectedInstanceCount
-            <= scheduler.predictedCapacity
-        else {
-            throw MetalRendererError.projectedInstanceCapacityExceeded(
-                scheduler.predictedCapacity
-            )
-        }
-    }
-
-    private func appendSettledRecords(
-        _ records: [ProjectedDabRecord]
-    ) throws {
-        try enqueueCompiledAuthoritative(records)
-    }
-
-    private func enqueueCompiledAuthoritative(
-        _ records: [ProjectedDabRecord]
-    ) throws {
-        guard let scheduler = activeStroke?.frozenHarnessScheduler
-        else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        let capacityBefore =
-            depositionInputScratch.depositionRecords.capacity
-        depositionInputScratch.depositionRecords.removeAll(
-            keepingCapacity: true
-        )
-        precondition(
-            depositionInputScratch.depositionRecords.capacity
-                >= records.count,
-            "Deposition scratch must be reserved before interactive input."
-        )
-        for record in records {
-            depositionInputScratch.depositionRecords.append(
-                record.depositionRecord
-            )
-        }
-        recordScratchAllocationIfNeeded(
-            capacityBefore: capacityBefore,
-            capacityAfter:
-                depositionInputScratch.depositionRecords.capacity
-        )
-        do {
-            try scheduler.enqueueAuthoritative(
-                depositionInputScratch.depositionRecords
-            )
-        } catch let error as FrameSchedulerError {
-            throw rendererError(for: error)
-        }
-        let (scheduledHighWater, overflow) =
-            scheduledAuthoritativeIdentityHighWater.addingReportingOverflow(
-                UInt64(records.count)
-            )
-        guard !overflow else {
-            throw MetalRendererError.projectedInstanceCapacityExceeded(
-                depositionFrameBudget.maximumPendingAuthoritativeInstances
-            )
-        }
-        for record in records {
-            liveStroke.recordDirtyRegion(record.dirtyRect)
-        }
-        counters.totalInstancesThisStroke += records.count
-        scheduledAuthoritativeIdentityHighWater = scheduledHighWater
-        recordBrushLabScheduler(scheduler)
-    }
-
-    private func prepareGeneratedDabs(
-        generator: inout BrushStrokeGenerator,
-        resetScratch: Bool = true,
-        generate: (
-            inout BrushStrokeGenerator,
-            (DabAttributes) throws -> Void
-        ) throws -> Void
-    ) throws -> Range<Int> {
-        try prepareGeneratedDabs(
-            generator: &generator,
-            resetScratch: resetScratch,
-            predictionLimits: nil,
-            generate: generate
-        ).range
-    }
-
-    private func prepareBoundedPredictedDabs(
-        generator: inout BrushStrokeGenerator,
-        resetScratch: Bool,
-        limits: PredictionGenerationLimits,
-        generate: (
-            inout BrushStrokeGenerator,
-            (DabAttributes) throws -> Void
-        ) throws -> Void
-    ) throws -> PreparedPredictionDabs {
-        precondition(limits.maximumDabCount >= 0)
-        precondition(limits.maximumProjectedInstanceCount >= 0)
-        return try prepareGeneratedDabs(
-            generator: &generator,
-            resetScratch: resetScratch,
-            predictionLimits: limits,
-            generate: generate
-        )
-    }
-
-    private func prepareGeneratedDabs(
-        generator: inout BrushStrokeGenerator,
-        resetScratch: Bool,
-        predictionLimits: PredictionGenerationLimits?,
-        generate: (
-            inout BrushStrokeGenerator,
-            (DabAttributes) throws -> Void
-        ) throws -> Void
-    ) throws -> PreparedPredictionDabs {
-        let globalMaximumDabs = TransientStrokeBufferContract
-            .wholeStrokeDabCapacity
-        let globalMaximumProjected = TransientStrokeBufferContract
-            .visibleEpochProjectedInstanceCapacity
-        let activeLimits = transientStrokeBuffer?.activeReplayLimits
-        let isReplayable = transientStrokeBuffer?.mode != .appendOnly
-        let maximumDabs = isReplayable
-            ? min(
-                globalMaximumDabs,
-                activeLimits?.maximumDabs ?? globalMaximumDabs
-            )
-            : globalMaximumDabs
-        let maximumProjected = isReplayable
-            ? min(
-                globalMaximumProjected,
-                activeLimits?.maximumProjectedInstances
-                    ?? globalMaximumProjected
-            )
-            : globalMaximumProjected
-        let capacityBefore =
-            depositionInputScratch.preparedDabs.capacity
-        let transientCapacityBefore =
-            depositionInputScratch.transientDabs.capacity
-        let projectedCapacityBefore =
-            depositionInputScratch.projectedArena.capacity
-        if resetScratch {
-            depositionInputScratch.preparedDabs.removeAll(
-                keepingCapacity: true
-            )
-            depositionInputScratch.transientDabs.removeAll(
-                keepingCapacity: true
-            )
-            depositionInputScratch.preparedChunkRanges.removeAll(
-                keepingCapacity: true
-            )
-            depositionInputScratch.projectedArena.removeAll(
-                keepingCapacity: true
-            )
-        }
-        let preparedStart =
-            depositionInputScratch.preparedDabs.count
-        precondition(
-            depositionInputScratch.preparedDabs.capacity
-                >= maximumDabs,
-            "Generated-dab scratch must be reserved before interactive input."
-        )
-        var projectedCount = 0
-        var overload: PredictionOverloadReasons = []
-        do {
-            try generate(&generator) { dab in
-                let preparedCount = depositionInputScratch
-                    .preparedDabs.count - preparedStart
-                if let predictionLimits,
-                   preparedCount >= predictionLimits.maximumDabCount
-                {
-                    throw PredictionGenerationLimitReached(
-                        reason: .logicalDabs
-                    )
-                }
-                guard depositionInputScratch.preparedDabs.count
-                    < maximumDabs
-                else {
-                    throw MetalRendererError.generatedDabCapacityExceeded(
-                        maximumDabs
-                    )
-                }
-                let projectedStart = depositionInputScratch
-                    .projectedArena.count
-                do {
-                    try appendProjectedRecords(
-                        for: dab,
-                        to: &depositionInputScratch.projectedArena
-                    )
-                } catch {
-                    depositionInputScratch.projectedArena.removeSubrange(
-                        projectedStart..<depositionInputScratch
-                            .projectedArena.count
-                    )
-                    throw error
-                }
-                let projectedRange = projectedStart
-                    ..< depositionInputScratch.projectedArena.count
-                let (nextCount, overflow) = projectedCount
-                    .addingReportingOverflow(projectedRange.count)
-                if let predictionLimits,
-                   (overflow
-                        || nextCount > predictionLimits
-                            .maximumProjectedInstanceCount)
-                {
-                    depositionInputScratch.projectedArena.removeSubrange(
-                        projectedRange
-                    )
-                    throw PredictionGenerationLimitReached(
-                        reason: .projectedInstances
-                    )
-                }
-                guard !overflow, nextCount <= maximumProjected else {
-                    depositionInputScratch.projectedArena.removeSubrange(
-                        projectedRange
-                    )
-                    throw MetalRendererError
-                        .projectedInstanceCapacityExceeded(
-                            maximumProjected
-                        )
-                }
-                projectedCount = nextCount
-                depositionInputScratch.preparedDabs.append(
-                    PreparedGeneratedDab(
-                        attributes: dab,
-                        projectedRange: projectedRange
-                    )
-                )
-                depositionInputScratch.transientDabs.append(
-                    TransientStrokeDab(
-                        attributes: dab,
-                        projectedInstanceCount: projectedRange.count
-                    )
-                )
-            }
-        } catch let limit as PredictionGenerationLimitReached {
-            overload.insert(limit.reason)
-        }
-        recordScratchAllocationIfNeeded(
-            capacityBefore: capacityBefore,
-            capacityAfter:
-                depositionInputScratch.preparedDabs.capacity
-        )
-        recordScratchAllocationIfNeeded(
-            capacityBefore: transientCapacityBefore,
-            capacityAfter:
-                depositionInputScratch.transientDabs.capacity
-        )
-        recordScratchAllocationIfNeeded(
-            capacityBefore: projectedCapacityBefore,
-            capacityAfter:
-                depositionInputScratch.projectedArena.capacity
-        )
-        inputPathStorageAudit.recordGeneratedDabs(
-            depositionInputScratch.preparedDabs.capacity
-        )
-        return PreparedPredictionDabs(
-            range: preparedStart
-                ..< depositionInputScratch.preparedDabs.count,
-            overload: overload
-        )
-    }
-
-    private func rebuildReplayLayer(
-        preparedActualSuffixCount: Int = 0,
-        preparedPredictedSuffixCount: Int = 0,
-        preparedActualSingle: Range<Int>? = nil,
-        preparedPredictedSingle: Range<Int>? = nil,
-        predictionProvenance: PredictionProvenanceBoundary? = nil,
-        predictionInvalidationBoundary:
-            PredictionProvenanceBoundary? = nil,
-        predictionOverload: PredictionOverloadReasons = []
-    ) throws {
-        precondition(
-            predictionProvenance == nil
-                || predictionInvalidationBoundary == nil
-        )
-        guard let buffer = transientStrokeBuffer,
-              let activeStroke
-        else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        let retainedReplayStartDistance = (
-            buffer.actualChunks.first { !$0.dabs.isEmpty }?.dabs.first
-                ?? buffer.predictedChunks.first { !$0.dabs.isEmpty }?
-                    .dabs.first
-        )?.attributes.sourceDistance
-        let regionCapacityBefore =
-            depositionInputScratch.replayDirtyRegions.capacity
-        depositionInputScratch.replayDirtyRegions.removeAll(
-            keepingCapacity: true
-        )
-        let replacementCapacityBefore =
-            depositionInputScratch.replayRecords.capacity
-        depositionInputScratch.replayRecords.removeAll(
-            keepingCapacity: true
-        )
-        precondition(
-            depositionInputScratch.replayRecords.capacity
-                >= min(
-                    buffer.visibleProjectedInstanceCount,
-                    TransientStrokeBufferContract
-                        .visibleEpochProjectedInstanceCapacity
-                ),
-            "Replay scratch must be reserved before interactive input."
-        )
-        func appendReplayChunks(
-            _ chunks: [TransientStrokeChunk],
-            preparedSuffixCount: Int = 0,
-            preparedSingle: Range<Int>? = nil
-        ) throws {
-            precondition(
-                preparedSingle == nil || preparedSuffixCount == 0
-            )
-            let preparedCount = preparedSingle == nil
-                ? preparedSuffixCount
-                : 1
-            precondition(
-                preparedCount <= depositionInputScratch
-                    .preparedChunkRanges.count
-                    || preparedSingle != nil
-            )
-            let preparedStart = chunks.count - preparedCount
-            precondition(preparedStart >= 0)
-            for (index, chunk) in chunks.enumerated() {
-                if knownStrokeTotalDistance == nil,
-                   index >= preparedStart
-                {
-                    let preparedRange =
-                        preparedSingle
-                        ?? depositionInputScratch.preparedChunkRanges[
-                            depositionInputScratch
-                                .preparedChunkRanges.count
-                                - preparedSuffixCount
-                                + index - preparedStart
-                        ]
-                    let prepared =
-                        depositionInputScratch.preparedDabs[
-                            preparedRange
-                        ]
-                    precondition(
-                        prepared.count == chunk.dabs.count
-                            && zip(prepared, chunk.dabs).allSatisfy {
-                                $0.transient == $1
-                            },
-                        "Prepared replay projection diverged from its chunk."
-                    )
-                    for dab in prepared {
-                        depositionInputScratch.replayRecords.append(
-                            contentsOf:
-                                depositionInputScratch.projectedArena[
-                                    dab.projectedRange
-                                ]
-                        )
-                    }
-                    continue
-                }
-                for transientDab in chunk.dabs {
-                    let attributes: DabAttributes
-                    if let totalDistance = knownStrokeTotalDistance,
-                       case .legacySchemaV1EndTaper =
-                           activeStroke.style.program.termination
-                    {
-                        attributes = BrushDynamicsEngine()
-                            .applyingLegacySchemaV1EndTaper(
-                                transientDab.attributes,
-                                totalDistance: totalDistance,
-                                nominalDiameter: activeStroke.style.diameter,
-                                program: activeStroke.style.program,
-                                retainedReplayStartDistance:
-                                    retainedReplayStartDistance
-                            )
-                    } else {
-                        attributes = transientDab.attributes
-                    }
-                    try appendProjectedRecords(
-                        for: attributes,
-                        to: &depositionInputScratch.replayRecords
-                    )
-                }
-            }
-        }
-        try appendReplayChunks(
-            buffer.actualChunks,
-            preparedSuffixCount: preparedActualSuffixCount,
-            preparedSingle: preparedActualSingle
-        )
-        try appendReplayChunks(
-            buffer.predictedChunks,
-            preparedSuffixCount: preparedPredictedSuffixCount,
-            preparedSingle: preparedPredictedSingle
-        )
-        recordScratchAllocationIfNeeded(
-            capacityBefore: replacementCapacityBefore,
-            capacityAfter: depositionInputScratch.replayRecords.capacity
-        )
-        guard depositionInputScratch.replayRecords.count
-            <= TransientStrokeBufferContract
-                .visibleEpochProjectedInstanceCapacity
-        else {
-            throw MetalRendererError.projectedInstanceCapacityExceeded(
-                TransientStrokeBufferContract
-                    .visibleEpochProjectedInstanceCapacity
-            )
-        }
-        try replaceCompiledReplay(
-            depositionInputScratch.replayRecords,
-            dirtyRegionCapacityBefore: regionCapacityBefore,
-            predictionProvenance: predictionProvenance,
-            predictionInvalidationBoundary:
-                predictionInvalidationBoundary,
-            predictionOverload: predictionOverload
-        )
-    }
-
-    private func replaceCompiledReplay(
-        _ records: [ProjectedDabRecord],
-        dirtyRegionCapacityBefore: Int,
-        predictionProvenance: PredictionProvenanceBoundary?,
-        predictionInvalidationBoundary:
-            PredictionProvenanceBoundary?,
-        predictionOverload: PredictionOverloadReasons
-    ) throws {
-        guard let scheduler = activeStroke?.frozenHarnessScheduler
-        else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        let capacityBefore =
-            depositionInputScratch.depositionRecords.capacity
-        depositionInputScratch.depositionRecords.removeAll(
-            keepingCapacity: true
-        )
-        precondition(
-            depositionInputScratch.depositionRecords.capacity
-                >= records.count,
-            "Deposition scratch must be reserved before interactive input."
-        )
-        for record in records {
-            depositionInputScratch.depositionRecords.append(
-                record.depositionRecord
-            )
-        }
-        recordScratchAllocationIfNeeded(
-            capacityBefore: capacityBefore,
-            capacityAfter:
-                depositionInputScratch.depositionRecords.capacity
-        )
-        let replacement: PredictionReplacementResult
-        do {
-            replacement = try scheduler.replacePrediction(
-                depositionInputScratch.depositionRecords
-            )
-        } catch let error as FrameSchedulerError {
-            throw rendererError(for: error)
-        }
-
-        let epoch = takeReplayEpoch()
-        var overload = predictionOverload
-        if replacement.overloaded {
-            overload.insert(.projectedInstances)
-        }
-        let predictedSampleCount = transientStrokeBuffer?
-            .predictedSampleCount ?? 0
-        let predictedDabCount = transientStrokeBuffer?
-            .predictedDabCount ?? 0
-        let predictedInstanceCount = depositionInputScratch
-            .depositionRecords.reduce(0) {
-                $0 + ($1.isPredicted ? 1 : 0)
-            }
-        if predictedInstanceCount
-            > depositionFrameBudget.maximumPredictedInstances
-        {
-            overload.insert(.projectedInstances)
-        }
-        depositionInputScratch.replayDirtyRegions.removeAll(
-            keepingCapacity: true
-        )
-        var retainedPredictedCount = 0
-        for record in records {
-            if record.depositionRecord.isPredicted {
-                guard retainedPredictedCount
-                    < replacement.acceptedPredictedInstanceCount
-                else {
-                    continue
-                }
-                retainedPredictedCount += 1
-            }
-            depositionInputScratch.replayDirtyRegions.append(
-                record.dirtyRect
-            )
-        }
-        PixelRegionSet.canonicalizeInPlace(
-            &depositionInputScratch.replayDirtyRegions,
-            clippedTo: storagePixelSize
-        )
-        recordScratchAllocationIfNeeded(
-            capacityBefore: dirtyRegionCapacityBefore,
-            capacityAfter:
-                depositionInputScratch.replayDirtyRegions.capacity
-        )
-        let admission = PredictionAdmission(
-            normalizedSampleCount: min(
-                predictedSampleCount,
-                PredictionAdmissionLimits.maximumNormalizedSampleCount
-            ),
-            logicalDabCount: min(
-                predictedDabCount,
-                PredictionAdmissionLimits.maximumLogicalDabCount
-            ),
-            projectedInstanceCount:
-                replacement.acceptedPredictedInstanceCount,
-            overload: overload
-        )
-        _ = predictionInvalidationBoundary
-        _ = predictionProvenance
-        _ = admission
-        replayStroke.beginReplacementEpoch(epoch)
-        retainedPredictedCount = 0
-        var acceptedRecordCount = 0
-        for record in records {
-            if record.depositionRecord.isPredicted {
-                guard retainedPredictedCount
-                    < replacement.acceptedPredictedInstanceCount
-                else {
-                    continue
-                }
-                retainedPredictedCount += 1
-            }
-            replayStroke.recordDirtyRegion(record.dirtyRect)
-            acceptedRecordCount += 1
-        }
-        counters.totalInstancesThisStroke += acceptedRecordCount
-        recordBrushLabScheduler(scheduler)
-    }
-
-    private func rendererError(
-        for error: FrameSchedulerError
-    ) -> MetalRendererError {
-        switch error {
-        case let .authoritativeCapacityExceeded(_, _, maximum):
-            .projectedInstanceCapacityExceeded(maximum)
-        case let .predictedCapacityExceeded(_, maximum):
-            .projectedInstanceCapacityExceeded(maximum)
-        }
-    }
-
-    private func appendProjectedRecords(
-        for dab: DabAttributes,
-        to records: inout [ProjectedDabRecord]
-    ) throws {
-        guard activeStroke != nil else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        let footprint = StampFootprint(
-            brushToWorld: dab.brushToWorld,
-            localBounds: AxisAlignedRect(
-                minimum: SIMD2(-1, -1),
-                maximum: SIMD2(1, 1)
-            ),
-            coverageSymmetry: .oriented
-        )
-        let allocationCountBefore =
-            tilingProjectionScratch.storageAllocationCount
-        let storageDiagnostics = TilingProjection.project(
-            footprint,
-            using: tilingStrategy,
-            into: tilingProjectionScratch
-        )
-        if tilingProjectionScratch.storageAllocationCount
-            > allocationCountBefore
-        {
-            inputPathStorageAudit.recordCollectionStorageAllocation(
-                capacity: tilingProjectionScratch.fragments.capacity
-            )
-        }
-        inputPathStorageAudit.recordTiling(
-            storageDiagnostics
-        )
-        for fragment in tilingProjectionScratch.fragments {
-            let isometryOrdinal = try compiledIsometryOrdinal(
-                for: fragment
-            )
-            records.append(ProjectedDabRecord(
-                depositionRecord: ProjectedDepositionRecord(
-                    identity: dab.ordinal,
-                    instance: try PatternDepositionStampInstance(
-                        fragment: fragment,
-                        dab: dab,
-                        logicalOrdinal: dab.ordinal,
-                        isometryOrdinal: isometryOrdinal
-                    ),
-                    radialPage: radialPage(for: fragment)
-                ),
-                dirtyRect: TilingProjection.dirtyPixelRect(
-                    for: fragment,
-                    radius: dab.radius
-                ),
-                radialPage: radialPage(for: fragment)
-            ))
-        }
-    }
-
     func compiledIsometryOrdinal(
         for fragment: CellFragment
     ) throws -> UInt8 {
@@ -4954,105 +4077,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
         }
         return isometry.ordinal
-    }
-
-    private func radialPage(
-        for fragment: CellFragment
-    ) -> RadialPageCoordinate? {
-        guard tilingStrategy.compiledSymmetry.domain.finite?
-            .radial.layout != nil
-        else {
-            return nil
-        }
-        return RadialPageCoordinate(
-            x: fragment.cell.column,
-            y: fragment.cell.row
-        )
-    }
-
-    private func takeReplayEpoch() -> UInt64 {
-        let epoch = nextReplayEpoch
-        nextReplayEpoch &+= 1
-        precondition(nextReplayEpoch != 0, "Replay epoch exhausted")
-        return epoch
-    }
-
-    @discardableResult
-    func appendProjectedFragments(
-        at point: WorldPoint,
-        requestedRadius: Float? = nil,
-        coverageSymmetry: FootprintCoverageSymmetry = .halfTurnInvariant
-    ) throws -> [CellFragment] {
-        guard let activeStroke else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        let radius = TilingProjection.clampedRadius(
-            requested: requestedRadius ?? activeStroke.style.diameter / 2,
-            tileSize: tileSize
-        )
-        let brushToWorld = Affine2D(
-            xAxis: SIMD2(radius, 0),
-            yAxis: SIMD2(0, radius),
-            translation: point.simd
-        )
-        let footprint = StampFootprint(
-            brushToWorld: brushToWorld,
-            localBounds: AxisAlignedRect(
-                minimum: SIMD2(-1, -1),
-                maximum: SIMD2(1, 1)
-            ),
-            coverageSymmetry: coverageSymmetry
-        )
-        let fragments = TilingProjection.fragments(
-            for: footprint,
-            using: tilingStrategy
-        )
-        let baseOrdinal = UInt64(counters.totalInstancesThisStroke)
-        let dab = LogicalDab(
-            position: point,
-            brushToWorld: brushToWorld,
-            radius: radius,
-            diameter: radius * 2,
-            spacing: 1,
-            flow: 1,
-            strokeOpacity: 1,
-            rotation: 0,
-            scatter: .zero,
-            hardness: 1,
-            grainOffset: .zero,
-            grainScale: 1,
-            grainRotation: 0,
-            color: color(for: activeStroke.style),
-            colorAdjustment: .identity,
-            materialFamily: .ink,
-            materialContribution: 1,
-            sourceDistance: 0,
-            ordinal: baseOrdinal,
-            isPredicted: false
-        )
-        let records = try fragments.enumerated().map { offset, fragment in
-            let ordinal = baseOrdinal + UInt64(offset)
-            let radialPage = radialPage(for: fragment)
-            return ProjectedDabRecord(
-                depositionRecord: ProjectedDepositionRecord(
-                    identity: ordinal,
-                    instance: try PatternDepositionStampInstance(
-                        fragment: fragment,
-                        dab: dab,
-                        logicalOrdinal: ordinal,
-                        isometryOrdinal: compiledIsometryOrdinal(for: fragment)
-                    ),
-                    radialPage: radialPage
-                ),
-                dirtyRect: TilingProjection.dirtyPixelRect(
-                    for: fragment,
-                    radius: radius
-                ),
-                radialPage: radialPage
-            )
-        }
-        try enqueueCompiledAuthoritative(records)
-        return fragments
     }
 
     private func color(for style: StrokeRenderStyle) -> InkColor {
@@ -5189,8 +4213,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         PatternCompositeUniforms(
             parameters: SIMD4(
                 activeStroke?.style.color.alpha ?? 1,
-                activeStroke?.brush.program.definition.material
-                    .accumulationLimit ?? 1,
+                1,
                 activeStroke?.style.compositeMode == .erase
                     ? activeStroke?.style.eraserStrength ?? 1
                     : 1,
@@ -5312,24 +4335,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func resetLiveState(
         invalidateStrokeEvents: Bool = true
     ) {
-        strokeGenerator?.cancel()
-        strokeGenerator = nil
         let isRetiringStrokeWorkspace = retireStrokeWorkspaceIfNeeded()
         if !isRetiringStrokeWorkspace {
             strokePreparationBridge = nil
             strokePreparationGeneration = nil
         }
         strokePreparationResultScratch.removeAll(keepingCapacity: true)
-        predictedStrokeGenerator?.cancel()
-        predictedStrokeGenerator = nil
-        transientStrokeBuffer?.cancel()
-        transientStrokeBuffer = nil
-        brushInputDeriver.reset()
-        predictedInputDeriver = nil
-        liveStroke.reset()
-        replayStroke.reset()
-        nextReplayEpoch = 1
-        knownStrokeTotalDistance = nil
         if invalidateStrokeEvents {
             invalidateStrokeEventGeneration()
         }
@@ -5381,11 +4392,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let wasIdle = isIdle
         strokePreparationBridge = nil
         strokePreparationGeneration = nil
+        activeStrokeTileSurfaceResources = nil
         strokeWorkspaceState = .available
         notifyIdleStateIfChanged(from: wasIdle)
     }
 
-    func drainStrokeWorkspaceRetirementForHarness() throws {
+    package func drainStrokeWorkspaceRetirementForHarness() throws {
         guard case .retiring = strokeWorkspaceState else { return }
         guard let progressRegistration =
                 installStrokePreparationProgressWaiterForHarness()
@@ -5505,10 +4517,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         brushLabStrokeEncodedDabCount = 0
         brushLabPendingInputReceiptNanoseconds = nil
         inputPathStorageAudit.reset()
-        transientDabArena.reset()
         scheduledAuthoritativeIdentityHighWater = 0
         encodedAuthoritativeIdentityHighWater = 0
-        lastEncodedAuthoritativeIdentityRange = nil
+        pendingEncodedAuthoritativeIdentityRange = nil
         lastOffMainEncodingRanOnMainThread = nil
         lastOffMainCoordinatorSnapshot = nil
         lastOffMainSurfaceSnapshot = nil
@@ -5532,24 +4543,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         inputPathStorageAudit.recordCollectionStorageAllocation(
             capacity: capacityAfter
         )
-    }
-
-    private func transientDabSlice(
-        for preparedRange: Range<Int>,
-        predicted: Bool,
-        transaction:
-            TransientStrokeDabArena.ReservationTransaction
-    ) throws -> TransientStrokeDabSlice {
-        let slice = predicted
-            ? try transaction.storePredicted(
-                depositionInputScratch.transientDabs,
-                range: preparedRange
-            )
-            : try transaction.storeActual(
-                depositionInputScratch.transientDabs,
-                range: preparedRange
-            )
-        return slice
     }
 
     private func markBrushLabInputReceipt() {
@@ -5577,18 +4570,20 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             schedulerCapacity:
                 snapshot.authoritativeStorageCapacity
                 + snapshot.predictedStorageCapacity,
-            replayCapacity:
-                liveStroke.pending.capacity + replayStroke.pending.capacity
+            replayCapacity: 0
         )
     }
 
     func takeBrushLabEventToSubmitNanoseconds(
-        submittedAt nanoseconds: UInt64
+        submittedAt nanoseconds: UInt64,
+        consumeReceipt: Bool = true
     ) -> UInt64 {
         guard let receipt = brushLabPendingInputReceiptNanoseconds else {
             return 0
         }
-        brushLabPendingInputReceiptNanoseconds = nil
+        if consumeReceipt {
+            brushLabPendingInputReceiptNanoseconds = nil
+        }
         return nanoseconds >= receipt ? nanoseconds - receipt : 0
     }
 
@@ -5625,9 +4620,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         do {
             let marker = try controller.beginStroke(strokeID: UUID())
-            strokeRuntimeReplayEpochTracker.beginStroke(
-                at: transientStrokeBuffer?.replayEpoch ?? 0
-            )
             recordStrokeRuntimeInput(sample)
             return [
                 .strokeRuntimeSegmentMarker(
@@ -5754,11 +4746,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         let scheduler = activeStroke?.frozenHarnessScheduler?
             .diagnosticSnapshot
-        let currentReplayEpoch = transientStrokeBuffer?.replayEpoch ?? 0
-        let replayDelta = strokeRuntimeReplayEpochTracker.consume(
-            currentEpoch: currentReplayEpoch
-        )
-        let authoritativeReplay = replayDelta
+        let authoritativeReplay: UInt64 = 0
         let predictedReplay: UInt64 = 0
         let residentBytes = UInt64(max(
             0,
@@ -6042,7 +5030,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let eventToSubmitNanoseconds = submittedAtNanoseconds == 0
             ? 0
             : takeBrushLabEventToSubmitNanoseconds(
-                submittedAt: submittedAtNanoseconds
+                submittedAt: submittedAtNanoseconds,
+                consumeReceipt: encodedInstanceCount > 0
             )
         return GPUFrameMetrics(
             cpuEncodeMilliseconds: cpuMilliseconds,

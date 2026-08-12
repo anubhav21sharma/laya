@@ -94,8 +94,7 @@ public struct BrushLogicalRandomValues: Equatable, Sendable {
         self.secondaryColorMix = secondaryColorMix
     }
 
-    /// Legacy brushes had no extension random channels. Zero is the frozen
-    /// schema-v1 characterization value for every appended channel.
+    /// Zero is the frozen characterization value for every extension channel.
     public static let neutral = BrushLogicalRandomValues(
         compatibility: .centered,
         size: 0,

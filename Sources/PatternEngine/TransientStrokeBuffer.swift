@@ -1027,6 +1027,7 @@ public struct TransientStrokeChunk: Equatable, Sendable {
     public let dabs: TransientStrokeDabSlice
     public let generatorSnapshotAfterSample: BrushStrokeGenerator?
     public let inputDeriverSnapshotBeforeSample: BrushInputDeriver?
+    public let projectedInstanceCount: Int
 
     public init(
         sample: WorldStrokeSample,
@@ -1034,11 +1035,13 @@ public struct TransientStrokeChunk: Equatable, Sendable {
         generatorSnapshotAfterSample: BrushStrokeGenerator? = nil,
         inputDeriverSnapshotBeforeSample: BrushInputDeriver? = nil
     ) {
+        let slice = TransientStrokeDabSlice(dabs)
         self.sample = sample
-        self.dabs = TransientStrokeDabSlice(dabs)
+        self.dabs = slice
         self.generatorSnapshotAfterSample = generatorSnapshotAfterSample
         self.inputDeriverSnapshotBeforeSample =
             inputDeriverSnapshotBeforeSample
+        projectedInstanceCount = Self.measureProjectedInstances(in: slice)
     }
 
     public init(
@@ -1052,28 +1055,26 @@ public struct TransientStrokeChunk: Equatable, Sendable {
         self.generatorSnapshotAfterSample = generatorSnapshotAfterSample
         self.inputDeriverSnapshotBeforeSample =
             inputDeriverSnapshotBeforeSample
+        projectedInstanceCount = Self.measureProjectedInstances(in: dabs)
     }
 
-    public var projectedInstanceCount: Int {
-        dabs.reduce(into: 0) { result, dab in
+    private static func measureProjectedInstances(
+        in dabs: TransientStrokeDabSlice
+    ) -> Int {
+        var result = 0
+        for dab in dabs {
             result = Self.saturatingAdd(
                 result,
                 dab.projectedInstanceCount
             )
         }
+        return result
     }
 
     private static func saturatingAdd(_ left: Int, _ right: Int) -> Int {
         let (sum, overflow) = left.addingReportingOverflow(right)
         return overflow ? Int.max : sum
     }
-}
-
-public enum TransientStrokeDegradationReason:
-    UInt8, Equatable, Sendable
-{
-    case wholeStrokeCapacity
-    case projectedInstanceCapacity
 }
 
 public enum TransientStrokeBufferError: Error, Equatable, Sendable {
@@ -1178,7 +1179,6 @@ public struct TransientStrokeBufferUpdate: Equatable, Sendable {
     public let settledPrefix: [TransientStrokeChunk]
     public let requiresReplayReplacement: Bool
     public let replayWindowShortened: Bool
-    public let degradedToReplayTail: Bool
     public let clearedPredictedSuffix: Bool
     public let replayEpoch: UInt64
     public let rejection: TransientStrokeBufferError?
@@ -1187,7 +1187,6 @@ public struct TransientStrokeBufferUpdate: Equatable, Sendable {
         settledPrefix: [TransientStrokeChunk],
         requiresReplayReplacement: Bool,
         replayWindowShortened: Bool,
-        degradedToReplayTail: Bool,
         clearedPredictedSuffix: Bool,
         replayEpoch: UInt64,
         rejection: TransientStrokeBufferError? = nil
@@ -1195,7 +1194,6 @@ public struct TransientStrokeBufferUpdate: Equatable, Sendable {
         self.settledPrefix = settledPrefix
         self.requiresReplayReplacement = requiresReplayReplacement
         self.replayWindowShortened = replayWindowShortened
-        self.degradedToReplayTail = degradedToReplayTail
         self.clearedPredictedSuffix = clearedPredictedSuffix
         self.replayEpoch = replayEpoch
         self.rejection = rejection
@@ -1205,7 +1203,6 @@ public struct TransientStrokeBufferUpdate: Equatable, Sendable {
         settledPrefix: [],
         requiresReplayReplacement: false,
         replayWindowShortened: false,
-        degradedToReplayTail: false,
         clearedPredictedSuffix: false,
         replayEpoch: 0
     )
@@ -1227,7 +1224,6 @@ public struct TransientStrokeBufferUpdate: Equatable, Sendable {
 public struct TransientStrokeBufferMutation: Equatable, Sendable {
     public let requiresReplayReplacement: Bool
     public let replayWindowShortened: Bool
-    public let degradedToReplayTail: Bool
     public let clearedPredictedSuffix: Bool
     public let replayEpoch: UInt64
     public let rejection: TransientStrokeBufferError?
@@ -1235,14 +1231,12 @@ public struct TransientStrokeBufferMutation: Equatable, Sendable {
     public init(
         requiresReplayReplacement: Bool,
         replayWindowShortened: Bool,
-        degradedToReplayTail: Bool,
         clearedPredictedSuffix: Bool,
         replayEpoch: UInt64,
         rejection: TransientStrokeBufferError? = nil
     ) {
         self.requiresReplayReplacement = requiresReplayReplacement
         self.replayWindowShortened = replayWindowShortened
-        self.degradedToReplayTail = degradedToReplayTail
         self.clearedPredictedSuffix = clearedPredictedSuffix
         self.replayEpoch = replayEpoch
         self.rejection = rejection
@@ -1256,15 +1250,11 @@ public struct TransientStrokeBufferMutation: Equatable, Sendable {
 /// generator snapshot at the new replay boundary.
 public struct TransientStrokeBuffer: Equatable, Sendable {
     public let replayContract: BrushReplayContract
-    public let requestedMode: BrushReplayMode
-    public private(set) var mode: BrushReplayMode
+    public let mode: BrushReplayMode
     public private(set) var actualChunks: [TransientStrokeChunk]
     public private(set) var predictedChunks: [TransientStrokeChunk]
     public private(set) var replayEpoch: UInt64
     public private(set) var mutationVersion: UInt64
-    public private(set) var degradationReason:
-        TransientStrokeDegradationReason?
-    public private(set) var degradationCount: Int
     public private(set) var settledPrefixPromotionCount: Int
     public private(set) var replayWindowShorteningCount: Int
     public private(set) var replayStartGeneratorSnapshot:
@@ -1283,7 +1273,6 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         initialGeneratorSnapshot: BrushStrokeGenerator? = nil
     ) {
         self.replayContract = replayContract
-        requestedMode = replayContract.mode
         mode = replayContract.mode
         actualChunks = []
         predictedChunks = []
@@ -1297,8 +1286,6 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         )
         replayEpoch = 0
         mutationVersion = 0
-        degradationReason = nil
-        degradationCount = 0
         settledPrefixPromotionCount = 0
         replayWindowShorteningCount = 0
         replayStartGeneratorSnapshot = initialGeneratorSnapshot
@@ -1363,7 +1350,7 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
     /// Append-only chunks are returned immediately for settled-live rendering.
     @discardableResult
     public mutating func appendActual(
-        _ chunk: TransientStrokeChunk
+        _ chunk: borrowing TransientStrokeChunk
     ) -> TransientStrokeBufferUpdate {
         var settled: [TransientStrokeChunk] = []
         let mutation = appendActual(
@@ -1375,7 +1362,6 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             requiresReplayReplacement:
                 mutation.requiresReplayReplacement,
             replayWindowShortened: mutation.replayWindowShortened,
-            degradedToReplayTail: mutation.degradedToReplayTail,
             clearedPredictedSuffix:
                 mutation.clearedPredictedSuffix,
             replayEpoch: mutation.replayEpoch,
@@ -1385,7 +1371,7 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
 
     @discardableResult
     public mutating func appendActual(
-        _ chunk: TransientStrokeChunk,
+        _ chunk: borrowing TransientStrokeChunk,
         settledInto settled: inout [TransientStrokeChunk]
     ) -> TransientStrokeBufferMutation {
         settled.removeAll(keepingCapacity: true)
@@ -1393,19 +1379,26 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             chunk.sample.kind != .predicted,
             "Authoritative append cannot contain a predicted sample"
         )
-        let retainsAppendOnlySuffix = mode == .appendOnly
-            && (
-                !actualChunks.isEmpty
-                    || !chunk.sample
-                        .estimatedPropertiesExpectingUpdates.isEmpty
-            )
-        if retainsAppendOnlySuffix,
+        return switch mode {
+        case .appendOnly:
+            appendActualAppendOnly(chunk, settledInto: &settled)
+        case .replayTail:
+            appendActualReplayTail(chunk, settledInto: &settled)
+        }
+    }
+
+    package mutating func appendActualAppendOnly(
+        _ chunk: borrowing TransientStrokeChunk,
+        settledInto settled: inout [TransientStrokeChunk]
+    ) -> TransientStrokeBufferMutation {
+        let retainsSuffix = !actualChunks.isEmpty
+            || !chunk.sample.estimatedPropertiesExpectingUpdates.isEmpty
+        if retainsSuffix,
            let rejection = unresolvedAppendOnlyOverflow(adding: chunk)
         {
             return TransientStrokeBufferMutation(
                 requiresReplayReplacement: false,
                 replayWindowShortened: false,
-                degradedToReplayTail: false,
                 clearedPredictedSuffix: false,
                 replayEpoch: replayEpoch,
                 rejection: rejection
@@ -1420,43 +1413,55 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             predictedDabCountStorage = 0
             predictedProjectedInstanceCountStorage = 0
         }
-        if let snapshot = chunk.generatorSnapshotAfterSample {
-            authoritativeGeneratorSnapshot = snapshot
+        if chunk.generatorSnapshotAfterSample != nil {
+            authoritativeGeneratorSnapshot =
+                chunk.generatorSnapshotAfterSample
         }
-
-        if mode == .appendOnly {
-            if !actualChunks.isEmpty
-                || !chunk.sample.estimatedPropertiesExpectingUpdates.isEmpty
-            {
-                actualChunks.append(chunk)
-                recalculateActualCounters()
-                promoteResolvedAppendOnlyPrefix(into: &settled)
-                advanceReplayEpoch()
-                return TransientStrokeBufferMutation(
-                    requiresReplayReplacement: true,
-                    replayWindowShortened: false,
-                    degradedToReplayTail: false,
-                    clearedPredictedSuffix: clearedPrediction,
-                    replayEpoch: replayEpoch
-                )
-            }
-            if clearedPrediction {
-                advanceReplayEpoch()
-            }
-            if let snapshot = chunk.generatorSnapshotAfterSample {
-                replayStartGeneratorSnapshot = snapshot
-            }
-            settled.append(chunk)
+        if retainsSuffix {
+            actualChunks.append(copy chunk)
+            recalculateActualCounters()
+            promoteResolvedAppendOnlyPrefix(into: &settled)
+            advanceReplayEpoch()
             return TransientStrokeBufferMutation(
-                requiresReplayReplacement: clearedPrediction,
+                requiresReplayReplacement: true,
                 replayWindowShortened: false,
-                degradedToReplayTail: false,
                 clearedPredictedSuffix: clearedPrediction,
                 replayEpoch: replayEpoch
             )
         }
+        if clearedPrediction {
+            advanceReplayEpoch()
+        }
+        if chunk.generatorSnapshotAfterSample != nil {
+            replayStartGeneratorSnapshot =
+                chunk.generatorSnapshotAfterSample
+        }
+        settled.append(copy chunk)
+        return TransientStrokeBufferMutation(
+            requiresReplayReplacement: clearedPrediction,
+            replayWindowShortened: false,
+            clearedPredictedSuffix: clearedPrediction,
+            replayEpoch: replayEpoch
+        )
+    }
 
-        actualChunks.append(chunk)
+    package mutating func appendActualReplayTail(
+        _ chunk: borrowing TransientStrokeChunk,
+        settledInto settled: inout [TransientStrokeChunk]
+    ) -> TransientStrokeBufferMutation {
+        advanceMutationVersion()
+        let clearedPrediction = !predictedChunks.isEmpty
+        if clearedPrediction {
+            predictedChunks.removeAll(keepingCapacity: true)
+            predictedGeneratorSnapshot = nil
+            predictedDabCountStorage = 0
+            predictedProjectedInstanceCountStorage = 0
+        }
+        if chunk.generatorSnapshotAfterSample != nil {
+            authoritativeGeneratorSnapshot =
+                chunk.generatorSnapshotAfterSample
+        }
+        actualChunks.append(copy chunk)
         actualDabCountStorage = Self.saturatingAdd(
             actualDabCountStorage,
             chunk.dabs.count
@@ -1465,38 +1470,32 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             actualProjectedInstanceCountStorage,
             chunk.projectedInstanceCount
         )
-        var didDegrade = false
-        if mode == .boundedWholeStroke,
-           let reason = wholeStrokeOverflowReason()
-        {
-            mode = .replayTail
-            degradationReason = reason
-            degradationCount += 1
-            didDegrade = true
-        }
-
         let capacities = capacitiesForCurrentMode()
         let projectedOverflow = visibleProjectedInstanceCount
             > capacities.maximumProjectedInstances
-        promoteUntilWithinLimits(
-            sampleCapacity: capacities.maximumSamples,
-            dabCapacity: capacities.maximumDabs,
-            projectedInstanceCapacity: capacities.maximumProjectedInstances,
-            settledInto: &settled
-        )
+        if retainedSampleCount > capacities.maximumSamples
+            || retainedDabCount > capacities.maximumDabs
+            || projectedOverflow
+        {
+            promoteUntilWithinLimits(
+                sampleCapacity: capacities.maximumSamples,
+                dabCapacity: capacities.maximumDabs,
+                projectedInstanceCapacity:
+                    capacities.maximumProjectedInstances,
+                settledInto: &settled
+            )
+        }
         let shortened = projectedOverflow && !settled.isEmpty
         recordPromotion(settled, shortened: shortened)
 
         let requiresReplacement = clearedPrediction
             || !settled.isEmpty
-            || didDegrade
         if requiresReplacement {
             advanceReplayEpoch()
         }
         return TransientStrokeBufferMutation(
             requiresReplayReplacement: requiresReplacement,
             replayWindowShortened: shortened,
-            degradedToReplayTail: didDegrade,
             clearedPredictedSuffix: clearedPrediction,
             replayEpoch: replayEpoch
         )
@@ -1582,22 +1581,7 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             actualProjectedInstanceCountStorage,
             chunk.projectedInstanceCount
         )
-        let wholeLimits = replayContract.limits
-            ?? BrushRecipePolicy.wholeStrokeLimits
-        let degradesToReplayTail = mode == .boundedWholeStroke
-            && (
-                retainedSamples > wholeLimits.maximumSamples
-                    || retainedDabs > wholeLimits.maximumDabs
-                    || retainedProjected
-                        > wholeLimits.maximumProjectedInstances
-            )
-        let limits = degradesToReplayTail
-            ? Self.minimumLimits(
-                replayContract.limits
-                    ?? BrushRecipePolicy.replayTailLimits,
-                BrushRecipePolicy.replayTailLimits
-            )
-            : capacitiesForCurrentMode()
+        let limits = capacitiesForCurrentMode()
         var promotionBlocked = false
         func preview(_ candidate: TransientStrokeChunk) {
             guard !promotionBlocked,
@@ -1696,10 +1680,18 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         with chunks: Chunks
     ) throws -> TransientStrokeBufferUpdate
     where Chunks.Element == TransientStrokeChunk {
+        try replacePredicted(with: Array(chunks))
+    }
+
+    /// Array-specialized entry keeps the common caller off the generic
+    /// materialization frame while preserving the collection convenience.
+    @discardableResult
+    public mutating func replacePredicted(
+        with chunks: [TransientStrokeChunk]
+    ) throws -> TransientStrokeBufferUpdate {
         var settled: [TransientStrokeChunk] = []
-        let materialized = Array(chunks)
         let mutation = try replacePredicted(
-            with: materialized,
+            with: chunks,
             settledInto: &settled
         )
         return TransientStrokeBufferUpdate(
@@ -1707,7 +1699,6 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             requiresReplayReplacement:
                 mutation.requiresReplayReplacement,
             replayWindowShortened: mutation.replayWindowShortened,
-            degradedToReplayTail: mutation.degradedToReplayTail,
             clearedPredictedSuffix: mutation.clearedPredictedSuffix,
             replayEpoch: mutation.replayEpoch,
             rejection: mutation.rejection
@@ -1739,47 +1730,35 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         if isUnchanged {
             return noChangeMutation()
         }
-        _ = try previewPredictedReplacement(
+        let preflight = try preflightPredictedReplacement(
             with: chunks,
             settledInto: &settled
         )
         settled.removeAll(keepingCapacity: true)
+        let clearedPrediction = installPredictedSuffix(
+            with: chunks,
+            predictedDabCount: preflight.predictedDabCount,
+            predictedProjectedCount:
+                preflight.predictedProjectedCount
+        )
+        return try finishPredictedReplacement(
+            with: chunks,
+            predictedDabCount: preflight.predictedDabCount,
+            predictedProjectedCount:
+                preflight.predictedProjectedCount,
+            clearedPrediction: clearedPrediction,
+            settledInto: &settled
+        )
+    }
 
-        var predictedProjectedCount = 0
-        var lastGeneratorSnapshot: BrushStrokeGenerator?
-        var predictedDabCount = 0
-        chunkIndex = chunks.startIndex
-        while chunkIndex < chunks.endIndex {
-            let chunk = chunks[chunkIndex]
-            predictedDabCount = Self.saturatingAdd(
-                predictedDabCount,
-                chunk.dabs.count
-            )
-            predictedProjectedCount = Self.saturatingAdd(
-                predictedProjectedCount,
-                chunk.projectedInstanceCount
-            )
-            lastGeneratorSnapshot =
-                chunk.generatorSnapshotAfterSample
-            chunkIndex += 1
-        }
-        let capacities = capacitiesForCurrentMode()
-        guard
-            chunks.count <= capacities.maximumSamples,
-            predictedDabCount <= capacities.maximumDabs,
-            predictedProjectedCount <= capacities.maximumProjectedInstances
-        else {
-            throw TransientStrokeBufferError
-                .predictedSuffixExceedsCapacity(
-                    sampleCount: chunks.count,
-                    dabCount: predictedDabCount,
-                    projectedInstanceCount: predictedProjectedCount
-                )
-        }
-
+    private mutating func installPredictedSuffix(
+        with chunks: borrowing [TransientStrokeChunk],
+        predictedDabCount: Int,
+        predictedProjectedCount: Int
+    ) -> Bool {
         let clearedPrediction = !predictedChunks.isEmpty
         predictedChunks.removeAll(keepingCapacity: true)
-        chunkIndex = chunks.startIndex
+        var chunkIndex = chunks.startIndex
         while chunkIndex < chunks.endIndex {
             predictedChunks.append(chunks[chunkIndex])
             chunkIndex += 1
@@ -1787,24 +1766,32 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         predictedDabCountStorage = predictedDabCount
         predictedProjectedInstanceCountStorage =
             predictedProjectedCount
-        predictedGeneratorSnapshot = lastGeneratorSnapshot
-        var didDegrade = false
-        if mode == .boundedWholeStroke,
-           let reason = combinedWholeStrokeOverflowReason()
-        {
-            mode = .replayTail
-            degradationReason = reason
-            degradationCount += 1
-            didDegrade = true
-        }
+        predictedGeneratorSnapshot =
+            predictedChunks.last?.generatorSnapshotAfterSample
+        return clearedPrediction
+    }
+
+    private mutating func finishPredictedReplacement(
+        with chunks: borrowing [TransientStrokeChunk],
+        predictedDabCount: Int,
+        predictedProjectedCount: Int,
+        clearedPrediction: Bool,
+        settledInto settled: inout [TransientStrokeChunk]
+    ) throws -> TransientStrokeBufferMutation {
         let updatedCapacities = capacitiesForCurrentMode()
-        promoteUntilWithinLimits(
-            sampleCapacity: updatedCapacities.maximumSamples,
-            dabCapacity: updatedCapacities.maximumDabs,
-            projectedInstanceCapacity:
-                updatedCapacities.maximumProjectedInstances,
-            settledInto: &settled
-        )
+        if retainedSampleCount > updatedCapacities.maximumSamples
+            || retainedDabCount > updatedCapacities.maximumDabs
+            || visibleProjectedInstanceCount
+                > updatedCapacities.maximumProjectedInstances
+        {
+            promoteUntilWithinLimits(
+                sampleCapacity: updatedCapacities.maximumSamples,
+                dabCapacity: updatedCapacities.maximumDabs,
+                projectedInstanceCapacity:
+                    updatedCapacities.maximumProjectedInstances,
+                settledInto: &settled
+            )
+        }
         guard
             retainedSampleCount <= updatedCapacities.maximumSamples,
             retainedDabCount <= updatedCapacities.maximumDabs,
@@ -1826,7 +1813,6 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         return TransientStrokeBufferMutation(
             requiresReplayReplacement: true,
             replayWindowShortened: shortened,
-            degradedToReplayTail: didDegrade,
             clearedPredictedSuffix: clearedPrediction,
             replayEpoch: replayEpoch
         )
@@ -1860,18 +1846,33 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         with chunks: [TransientStrokeChunk],
         settledInto settled: inout [TransientStrokeChunk]
     ) throws -> Int {
+        try preflightPredictedReplacement(
+            with: chunks,
+            settledInto: &settled
+        ).retainedProjectedCount
+    }
+
+    private struct PredictedReplacementPreflight {
+        let predictedDabCount: Int
+        let predictedProjectedCount: Int
+        let retainedProjectedCount: Int
+    }
+
+    private func preflightPredictedReplacement(
+        with chunks: borrowing [TransientStrokeChunk],
+        settledInto settled: inout [TransientStrokeChunk]
+    ) throws -> PredictedReplacementPreflight {
         var predictedDabCount = 0
         var predictedProjectedCount = 0
         var chunkIndex = chunks.startIndex
         while chunkIndex < chunks.endIndex {
-            let chunk = chunks[chunkIndex]
             predictedDabCount = Self.saturatingAdd(
                 predictedDabCount,
-                chunk.dabs.count
+                chunks[chunkIndex].dabs.count
             )
             predictedProjectedCount = Self.saturatingAdd(
                 predictedProjectedCount,
-                chunk.projectedInstanceCount
+                chunks[chunkIndex].projectedInstanceCount
             )
             chunkIndex += 1
         }
@@ -1901,28 +1902,12 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             actualProjectedInstanceCountStorage,
             predictedProjectedCount
         )
-        let wholeLimits = replayContract.limits
-            ?? BrushRecipePolicy.wholeStrokeLimits
-        let degradesToReplayTail = mode == .boundedWholeStroke
-            && (
-                combinedSamples > wholeLimits.maximumSamples
-                    || combinedDabs > wholeLimits.maximumDabs
-                    || combinedProjected
-                        > wholeLimits.maximumProjectedInstances
-            )
-        let limits = degradesToReplayTail
-            ? Self.minimumLimits(
-                replayContract.limits
-                    ?? BrushRecipePolicy.replayTailLimits,
-                BrushRecipePolicy.replayTailLimits
-            )
-            : currentLimits
+        let limits = currentLimits
         var retainedSamples = combinedSamples
         var retainedDabs = combinedDabs
         var retainedProjected = combinedProjected
         chunkIndex = actualChunks.startIndex
         while chunkIndex < actualChunks.endIndex {
-            let chunk = actualChunks[chunkIndex]
             guard retainedSamples > limits.maximumSamples
                     || retainedDabs > limits.maximumDabs
                     || retainedProjected
@@ -1930,14 +1915,16 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             else {
                 break
             }
-            guard chunk.sample.estimatedPropertiesExpectingUpdates.isEmpty
+            guard actualChunks[chunkIndex].sample
+                .estimatedPropertiesExpectingUpdates.isEmpty
             else {
                 break
             }
-            settled.append(chunk)
+            settled.append(actualChunks[chunkIndex])
             retainedSamples -= 1
-            retainedDabs -= chunk.dabs.count
-            retainedProjected -= chunk.projectedInstanceCount
+            retainedDabs -= actualChunks[chunkIndex].dabs.count
+            retainedProjected -= actualChunks[chunkIndex]
+                .projectedInstanceCount
             chunkIndex += 1
         }
         guard
@@ -1952,7 +1939,11 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
                     projectedInstanceCount: predictedProjectedCount
                 )
         }
-        return retainedProjected
+        return PredictedReplacementPreflight(
+            predictedDabCount: predictedDabCount,
+            predictedProjectedCount: predictedProjectedCount,
+            retainedProjectedCount: retainedProjected
+        )
     }
 
     @discardableResult
@@ -1970,7 +1961,6 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             settledPrefix: [],
             requiresReplayReplacement: true,
             replayWindowShortened: false,
-            degradedToReplayTail: false,
             clearedPredictedSuffix: true,
             replayEpoch: replayEpoch
         )
@@ -1997,13 +1987,6 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             return noChangeUpdate()
         }
 
-        var didDegrade = false
-        if mode == .boundedWholeStroke {
-            mode = .replayTail
-            degradationReason = .projectedInstanceCapacity
-            degradationCount += 1
-            didDegrade = true
-        }
         let capacities = capacitiesForCurrentMode()
         let settled = promoteUntilWithinLimits(
             sampleCapacity: capacities.maximumSamples,
@@ -2019,7 +2002,6 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             settledPrefix: settled,
             requiresReplayReplacement: true,
             replayWindowShortened: true,
-            degradedToReplayTail: didDegrade,
             clearedPredictedSuffix: false,
             replayEpoch: replayEpoch
         )
@@ -2032,12 +2014,9 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             ?? predictedGeneratorSnapshot
         initialGenerator?.cancel()
         advanceMutationVersion()
-        mode = requestedMode
         actualChunks.removeAll(keepingCapacity: true)
         predictedChunks.removeAll(keepingCapacity: true)
         replayEpoch = 0
-        degradationReason = nil
-        degradationCount = 0
         settledPrefixPromotionCount = 0
         replayWindowShorteningCount = 0
         replayStartGeneratorSnapshot = initialGenerator
@@ -2262,32 +2241,58 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         using plan: EstimatedStrokeUpdatePlan,
         with rebuiltChunks: [TransientStrokeChunk]
     ) throws -> TransientStrokeBufferUpdate {
+        try validateEstimatedReplacement(
+            plan: plan,
+            rebuiltChunks: rebuiltChunks
+        )
+        var updated = self
+        let clearedPrediction = Self.applyEstimatedReplacement(
+            plan: plan,
+            rebuiltChunks: rebuiltChunks,
+            to: &updated
+        )
+        let settled = try Self.finalizeEstimatedReplacement(&updated)
+        self = updated
+        return TransientStrokeBufferUpdate(
+            settledPrefix: settled,
+            requiresReplayReplacement: true,
+            replayWindowShortened: false,
+            clearedPredictedSuffix: clearedPrediction,
+            replayEpoch: replayEpoch
+        )
+    }
+
+    private func validateEstimatedReplacement(
+        plan: borrowing EstimatedStrokeUpdatePlan,
+        rebuiltChunks: borrowing [TransientStrokeChunk]
+    ) throws {
         guard plan.sourceReplayEpoch == mutationVersion else {
             throw TransientStrokeBufferError.staleEstimatedUpdatePlan
         }
         guard rebuiltChunks.count == plan.samplesToReplay.count + 1,
-              let first = rebuiltChunks.first,
+              !rebuiltChunks.isEmpty,
               Self.matchesReplaySource(
-                  first.sample,
+                  rebuiltChunks[rebuiltChunks.startIndex].sample,
                   raw: plan.mergedSample
               )
         else {
             throw TransientStrokeBufferError.invalidEstimatedReplacement
         }
-        for index in plan.samplesToReplay.indices
-        where !Self.matchesReplaySource(
-            rebuiltChunks[index + 1].sample,
-            raw: plan.samplesToReplay[index]
-        ) {
-            throw TransientStrokeBufferError.invalidEstimatedReplacement
+        var replayIndex = plan.samplesToReplay.startIndex
+        while replayIndex < plan.samplesToReplay.endIndex {
+            guard Self.matchesReplaySource(
+                rebuiltChunks[replayIndex + 1].sample,
+                raw: plan.samplesToReplay[replayIndex]
+            ) else {
+                throw TransientStrokeBufferError.invalidEstimatedReplacement
+            }
+            replayIndex += 1
         }
 
-        var updated = self
-        let clearedPrediction: Bool
         switch plan.target {
         case .authoritative:
-            guard plan.replacedChunkIndex < updated.actualChunks.count,
-                  updated.actualChunks[plan.replacedChunkIndex]
+            guard plan.replacedChunkIndex < actualChunks.count,
+                  actualChunks[plan.replacedChunkIndex]
                     .sample.estimationUpdateIndex
                     == plan.mergedSample.estimationUpdateIndex,
                   rebuiltChunks.allSatisfy({
@@ -2296,16 +2301,9 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             else {
                 throw TransientStrokeBufferError.invalidEstimatedReplacement
             }
-            updated.actualChunks.replaceSubrange(
-                plan.replacedChunkIndex...,
-                with: rebuiltChunks
-            )
-            clearedPrediction = !updated.predictedChunks.isEmpty
-            updated.predictedChunks.removeAll(keepingCapacity: true)
-            updated.predictedGeneratorSnapshot = nil
         case .predicted:
-            guard plan.replacedChunkIndex < updated.predictedChunks.count,
-                  updated.predictedChunks[plan.replacedChunkIndex]
+            guard plan.replacedChunkIndex < predictedChunks.count,
+                  predictedChunks[plan.replacedChunkIndex]
                     .sample.estimationUpdateIndex
                     == plan.mergedSample.estimationUpdateIndex,
                   rebuiltChunks.allSatisfy({
@@ -2314,18 +2312,54 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             else {
                 throw TransientStrokeBufferError.invalidEstimatedReplacement
             }
+        }
+    }
+
+    private static func applyEstimatedReplacement(
+        plan: borrowing EstimatedStrokeUpdatePlan,
+        rebuiltChunks: borrowing [TransientStrokeChunk],
+        to updated: inout TransientStrokeBuffer
+    ) -> Bool {
+        switch plan.target {
+        case .authoritative:
+            updated.actualChunks.replaceSubrange(
+                plan.replacedChunkIndex...,
+                with: copy rebuiltChunks
+            )
+            let clearedPrediction = !updated.predictedChunks.isEmpty
+            updated.predictedChunks.removeAll(keepingCapacity: true)
+            updated.predictedGeneratorSnapshot = nil
+            return clearedPrediction
+        case .predicted:
             updated.predictedChunks.replaceSubrange(
                 plan.replacedChunkIndex...,
-                with: rebuiltChunks
+                with: copy rebuiltChunks
             )
-            clearedPrediction = false
+            return false
         }
+    }
 
-        let rebuiltAuthoritativeGeneratorSnapshot =
-            updated.actualChunks.last?.generatorSnapshotAfterSample
-                ?? updated.authoritativeGeneratorSnapshot
-        let rebuiltPredictedGeneratorSnapshot =
-            updated.predictedChunks.last?.generatorSnapshotAfterSample
+    private static func finalizeEstimatedReplacement(
+        _ updated: inout TransientStrokeBuffer
+    ) throws -> [TransientStrokeChunk] {
+        if !updated.actualChunks.isEmpty,
+           updated.actualChunks[updated.actualChunks.index(before:
+            updated.actualChunks.endIndex)]
+            .generatorSnapshotAfterSample != nil
+        {
+            updated.authoritativeGeneratorSnapshot =
+                updated.actualChunks[updated.actualChunks.index(before:
+                    updated.actualChunks.endIndex)]
+                    .generatorSnapshotAfterSample
+        }
+        if updated.predictedChunks.isEmpty {
+            updated.predictedGeneratorSnapshot = nil
+        } else {
+            updated.predictedGeneratorSnapshot =
+                updated.predictedChunks[updated.predictedChunks.index(before:
+                    updated.predictedChunks.endIndex)]
+                    .generatorSnapshotAfterSample
+        }
         updated.recalculateAllCounters()
         var settled: [TransientStrokeChunk] = []
         if updated.mode == .appendOnly {
@@ -2345,21 +2379,9 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             )
         }
 
-        updated.authoritativeGeneratorSnapshot =
-            rebuiltAuthoritativeGeneratorSnapshot
-        updated.predictedGeneratorSnapshot =
-            rebuiltPredictedGeneratorSnapshot
         updated.advanceReplayEpoch()
         updated.advanceMutationVersion()
-        self = updated
-        return TransientStrokeBufferUpdate(
-            settledPrefix: settled,
-            requiresReplayReplacement: true,
-            replayWindowShortened: false,
-            degradedToReplayTail: false,
-            clearedPredictedSuffix: clearedPrediction,
-            replayEpoch: replayEpoch
-        )
+        return settled
     }
 
     /// Renderer hot-path estimated replacement. Both expected samples and
@@ -2633,7 +2655,6 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         return TransientStrokeBufferMutation(
             requiresReplayReplacement: true,
             replayWindowShortened: false,
-            degradedToReplayTail: false,
             clearedPredictedSuffix: clearedPrediction,
             replayEpoch: replayEpoch
         )
@@ -2698,9 +2719,6 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
                 declared,
                 BrushRecipePolicy.replayTailLimits
             )
-        case .boundedWholeStroke:
-            return replayContract.limits
-                ?? BrushRecipePolicy.wholeStrokeLimits
         }
     }
 
@@ -2731,38 +2749,6 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         )
     }
 
-    private func wholeStrokeOverflowReason()
-        -> TransientStrokeDegradationReason?
-    {
-        let limits = replayContract.limits
-            ?? BrushRecipePolicy.wholeStrokeLimits
-        if actualSampleCount > limits.maximumSamples
-            || actualDabCount > limits.maximumDabs
-        {
-            return .wholeStrokeCapacity
-        }
-        if visibleProjectedInstanceCount > limits.maximumProjectedInstances {
-            return .projectedInstanceCapacity
-        }
-        return nil
-    }
-
-    private func combinedWholeStrokeOverflowReason()
-        -> TransientStrokeDegradationReason?
-    {
-        let limits = replayContract.limits
-            ?? BrushRecipePolicy.wholeStrokeLimits
-        if retainedSampleCount > limits.maximumSamples
-            || retainedDabCount > limits.maximumDabs
-        {
-            return .wholeStrokeCapacity
-        }
-        if visibleProjectedInstanceCount > limits.maximumProjectedInstances {
-            return .projectedInstanceCapacity
-        }
-        return nil
-    }
-
     private mutating func promoteUntilWithinLimits(
         sampleCapacity: Int,
         dabCapacity: Int,
@@ -2784,6 +2770,20 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         projectedInstanceCapacity: Int,
         settledInto settled: inout [TransientStrokeChunk]
     ) {
+        let prefixCount = promotablePrefixCount(
+            sampleCapacity: sampleCapacity,
+            dabCapacity: dabCapacity,
+            projectedInstanceCapacity: projectedInstanceCapacity
+        )
+        guard prefixCount > 0 else { return }
+        applyPromotion(prefixCount: prefixCount, settledInto: &settled)
+    }
+
+    private func promotablePrefixCount(
+        sampleCapacity: Int,
+        dabCapacity: Int,
+        projectedInstanceCapacity: Int
+    ) -> Int {
         var retainedSamples = retainedSampleCount
         var retainedDabs = retainedDabCount
         var retainedProjectedInstances = visibleProjectedInstanceCount
@@ -2796,27 +2796,35 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
                 || retainedProjectedInstances
                     > projectedInstanceCapacity
         {
-            let chunk = actualChunks[prefixCount]
-            if !chunk.sample.estimatedPropertiesExpectingUpdates.isEmpty {
+            if !actualChunks[prefixCount].sample
+                .estimatedPropertiesExpectingUpdates.isEmpty
+            {
                 break
             }
             retainedSamples -= 1
-            retainedDabs -= chunk.dabs.count
-            retainedProjectedInstances -= chunk.projectedInstanceCount
+            retainedDabs -= actualChunks[prefixCount].dabs.count
+            retainedProjectedInstances -= actualChunks[prefixCount]
+                .projectedInstanceCount
             prefixCount += 1
         }
-        guard prefixCount > 0 else { return }
+        return prefixCount
+    }
 
-        settled.append(contentsOf: actualChunks.prefix(prefixCount))
-        actualChunks.removeFirst(prefixCount)
-        for chunk in settled {
-            actualDabCountStorage -= chunk.dabs.count
+    private mutating func applyPromotion(
+        prefixCount: Int,
+        settledInto settled: inout [TransientStrokeChunk]
+    ) {
+        for index in 0..<prefixCount {
+            actualDabCountStorage -= actualChunks[index].dabs.count
             actualProjectedInstanceCountStorage -=
-                chunk.projectedInstanceCount
-            if let snapshot = chunk.generatorSnapshotAfterSample {
-                replayStartGeneratorSnapshot = snapshot
+                actualChunks[index].projectedInstanceCount
+            if actualChunks[index].generatorSnapshotAfterSample != nil {
+                replayStartGeneratorSnapshot =
+                    actualChunks[index].generatorSnapshotAfterSample
             }
         }
+        settled.append(contentsOf: actualChunks.prefix(prefixCount))
+        actualChunks.removeFirst(prefixCount)
     }
 
     private mutating func recordPromotion(
@@ -2889,7 +2897,6 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             settledPrefix: [],
             requiresReplayReplacement: false,
             replayWindowShortened: false,
-            degradedToReplayTail: false,
             clearedPredictedSuffix: false,
             replayEpoch: replayEpoch
         )
@@ -2899,7 +2906,6 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         TransientStrokeBufferMutation(
             requiresReplayReplacement: false,
             replayWindowShortened: false,
-            degradedToReplayTail: false,
             clearedPredictedSuffix: false,
             replayEpoch: replayEpoch
         )

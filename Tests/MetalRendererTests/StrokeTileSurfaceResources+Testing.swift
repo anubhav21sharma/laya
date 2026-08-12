@@ -14,7 +14,6 @@ extension StrokeTileSurfaceResources {
         generation: UInt64,
         maximumRecordCount: Int,
         maximumTileReferenceCount: Int,
-        pipeline: DepositionPipelineBinding,
         namespaceLease: StrokeTileSurfaceNamespaceLease
     ) throws {
         guard namespaceLease.authoritativeSurfaceID
@@ -59,8 +58,7 @@ extension StrokeTileSurfaceResources {
                 namespaceLease: boundNamespace
             ),
             maximumRecordCount: maximumRecordCount,
-            maximumTileReferenceCount: maximumTileReferenceCount,
-            pipeline: pipeline
+            maximumTileReferenceCount: maximumTileReferenceCount
         )
     }
 
@@ -73,8 +71,7 @@ extension StrokeTileSurfaceResources {
         pixelSize: PixelSize,
         generation: UInt64,
         maximumRecordCount: Int,
-        maximumTileReferenceCount: Int,
-        pipeline: DepositionPipelineBinding
+        maximumTileReferenceCount: Int
     ) throws {
         try self.init(
             device: device,
@@ -86,8 +83,7 @@ extension StrokeTileSurfaceResources {
                 generation: generation
             ),
             maximumRecordCount: maximumRecordCount,
-            maximumTileReferenceCount: maximumTileReferenceCount,
-            pipeline: pipeline
+            maximumTileReferenceCount: maximumTileReferenceCount
         )
     }
 }

@@ -24,7 +24,7 @@ struct DocumentPaintSurfaceStoreTests {
             layerIDs: [UUID()]
         )
 
-        #expect(registry.sharedTileStore.transferByteCapacity == tileBytes * 7)
+        #expect(registry.sharedTileStore.transferByteCapacity == tileBytes * 9)
     }
 
     @Test

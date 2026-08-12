@@ -47,7 +47,7 @@ struct LayabrushConvertSubprocessTests {
     }
 
     @Test
-    func wetConversionSavesBlockedIntentAndEmitsDiagnostic() throws {
+    func wetConversionFailsAtTheNativeSchemaThreeBoundary() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let input = root.appendingPathComponent("wet-source")
@@ -59,20 +59,16 @@ struct LayabrushConvertSubprocessTests {
             "convert", "--json", "--output", output.path, input.path,
         ])
 
-        #expect(result.status == LayabrushConvertExitStatus.success)
-        #expect(result.standardError.contains("unsupported"))
-        #expect(result.standardError.contains(SyntheticV1SemanticKeys.wet))
+        #expect(result.status == LayabrushConvertExitStatus.invalidInput)
+        #expect(result.standardError.contains("mapping-failed"))
         let report = try decodeReport(result.standardOutput)
-        let outputPath = try #require(
-            report.results.first?.documents.first?.outputPath
+        let document = try #require(
+            report.results.first?.documents.first
         )
-        let package = try BrushPackageIO.load(
-            from: URL(fileURLWithPath: outputPath)
-        )
-        #expect(
-            package.definition.compatibility.requiredSemanticKeys
-                == [SyntheticV1SemanticKeys.wet]
-        )
+        #expect(document.status == "failed")
+        #expect(document.reasonCode == "mapping-failed")
+        #expect(document.outputPath == nil)
+        #expect(try layabrushFiles(in: output).isEmpty)
     }
 
     @Test
@@ -186,7 +182,7 @@ struct LayabrushConvertSubprocessTests {
     }
 
     @Test
-    func procreateInspectionWorksButConversionRequiresVerifiedMapper() throws {
+    func procreateInspectionWorksButConversionRequiresExplicitInputs() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let input = root.appendingPathComponent("extension-does-not-matter")
@@ -226,9 +222,52 @@ struct LayabrushConvertSubprocessTests {
         #expect(conversion.status == LayabrushConvertExitStatus.invalidInput)
         #expect(
             conversion.standardError
-                .contains("no-verified-semantic-mapper")
+                .contains("procreate-options-required")
         )
         #expect(!FileManager.default.fileExists(atPath: output.path))
+    }
+
+    @Test(arguments: [
+        "CC70504F-0D16-4D26-88A6-BF47BDA8ADE8",
+        "21AF8C6B-3FB1-4BF8-8F89-F5768271DA35",
+    ])
+    func realProcreateTargetsConvertDeterministicallyAndReopen(
+        identifier: String
+    ) throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = repositoryRoot()
+        let source = repository.appendingPathComponent(
+            "brushes/procreate/1_FREE_Charcoal_Set.brushset"
+        )
+        let substitutions = repository.appendingPathComponent(
+            "brushes/procreate/substitutions.json"
+        )
+        let output = root.appendingPathComponent("output", isDirectory: true)
+        let arguments = [
+            "convert", "--json", "--brush", identifier,
+            "--substitutions", substitutions.path,
+            "--output", output.path, source.path,
+        ]
+
+        let first = try runCLI(arguments)
+        #expect(first.status == LayabrushConvertExitStatus.success)
+        let firstReport = try decodeReport(first.standardOutput)
+        #expect(firstReport.succeeded == 1)
+        #expect(firstReport.failed == 0)
+        let document = try #require(firstReport.results.first?.documents.first)
+        #expect(firstReport.results.first?.documents.count == 1)
+        #expect(document.sourceBrushIdentifier == identifier)
+        let outputPath = try #require(document.outputPath)
+        let url = URL(fileURLWithPath: outputPath)
+        let bytes = try Data(contentsOf: url)
+        let package = try BrushPackageIO.load(from: url)
+        #expect(package.definition.components.count == 2)
+        #expect(package.conversionReport == document.conversionReport)
+
+        let second = try runCLI(arguments.prefix(1) + ["--replace"] + arguments.dropFirst())
+        #expect(second.status == LayabrushConvertExitStatus.success)
+        #expect(try Data(contentsOf: url) == bytes)
     }
 }
 
@@ -241,16 +280,34 @@ private struct CLIProcessResult {
 private func runCLI(_ arguments: [String]) throws -> CLIProcessResult {
     let executable = try layabrushConvertExecutable()
     let process = Process()
-    let output = Pipe()
-    let error = Pipe()
+    let captureRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("laya-cli-capture-\(UUID().uuidString)")
+    let outputURL = captureRoot.appendingPathExtension("stdout")
+    let errorURL = captureRoot.appendingPathExtension("stderr")
+    #expect(FileManager.default.createFile(
+        atPath: outputURL.path,
+        contents: nil
+    ))
+    #expect(FileManager.default.createFile(
+        atPath: errorURL.path,
+        contents: nil
+    ))
+    defer {
+        try? FileManager.default.removeItem(at: outputURL)
+        try? FileManager.default.removeItem(at: errorURL)
+    }
+    let output = try FileHandle(forWritingTo: outputURL)
+    let error = try FileHandle(forWritingTo: errorURL)
     process.executableURL = executable
     process.arguments = arguments
     process.standardOutput = output
     process.standardError = error
     try process.run()
     process.waitUntilExit()
-    let outputData = output.fileHandleForReading.readDataToEndOfFile()
-    let errorData = error.fileHandleForReading.readDataToEndOfFile()
+    try output.close()
+    try error.close()
+    let outputData = try Data(contentsOf: outputURL)
+    let errorData = try Data(contentsOf: errorURL)
     return CLIProcessResult(
         status: process.terminationStatus,
         standardOutput: outputData,
@@ -285,6 +342,14 @@ private func temporaryDirectory() throws -> URL {
         at: directory,
         withIntermediateDirectories: false
     )
+    return directory
+}
+
+private func repositoryRoot() -> URL {
+    var directory = URL(fileURLWithPath: #filePath)
+    for _ in 0 ..< 3 {
+        directory.deleteLastPathComponent()
+    }
     return directory
 }
 

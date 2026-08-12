@@ -140,7 +140,9 @@ func productionControllerAttestsCompleteRendererEvents() throws {
     )
     for frame in 0..<3 {
         let base = UInt64(frame) * 5_000_000_000
-        controller.recordInput(.actual, at: base)
+        if frame < 2 {
+            controller.recordInput(.actual, at: base)
+        }
         try controller.beginFrame(
             id: UInt64(frame),
             prepareStarted: base + 100,
@@ -186,7 +188,8 @@ func productionControllerAttestsCompleteRendererEvents() throws {
     #expect(snapshot.attestation?.completeFrameEventCount == 3)
     #expect(snapshot.attestation?.queueObservationCount == 3)
     #expect(snapshot.attestation?.begunFrameEventCount == 3)
-    #expect(snapshot.attestation?.attributedFrameEventCount == 3)
+    #expect(snapshot.attestation?.attributedFrameEventCount == 2)
+    #expect(snapshot.attributedFrameCount == 2)
     #expect(snapshot.attestation?.discardedFrameEventCount == 0)
     #expect(
         snapshot.attestation?.presentationSemantics == .drawablePresented
@@ -231,7 +234,7 @@ func gridRendererRecordsAttributedProductionCallSites() async throws {
         sample: runtimeStrokeSample(x: 12, phase: .began, timestamp: 0),
         style: style
     )
-    _ = try await renderer.flushPendingLiveForHarness()
+    _ = try await renderer.flushAcceptedStrokeInputForHarness()
     try renderer.appendStroke(
         token: token,
         sample: runtimeStrokeSample(x: 32, phase: .moved, timestamp: 1 / 60)
@@ -244,7 +247,7 @@ func gridRendererRecordsAttributedProductionCallSites() async throws {
     while renderer.brushLabDiagnosticSnapshot.deposition
         .authoritativePending > 0
     {
-        _ = try await renderer.flushPendingLiveForHarness()
+        _ = try await renderer.flushAcceptedStrokeInputForHarness()
     }
     _ = try await renderer.flushPendingLiveForHarness()
     _ = try await renderer.finishCommitForHarness()
@@ -276,6 +279,100 @@ func gridRendererRecordsAttributedProductionCallSites() async throws {
     #expect(markers.map(\.kind) == [.segmentBegan, .segmentEnded])
     #expect(markers[0].segmentID == markers[1].segmentID)
     #expect(markers[0].strokeID == markers[1].strokeID)
+}
+
+@MainActor
+@Test
+func productionTraceWorkloadKeepsTheMeasuredLongStrokeWindowStationary()
+    async throws
+{
+    guard let device = MTLCreateSystemDefaultDevice() else { return }
+    let renderer = try GridRenderer(
+        device: device,
+        library: try strokeRuntimeTestLibrary(device: device),
+        drawableSize: PatternSize(width: 512, height: 512),
+        configuration: try TilingCanvasConfiguration(
+            pixelSize: PixelSize(width: 512, height: 512),
+            tiling: .grid
+        )
+    )
+    try renderer.installNativeHarnessBrushes()
+    renderer.configureStrokeRuntimeTelemetry(
+        profile: .syntheticTest,
+        windowCapacity: 4_096
+    )
+    let token = RendererOperationToken(rawValue: 0x4C4F_4E47)
+    let style = try renderer.nativeHarnessStrokeStyle(
+        diameter: 20,
+        seed: token.rawValue
+    )
+
+    try renderer.beginStroke(
+        token: token,
+        sample: runtimeStrokeSample(
+            position: StrokeRuntimeTraceWorkload.position(frameIndex: 0),
+            phase: .began,
+            timestamp: 0
+        ),
+        style: style
+    )
+    _ = try await renderer.flushPendingLiveForHarness()
+    for frameIndex in 1...401 {
+        try renderer.appendStroke(
+            token: token,
+            sample: runtimeStrokeSample(
+                position: StrokeRuntimeTraceWorkload.position(
+                    frameIndex: frameIndex
+                ),
+                phase: .moved,
+                timestamp: Double(frameIndex) / 60
+            )
+        )
+        _ = try await renderer.flushPendingLiveForHarness()
+    }
+
+    try renderer.requestStrokeCommit(
+        token: token,
+        sample: runtimeStrokeSample(
+            position: StrokeRuntimeTraceWorkload.position(frameIndex: 402),
+            phase: .ended,
+            timestamp: 402 / 60
+        )
+    )
+    while renderer.brushLabDiagnosticSnapshot.deposition
+        .authoritativePending > 0
+    {
+        _ = try await renderer.flushPendingLiveForHarness()
+    }
+    _ = try await renderer.flushPendingLiveForHarness()
+    _ = try await renderer.finishCommitForHarness()
+
+    let evidence = try #require(renderer.strokeRuntimeRecordedEvidence)
+    let records = try #require(evidence.report.frameRecords)
+    let measured = records.suffix(BenchmarkLongStrokeMetrics.segmentCount)
+    #expect(measured.count == BenchmarkLongStrokeMetrics.segmentCount)
+    #expect(measured.allSatisfy {
+        (0...3).contains($0.newProjectedDabCount)
+    })
+    #expect(measured.reduce(0) { $0 + $1.newProjectedDabCount } > 0)
+    _ = try evidence.report.requiredLongStrokeMetrics(
+        validatesPerformance: false
+    )
+}
+
+@Test
+func productionTraceWorkloadFitsBoundedCanvasAtConstantSpacing() {
+    let positions = (0...601).map {
+        StrokeRuntimeTraceWorkload.position(frameIndex: $0)
+    }
+    #expect(positions.allSatisfy {
+        (0...512).contains($0.x) && (0...512).contains($0.y)
+    })
+    for (first, second) in zip(positions, positions.dropFirst()) {
+        let dx = second.x - first.x
+        let dy = second.y - first.y
+        #expect(abs(hypot(dx, dy) - 4) < 0.001)
+    }
 }
 
 @MainActor
@@ -338,6 +435,7 @@ func runtimeBeginObserverCanCancelStartReplacementWithoutOuterBeginDestroyingIt(
     #expect(replacementError == nil)
     try await renderer.awaitPendingStrokeWorkspaceRetirement()
     #expect(replacementStarted)
+    #expect(replacementError == nil)
     #expect(renderer.hasActiveStroke)
     try renderer.appendStroke(
         token: replacementToken,
@@ -478,6 +576,41 @@ func mixedLogicalDabAndRuntimeEventsPreserveCommittedOrder() async throws {
     renderer.onStrokeRuntimeSnapshot = nil
     try renderer.cancelStroke(token: token)
     try renderer.drainStrokeWorkspaceRetirementForHarness()
+}
+
+@MainActor
+@Test
+func brushLabSnapshotPublishesRendererEventDeliveryDiagnostics() throws {
+    guard let device = MTLCreateSystemDefaultDevice() else { return }
+    let renderer = try runtimeTestRenderer(device: device)
+    let internalDiagnostics = renderer.rendererEventDiagnosticsForTesting
+    let published = renderer.brushLabDiagnosticSnapshot.rendererEvents
+
+    #expect(
+        published.pendingEventCount
+            == internalDiagnostics.pendingEventCount
+    )
+    #expect(published.pendingHighWater == internalDiagnostics.pendingHighWater)
+    #expect(
+        published.staleGenerationDiscardCount
+            == internalDiagnostics.staleGenerationDiscardCount
+    )
+    #expect(
+        published.scheduledContinuationCount
+            == internalDiagnostics.scheduledContinuationCount
+    )
+    #expect(
+        renderer.brushLabDiagnosticSnapshot.viewportDrawableSize
+            == renderer.viewport.drawableSize
+    )
+    #expect(
+        renderer.brushLabDiagnosticSnapshot.viewportWorldCenter
+            == renderer.viewport.worldCenter
+    )
+    #expect(
+        renderer.brushLabDiagnosticSnapshot.viewportZoom
+            == renderer.viewport.zoom
+    )
 }
 
 @MainActor
@@ -641,17 +774,6 @@ func queuedLogicalDabsStopCallingObserverWhenPropertyBecomesNil()
     )
     try renderer.cancelStroke(token: token)
     try await renderer.awaitPendingStrokeWorkspaceRetirement()
-}
-
-@Test
-func replayEpochTrackerResetsForEachStroke() {
-    var tracker = StrokeRuntimeReplayEpochTracker()
-
-    tracker.beginStroke(at: 0)
-    #expect(tracker.consume(currentEpoch: 1) == 1)
-
-    tracker.beginStroke(at: 0)
-    #expect(tracker.consume(currentEpoch: 1) == 1)
 }
 
 @MainActor
@@ -1071,9 +1193,40 @@ func productionGateRejectsDiscardedFrameEvidence() throws {
     _ = try controller.endStroke()
     let evidence = try #require(controller.recordedEvidence)
 
-    #expect(throws: BenchmarkStrokeRuntimeGateError.self) {
+    #expect(
+        throws: BenchmarkStrokeRuntimeGateError.incompleteFrameEvidence(
+            begun: 4,
+            complete: 3,
+            discarded: 1
+        )
+    ) {
         try BenchmarkStrokeRuntimeGate.validate(
             evidence,
+            replayMode: .appendOnly
+        )
+    }
+}
+
+@MainActor
+@Test
+func softwareGateRejectsPreparationP95AtTwoMilliseconds() throws {
+    #expect(
+        throws: BenchmarkStrokeRuntimeGateError.preparationP95(
+            actual: 2_000_000,
+            maximumExclusive: 2_000_000
+        )
+    ) {
+        try BenchmarkStrokeRuntimeGate.validate(
+            try runtimeGateEvidence(
+                profile: .productionTenSeconds,
+                actualReplay: 0,
+                queues: [2, 1, 0],
+                missed: 0,
+                frames: 100,
+                eventToSubmitDelay: 2_000_002,
+                targetFrameDuration: 16_666_667,
+                preparationDelay: 2_000_000
+            ),
             replayMode: .appendOnly
         )
     }
@@ -1373,6 +1526,25 @@ func strokeRuntimeSoftwareGateRejectsEachSilentFailureMode() throws {
         )
     }
     #expect(
+        throws: BenchmarkStrokeRuntimeGateError.eventToSubmitP95(
+            actual: 8_000_000,
+            maximumExclusive: 8_000_000
+        )
+    ) {
+        try BenchmarkStrokeRuntimeGate.validate(
+            try runtimeGateEvidence(
+                profile: .productionTenSeconds,
+                actualReplay: 0,
+                queues: [2, 1, 0],
+                missed: 0,
+                frames: 100,
+                eventToSubmitDelay: 8_000_000,
+                targetFrameDuration: 16_666_667
+            ),
+            replayMode: .appendOnly
+        )
+    }
+    #expect(
         throws: BenchmarkStrokeRuntimeGateError.nonProductionTrace
     ) {
         try BenchmarkStrokeRuntimeGate.validate(
@@ -1502,6 +1674,22 @@ private func runtimeStrokeSample(
     )
 }
 
+private func runtimeStrokeSample(
+    position: ScreenPoint,
+    phase: StrokePhase,
+    timestamp: TimeInterval
+) -> StrokeSample {
+    StrokeSample(
+        position: position,
+        pressure: 0.75,
+        timestamp: timestamp,
+        phase: phase,
+        source: .mouse,
+        kind: .actual,
+        capabilities: [.pressure]
+    )
+}
+
 @MainActor
 private func recordControllerFrame(
     _ controller: StrokeRuntimeProductionController,
@@ -1607,7 +1795,10 @@ private func runtimeGateEvidence(
     queues: [Int],
     missed: UInt64,
     frames: UInt64,
-    observedDuration: UInt64? = nil
+    observedDuration: UInt64? = nil,
+    eventToSubmitDelay: UInt64 = 3,
+    targetFrameDuration: UInt64 = 1_000,
+    preparationDelay: UInt64 = 1
 ) throws -> StrokeRuntimeRecordedEvidence {
     let wallDuration = observedDuration
         ?? max(
@@ -1620,8 +1811,14 @@ private func runtimeGateEvidence(
         timestampSource: SyntheticRuntimeTimestampSource([0, wallDuration])
     )
     _ = try controller.beginStroke(strokeID: UUID())
-    let usableDuration = wallDuration > 3_000
-        ? wallDuration - 3_000
+    let presentationDelay = max(
+        3_000,
+        eventToSubmitDelay + 3,
+        targetFrameDuration * 2 + 3,
+        preparationDelay + 3
+    )
+    let usableDuration = wallDuration > presentationDelay
+        ? wallDuration - presentationDelay
         : 0
     for index in 0..<frames {
         let base = frames > 1
@@ -1637,11 +1834,11 @@ private func runtimeGateEvidence(
         try controller.beginFrame(
             id: index,
             prepareStarted: base + 1,
-            targetFrameDurationNanoseconds: 1_000
+            targetFrameDurationNanoseconds: targetFrameDuration
         )
         try controller.recordPrepared(
             id: index,
-            at: base + 2,
+            at: base + 1 + preparationDelay,
             newLogicalDabCount: 1,
             newProjectedDabCount: 1,
             authoritativeReplayCount: index == 0 ? actualReplay : 0,
@@ -1652,7 +1849,13 @@ private func runtimeGateEvidence(
             cacheMissCount: 0,
             residentMemoryBytes: 1
         )
-        let submitted = base + (index < missed ? 2_000 : 3)
+        let requestedSubmissionDelay = (
+            index < missed ? targetFrameDuration * 2 : eventToSubmitDelay
+        )
+        let submitted = base + max(
+            requestedSubmissionDelay,
+            preparationDelay + 2
+        )
         try controller.recordSubmitted(id: index, at: submitted)
         _ = try controller.recordGPU(
             id: index,
@@ -1661,7 +1864,8 @@ private func runtimeGateEvidence(
         )
         _ = try controller.recordPresented(
             id: index,
-            at: index == frames - 1 ? wallDuration : base + 3_000
+            at: index == frames - 1
+                ? wallDuration : base + presentationDelay
         )
     }
     _ = try controller.endStroke()

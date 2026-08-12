@@ -881,21 +881,34 @@ func missingHistoryTargetFailsBeforeRendererMutationAndPreservesCursor()
         [PixelRect(minX: 0, minY: 0, maxX: 1, maxY: 1)!],
         clippedTo: size
     )
+    let missingLayerID = controllerLayerID(99)
     let before = RasterRevisionReference(
         id: StoredRasterRevisionID(rawValue: 900),
         pixelSize: size,
+        documentPixelSize: size,
         regions: regions,
-        retainedBytes: 8
+        retainedBytes: 8,
+        storage: .tiledRGBA16Float(
+            layerID: missingLayerID,
+            generation: 900,
+            tileCoordinates: []
+        )
     )
     let after = RasterRevisionReference(
         id: StoredRasterRevisionID(rawValue: 901),
         pixelSize: size,
+        documentPixelSize: size,
         regions: regions,
-        retainedBytes: 8
+        retainedBytes: 8,
+        storage: .tiledRGBA16Float(
+            layerID: missingLayerID,
+            generation: 901,
+            tileCoordinates: []
+        )
     )
     let history = DocumentHistory(initialDocumentIsEmpty: false)
     _ = history.appendSuccessful(.raster(RasterHistoryCommand(
-        layerID: controllerLayerID(99),
+        layerID: missingLayerID,
         kind: .draw,
         before: before,
         after: after
@@ -1438,7 +1451,7 @@ func pointerDownCapturesPreparedNativeProgramsAndUniqueNonzeroSeed() throws {
         strokeSeedSessionEntropy: sessionEntropy
     )
 
-    controller.model.confirmRecipe(AnchorBrushCatalog.marker.id)
+    try controller.model.confirmRecipe(AnchorBrushCatalog.marker.id)
     controller.handleStrokeSample(controllerSample(.began))
     let first = try #require(renderer.harnessActiveStrokeStyle)
     #expect(
@@ -1451,7 +1464,7 @@ func pointerDownCapturesPreparedNativeProgramsAndUniqueNonzeroSeed() throws {
     controller.handleStrokeSample(controllerSample(.cancelled))
     try awaitControllerRendererIdleForHarness(renderer)
 
-    controller.model.confirmRecipe(AnchorBrushCatalog.glaze.id)
+    try controller.model.confirmRecipe(AnchorBrushCatalog.glaze.id)
     controller.handleStrokeSample(controllerSample(.began))
     let second = try #require(renderer.harnessActiveStrokeStyle)
     #expect(second.program == first.program)
@@ -1504,10 +1517,10 @@ func selectionConfirmsOnlyAfterCompiledRendererActivation() async throws {
 
     await controller.selectBrush(AnchorBrushCatalog.marker.id)
 
-    #expect(controller.model.selectedRecipeID == EditorBrushCatalog.chiselMarker.id)
+    #expect(controller.model.selectedRecipeID == EditorBrushCatalog.nativeMarker.id)
     #expect(
         renderer.harnessPreparedDrawBrushIdentity?.definitionID
-            == EditorBrushCatalog.chiselMarker.id
+            == EditorBrushCatalog.nativeMarker.id
     )
 
     controller.handleTool(.erase)
@@ -1542,8 +1555,8 @@ func successfulSelectionPersistsTheCanonicalActivatedBrushExactlyOnce()
 
     await controller.selectBrush(AnchorBrushCatalog.marker.id)
 
-    #expect(controller.model.selectedRecipeID == EditorBrushCatalog.chiselMarker.id)
-    #expect(store.writes == [EditorBrushCatalog.chiselMarker.id.rawValue])
+    #expect(controller.model.selectedRecipeID == EditorBrushCatalog.nativeMarker.id)
+    #expect(store.writes == [EditorBrushCatalog.nativeMarker.id.rawValue])
 }
 
 @Test
@@ -1581,7 +1594,7 @@ func mismatchedCompiledSelectionCannotPublishModelOrPersistence() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let compiler = try makeNativeCompiler(renderer: renderer)
     let wrongBrush = try await compiler.compileAndActivate(
-        definition: EditorBrushCatalog.graphitePencil.definition
+        definition: EditorBrushCatalog.nativeDryMedia.definition
     )
     let store = RecordingBrushSelectionStore()
     let controller = EditorSessionController(
@@ -1597,7 +1610,7 @@ func mismatchedCompiledSelectionCannotPublishModelOrPersistence() async throws {
     )
     try controller.installBootstrapBrushes(draw: ink, eraser: eraser)
 
-    await controller.selectBrush(EditorBrushCatalog.chiselMarker.id)
+    await controller.selectBrush(EditorBrushCatalog.nativeMarker.id)
 
     #expect(controller.model.selectedRecipeID == EditorBrushCatalog.defaultDraw.id)
     #expect(renderer.harnessPreparedDrawBrushIdentity == ink.renderIdentity)
@@ -1627,7 +1640,7 @@ func latestCompletedSelectionWinsWhenEarlierCompilationFinishesStale()
         definition: AnchorBrushCatalog.eraser.definition
     )
     let marker = try await compiler.compileAndActivate(
-        definition: EditorBrushCatalog.chiselMarker.definition
+        definition: EditorBrushCatalog.nativeMarker.definition
     )
     let airbrush = try await compiler.compileAndActivate(
         definition: AnchorBrushCatalog.airbrush.definition
@@ -1637,10 +1650,10 @@ func latestCompletedSelectionWinsWhenEarlierCompilationFinishesStale()
     let staleSelection = Task { @MainActor in
         await controller.selectBrush(AnchorBrushCatalog.marker.id)
     }
-    for _ in 0..<32 where !gate.pendingIDs.contains(EditorBrushCatalog.chiselMarker.id) {
+    for _ in 0..<32 where !gate.pendingIDs.contains(EditorBrushCatalog.nativeMarker.id) {
         await Task.yield()
     }
-    #expect(gate.pendingIDs == [EditorBrushCatalog.chiselMarker.id])
+    #expect(gate.pendingIDs == [EditorBrushCatalog.nativeMarker.id])
 
     let currentSelection = Task { @MainActor in
         await controller.selectBrush(AnchorBrushCatalog.airbrush.id)
@@ -1649,7 +1662,7 @@ func latestCompletedSelectionWinsWhenEarlierCompilationFinishesStale()
         await Task.yield()
     }
     #expect(Set(gate.pendingIDs) == [
-        EditorBrushCatalog.chiselMarker.id,
+        EditorBrushCatalog.nativeMarker.id,
         AnchorBrushCatalog.airbrush.id,
     ])
 
@@ -1662,7 +1675,7 @@ func latestCompletedSelectionWinsWhenEarlierCompilationFinishesStale()
     )
     #expect(store.writes == [EditorBrushCatalog.nativeAirbrush.id.rawValue])
 
-    try gate.complete(EditorBrushCatalog.chiselMarker.id, with: marker)
+    try gate.complete(EditorBrushCatalog.nativeMarker.id, with: marker)
     await staleSelection.value
     #expect(controller.model.selectedRecipeID == AnchorBrushCatalog.airbrush.id)
     #expect(
@@ -1690,14 +1703,14 @@ func replacementSessionPreservesConfirmedSelectionAndPersistenceWiring()
         selectionStore: store
     )
     let graphite = try await compiler.compileAndActivate(
-        definition: EditorBrushCatalog.graphitePencil.definition
+        definition: EditorBrushCatalog.nativeDryMedia.definition
     )
     let eraser = try await compiler.compileAndActivate(
         definition: EditorBrushCatalog.eraser.definition
     )
     try source.installBootstrapBrushes(draw: graphite, eraser: eraser)
     try source.confirmBootstrapBrushSelection(
-        EditorBrushCatalog.graphitePencil.id
+        EditorBrushCatalog.nativeDryMedia.id
     )
 
     let replacement = try source.replacementSession(
@@ -1705,18 +1718,18 @@ func replacementSessionPreservesConfirmedSelectionAndPersistenceWiring()
     )
     #expect(
         replacement.model.selectedRecipeID
-            == EditorBrushCatalog.graphitePencil.id
+            == EditorBrushCatalog.nativeDryMedia.id
     )
 
     await replacement.selectBrush(AnchorBrushCatalog.marker.id)
 
     #expect(
         replacement.model.selectedRecipeID
-            == EditorBrushCatalog.chiselMarker.id
+            == EditorBrushCatalog.nativeMarker.id
     )
     #expect(store.writes == [
-        EditorBrushCatalog.graphitePencil.id.rawValue,
-        EditorBrushCatalog.chiselMarker.id.rawValue,
+        EditorBrushCatalog.nativeDryMedia.id.rawValue,
+        EditorBrushCatalog.nativeMarker.id.rawValue,
     ])
 }
 
@@ -1745,17 +1758,17 @@ func replacementInvalidatesSelectionCompilingOnTheSourceSession()
         definition: EditorBrushCatalog.eraser.definition
     )
     let marker = try await compiler.compileAndActivate(
-        definition: EditorBrushCatalog.chiselMarker.definition
+        definition: EditorBrushCatalog.nativeMarker.definition
     )
     try source.installBootstrapBrushes(draw: ink, eraser: eraser)
 
     let obsoleteSelection = Task { @MainActor in
-        await source.selectBrush(EditorBrushCatalog.chiselMarker.id)
+        await source.selectBrush(EditorBrushCatalog.nativeMarker.id)
     }
     for _ in 0..<32 where gate.pendingIDs.isEmpty {
         await Task.yield()
     }
-    #expect(gate.pendingIDs == [EditorBrushCatalog.chiselMarker.id])
+    #expect(gate.pendingIDs == [EditorBrushCatalog.nativeMarker.id])
 
     let replacement = try source.replacementSession(
         renderer: replacementRenderer
@@ -1765,7 +1778,7 @@ func replacementInvalidatesSelectionCompilingOnTheSourceSession()
             == EditorBrushCatalog.defaultDraw.id
     )
 
-    try gate.complete(EditorBrushCatalog.chiselMarker.id, with: marker)
+    try gate.complete(EditorBrushCatalog.nativeMarker.id, with: marker)
     await obsoleteSelection.value
 
     #expect(source.model.selectedRecipeID == EditorBrushCatalog.defaultDraw.id)
@@ -1813,7 +1826,7 @@ func selectionDuringStrokeLeavesCurrentIdentityUntilNextStroke()
     controller.handleStrokeSample(controllerSample(.cancelled))
     try awaitControllerRendererIdleForHarness(renderer)
     await controller.selectBrush(AnchorBrushCatalog.marker.id)
-    #expect(controller.model.selectedRecipeID == EditorBrushCatalog.chiselMarker.id)
+    #expect(controller.model.selectedRecipeID == EditorBrushCatalog.nativeMarker.id)
 
     controller.handleStrokeSample(
         controllerSample(.began, timestamp: 3)
@@ -1847,7 +1860,7 @@ func diagnosticProgramSeedAndNormalizedInputAreCapturedAtStrokeStart()
 
     controller.handleStrokeSample(controllerSample(.cancelled, timestamp: 2))
     try awaitControllerRendererIdleForHarness(renderer)
-    controller.model.confirmRecipe(AnchorBrushCatalog.defaultDraw.id)
+    try controller.model.confirmRecipe(AnchorBrushCatalog.defaultDraw.id)
     controller.handleStrokeSample(controllerSample(.began, timestamp: 3))
     let builtIn = try #require(renderer.harnessActiveStrokeStyle)
     #expect(
@@ -2952,7 +2965,7 @@ func controllerSubmitsPredictedMovesAsOneReplaceableSuffixBatch()
 {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
-    controller.model.confirmRecipe(AnchorBrushCatalog.marker.id)
+    try controller.model.confirmRecipe(AnchorBrushCatalog.marker.id)
     var normalizedImmediateBatch: [StrokeSample] = []
     controller.onNormalizedInput = {
         normalizedImmediateBatch.append($0)
@@ -3254,6 +3267,10 @@ func finiteStrokeFullyOutsideCanvasIsIgnoredWithoutErrorOrHistory() throws {
     #expect(errors.isEmpty)
     #expect(renderer.isIdle)
     #expect(!renderer.hasActiveStroke)
+    #expect(
+        controller.lastStrokeBeginAdmissionResult
+            == .footprintOutsideDocument
+    )
     #expect(!controller.model.canUndo)
     #expect(controller.lastRecordedRasterCommandForTesting == nil)
 }
@@ -3274,6 +3291,7 @@ func finiteStrokeWhoseBrushFootprintCrossesCanvasEdgeStillBegins() throws {
     )
 
     #expect(renderer.hasActiveStroke)
+    #expect(controller.lastStrokeBeginAdmissionResult == .accepted)
     controller.handleStrokeSample(
         controllerSample(.cancelled, x: -5, y: 32, timestamp: 2)
     )

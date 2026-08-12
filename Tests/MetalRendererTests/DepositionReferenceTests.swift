@@ -1,5 +1,6 @@
 import CShaderTypes
 @testable import MetalRenderer
+@testable import MetalRendererDiagnostics
 import PatternEngine
 import Testing
 

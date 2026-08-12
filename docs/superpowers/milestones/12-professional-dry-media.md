@@ -1,12 +1,17 @@
 # Professional Dry And Non-Interacting Media
 
-**Status:** Corrective Rebuild Required — Not Product Accepted
+**Status:**
 
-> **Historical record notice (2026-08-01):** The prior Stage 5 implementation,
-> automated counts, and performance-intent labels below are retained as evidence
-> of what was measured. They do not establish current product acceptance. The
-> four professional definitions are laboratory-only while corrective rebuild
-> work is required.
+- `engineIntegrated`: `true`
+- `softwarePerformancePassed`: `true`
+- `manualQualityPassed`: `false`
+- `physicalProfilePassed`: `false`
+- `productAccepted`: `false`
+
+> **Status notice (2026-08-12):** The corrective engine rebuild and three-pass
+> software performance round are complete. The four professional definitions
+> remain laboratory-only because human quality review and qualifying physical
+> hardware profiles are pending.
 
 ## Scope
 
@@ -18,11 +23,15 @@ families while preserving the frozen Stage 4 diagnostic anchors:
 - `builtin.professional-natural-charcoal` (`Natural Charcoal`);
 - `builtin.professional-chisel-marker` (`Chisel Marker`).
 
-The editor catalog no longer selects these definitions. Persisted professional
-IDs resolve only to their Brush Lab entries, with a corrective-rebuild message;
-they do not silently select a substitute product brush. The current corrective
+The editor catalog does not select these definitions. Persisted professional
+IDs resolve only to their Brush Lab entries, with a manual/physical-pending
+message; they do not silently select a substitute product brush. The corrective
 program does not retune Stage 4 or claim perceptual quality from software
 evidence.
+
+All four candidate definitions declare `realtime60`. None declares
+`realtime120`; that intent remains unavailable until the 120 Hz physical
+profile passes.
 
 ## Commit Binding
 
@@ -229,6 +238,21 @@ Missing manual or physical evidence is a designed pending state. Malformed or
 failing supplied evidence is an error, and caller-authored pass strings are
 not accepted.
 
+The current three-pass comparison is persisted at:
+
+```text
+.build/brush-corrective-acceptance/full-matrix/summary.json
+.build/brush-corrective-acceptance/full-matrix/artifact-sha256.txt
+```
+
+It contains 24 isolated Release traces: two duration profiles for each of four
+brushes over three runs. Canonical and logical hashes are stable; the runtime
+gate enforces bounded queues, zero actual replay, zero dropped/overflowed
+input, equal early/late projected work, and the one-percent event-to-submit
+miss ceiling. Four paired negative controls fail closed. The production UI
+route was also exercised directly; XCTest UI automation remains an OS-host
+infrastructure exception because automation mode could not be enabled.
+
 ## Historical Checklist And Current Corrective Boundary
 
 - [x] Historical: add four exact professional definitions, assets, catalog
@@ -239,7 +263,7 @@ not accepted.
 - [x] Preserve the frozen Stage 4 scene/evidence truth.
 - [x] Historical: run the Stage 5 gate from the final clean committed source
       and record its exact terminal result.
-- [ ] Correctively rebuild and re-qualify the four professional definitions
-      before returning any of them to the product picker.
+- [x] Correctively rebuild and complete automated software qualification for
+      the four professional definitions while keeping them out of the picker.
 - [ ] Complete all 68 human perceptual assessments.
 - [ ] Supply and validate all eight physical-hardware profiles.

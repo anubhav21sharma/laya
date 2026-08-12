@@ -35,7 +35,6 @@ public struct BenchmarkBuild: Codable, Equatable, Sendable {
 public enum StrokeRuntimeReplayMode: String, Codable, Sendable {
     case appendOnly
     case replayTail
-    case boundedWholeStroke
 }
 
 public enum BenchmarkStrokeRuntimeGateError:
@@ -58,6 +57,8 @@ public enum BenchmarkStrokeRuntimeGateError:
     case appendOnlyReplay(UInt64)
     case insufficientQueueEvidence(actual: UInt64, required: UInt64)
     case monotonicBacklog(run: UInt64)
+    case preparationP95(actual: UInt64, maximumExclusive: UInt64)
+    case eventToSubmitP95(actual: UInt64, maximumExclusive: UInt64)
     case eventToSubmitMissFraction(actual: Double, maximum: Double)
 
     public var errorDescription: String? {
@@ -84,6 +85,10 @@ public enum BenchmarkStrokeRuntimeGateError:
             "Runtime queue evidence has \(actual) observations; \(required) are required."
         case let .monotonicBacklog(run):
             "Authoritative runtime backlog grows monotonically for \(run) observations."
+        case let .preparationP95(actual, maximumExclusive):
+            "Preparation p95 \(actual) ns is not below \(maximumExclusive) ns."
+        case let .eventToSubmitP95(actual, maximumExclusive):
+            "Event-to-submit p95 \(actual) ns is not below \(maximumExclusive) ns."
         case let .eventToSubmitMissFraction(actual, maximum):
             "Event-to-submit miss fraction \(actual) exceeds \(maximum)."
         }
@@ -91,6 +96,8 @@ public enum BenchmarkStrokeRuntimeGateError:
 }
 
 public enum BenchmarkStrokeRuntimeGate {
+    public static let maximumPreparationP95Nanoseconds: UInt64 = 2_000_000
+    public static let maximumEventToSubmitP95Nanoseconds: UInt64 = 8_000_000
     public static let maximumEventToSubmitMissFraction = 0.01
 
     public static func validate(
@@ -209,6 +216,20 @@ public enum BenchmarkStrokeRuntimeGate {
                 required: requiredDuration
             )
         }
+        guard snapshot.prepare.p95 < maximumPreparationP95Nanoseconds else {
+            throw BenchmarkStrokeRuntimeGateError.preparationP95(
+                actual: snapshot.prepare.p95,
+                maximumExclusive: maximumPreparationP95Nanoseconds
+            )
+        }
+        guard snapshot.eventToSubmit.p95
+                < maximumEventToSubmitP95Nanoseconds
+        else {
+            throw BenchmarkStrokeRuntimeGateError.eventToSubmitP95(
+                actual: snapshot.eventToSubmit.p95,
+                maximumExclusive: maximumEventToSubmitP95Nanoseconds
+            )
+        }
         if replayMode == .appendOnly,
            snapshot.authoritativeReplayCount > 0
         {
@@ -257,6 +278,8 @@ public enum BenchmarkMetricError: Error, Equatable, LocalizedError {
         expected: Int,
         actual: Int
     )
+    case nonStationaryProjectedInstanceWorkload(early: Int, late: Int)
+    case projectedInstanceCountOverflow(frame: Int, actual: UInt64)
     case longStrokeP95Growth(
         series: String,
         early: Double,
@@ -279,6 +302,10 @@ public enum BenchmarkMetricError: Error, Equatable, LocalizedError {
             "Long-stroke \(series) measurement at frame \(frame) is \(value) ms instead of a positive measured duration."
         case let .nonUniformProjectedInstanceCount(frame, expected, actual):
             "Long-stroke frame \(frame) emitted \(actual) projected instances instead of \(expected)."
+        case let .nonStationaryProjectedInstanceWorkload(early, late):
+            "Long-stroke projected workload changed from \(early) early-window instances to \(late) late-window instances."
+        case let .projectedInstanceCountOverflow(frame, actual):
+            "Long-stroke frame \(frame) emitted \(actual) projected instances, which exceeds the platform integer range."
         case let .longStrokeP95Growth(series, early, late, limit):
             "Long-stroke \(series) late p95 \(late) ms exceeds \(limit) ms from early p95 \(early) ms."
         case let .longStrokeSlopeGrowth(series, actual, limit):
@@ -323,17 +350,7 @@ public struct BenchmarkLongStrokeMetrics: Equatable, Sendable {
 
         try validateMeasurements(cpuMilliseconds, series: "cpu")
         try validateMeasurements(dabGPUMilliseconds, series: "dabGPU")
-        guard let expectedCount = projectedInstanceCounts.first else {
-            throw BenchmarkMetricError.insufficientLongStrokeFrames(0)
-        }
-        for (frame, actualCount) in projectedInstanceCounts.enumerated()
-        where actualCount != expectedCount {
-            throw BenchmarkMetricError.nonUniformProjectedInstanceCount(
-                frame: frame,
-                expected: expectedCount,
-                actual: actualCount
-            )
-        }
+        try validateProjectedInstanceCadence(projectedInstanceCounts)
 
         let earlyCPU = BenchmarkRecord.percentile95(
             Array(cpuMilliseconds[earlyWindow])
@@ -409,6 +426,26 @@ public struct BenchmarkLongStrokeMetrics: Equatable, Sendable {
                     value: value
                 )
             }
+        }
+    }
+
+    /// GPU submission may legally batch neighboring constant-work inputs in
+    /// different frame phases. The latency comparison therefore pins equal
+    /// projected work over its equally sized early and late windows instead
+    /// of making scheduler timing part of the workload contract.
+    private static func validateProjectedInstanceCadence(
+        _ counts: [Int]
+    ) throws {
+        guard !counts.isEmpty else {
+            throw BenchmarkMetricError.insufficientLongStrokeFrames(0)
+        }
+        let early = counts[earlyWindow].reduce(0, +)
+        let late = counts[lateWindow].reduce(0, +)
+        guard early > 0, early == late else {
+            throw BenchmarkMetricError.nonStationaryProjectedInstanceWorkload(
+                early: early,
+                late: late
+            )
         }
     }
 
@@ -513,6 +550,8 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
     public let inputSampleCount: Int?
     public let logicalDabCount: Int?
     public var strokeRuntime: StrokeRuntimeTelemetrySnapshot?
+    public var stageDAcceptanceRendererEvidence:
+        StageDAcceptanceRendererEvidence?
 
     public init(
         schemaVersion: Int,
@@ -584,6 +623,8 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
         inputSampleCount: Int? = nil,
         logicalDabCount: Int? = nil,
         strokeRuntime: StrokeRuntimeTelemetrySnapshot? = nil,
+        stageDAcceptanceRendererEvidence:
+            StageDAcceptanceRendererEvidence? = nil,
         program: String? = nil
     ) {
         self.schemaVersion = schemaVersion
@@ -662,6 +703,8 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
         self.inputSampleCount = inputSampleCount
         self.logicalDabCount = logicalDabCount
         self.strokeRuntime = strokeRuntime
+        self.stageDAcceptanceRendererEvidence =
+            stageDAcceptanceRendererEvidence
     }
 
     public func validateStrokeRuntimePerformance(
@@ -842,7 +885,7 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
         guard let replayMode else {
             throw BenchmarkRecordError.missingSchemaFiveMetric("replayMode")
         }
-        guard ["appendOnly", "replayTail", "boundedWholeStroke"]
+        guard ["appendOnly", "replayTail"]
             .contains(replayMode)
         else {
             throw BenchmarkRecordError.invalidTextValue(

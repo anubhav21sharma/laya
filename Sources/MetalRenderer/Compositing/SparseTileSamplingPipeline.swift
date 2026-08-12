@@ -356,6 +356,8 @@ struct SparseTileSamplingUploadRingSnapshot: Equatable, Sendable {
 
 struct SparseTileSamplingGPUCacheSnapshot: Equatable, Sendable {
     let preparedContentCount: Int
+    let hitCount: UInt64
+    let missCount: UInt64
     let cachedPlanMetalBufferBytes: Int
     let planMetalBufferAllocationCount: Int
     let planMetalBufferAllocationBytes: Int
@@ -1072,6 +1074,8 @@ actor SparseTileSamplingGPUPlanCache {
     private var uploadRing: SparseTileSamplingUploadRing?
     private var planMetalBufferAllocationCount = 0
     private var planMetalBufferAllocationBytes = 0
+    private var hitCount: UInt64 = 0
+    private var missCount: UInt64 = 0
 
     init(
         device: any MTLDevice,
@@ -1105,10 +1109,12 @@ actor SparseTileSamplingGPUPlanCache {
             let key = try makeKey(plan: plan, pipeline: pipeline)
             let content: SparseTileSamplingGPUPlanContent
             if var cached = prepared[key] {
+                hitCount = Self.saturatingIncrement(hitCount)
                 cached.lastAccess = nextAccessStamp()
                 prepared[key] = cached
                 content = cached.content
             } else {
+                missCount = Self.saturatingIncrement(missCount)
                 let staged = try build(
                     key: key,
                     plan: plan,
@@ -1146,11 +1152,17 @@ actor SparseTileSamplingGPUPlanCache {
     var allocationSnapshot: SparseTileSamplingGPUCacheSnapshot {
         SparseTileSamplingGPUCacheSnapshot(
             preparedContentCount: prepared.count,
+            hitCount: hitCount,
+            missCount: missCount,
             cachedPlanMetalBufferBytes: cachedPlanMetalBufferBytes,
             planMetalBufferAllocationCount: planMetalBufferAllocationCount,
             planMetalBufferAllocationBytes: planMetalBufferAllocationBytes,
             uploadRing: uploadRing?.snapshot
         )
+    }
+
+    private static func saturatingIncrement(_ value: UInt64) -> UInt64 {
+        value == .max ? .max : value + 1
     }
 
     var completionSnapshot: SparseTileSamplingCompletionSnapshot {

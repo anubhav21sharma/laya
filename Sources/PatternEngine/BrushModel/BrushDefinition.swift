@@ -76,26 +76,130 @@ public struct BrushColorBehaviorDefinition: Codable, Equatable, Sendable { publi
 public enum BrushSeedPolicy: Codable, Equatable, Sendable { case perStroke, fixed(UInt64); private enum Keys: String, CodingKey { case kind, value }; private enum Kind: String, Codable { case perStroke, fixed }; public init(from decoder: Decoder) throws { let c = try decoder.container(keyedBy: Keys.self); switch try c.decode(Kind.self, forKey: .kind) { case .perStroke: self = .perStroke; case .fixed: self = .fixed(try c.decode(UInt64.self, forKey: .value)) } }; public func encode(to encoder: Encoder) throws { var c = encoder.container(keyedBy: Keys.self); switch self { case .perStroke: try c.encode(Kind.perStroke, forKey: .kind); case let .fixed(value): try c.encode(Kind.fixed, forKey: .kind); try c.encode(value, forKey: .value) } } }
 public enum BrushPerformanceIntent: String, Codable, Equatable, Sendable { case realtime120, realtime60, quality }
 public struct BrushDefinitionLimits: Codable, Equatable, Sendable { public let minimumDiameter: Float; public let maximumDiameter: Float; public let maximumOpacity: Float; public let maximumSpacingFraction: Float; public let maximumResourceDimension: Int; public let maximumResidentBytes: Int; public init(minimumDiameter: Float, maximumDiameter: Float, maximumOpacity: Float, maximumSpacingFraction: Float, maximumResourceDimension: Int, maximumResidentBytes: Int) { self.minimumDiameter = minimumDiameter; self.maximumDiameter = maximumDiameter; self.maximumOpacity = maximumOpacity; self.maximumSpacingFraction = maximumSpacingFraction; self.maximumResourceDimension = maximumResourceDimension; self.maximumResidentBytes = maximumResidentBytes } }
-public struct BrushCompatibilityMetadata: Codable, Equatable, Sendable { public let nativeFeatureVersion: UInt16; public let sourceSettingKeys: [String]; public let requiredSemanticKeys: [String]; public init(nativeFeatureVersion: UInt16, sourceSettingKeys: [String], requiredSemanticKeys: [String]) { self.nativeFeatureVersion = nativeFeatureVersion; self.sourceSettingKeys = sourceSettingKeys; self.requiredSemanticKeys = requiredSemanticKeys } }
+public struct BrushCompatibilityMetadata: Codable, Equatable, Sendable { public let sourceSettingKeys: [String]; public let requiredSemanticKeys: [String]; public init(sourceSettingKeys: [String], requiredSemanticKeys: [String]) { self.sourceSettingKeys = sourceSettingKeys; self.requiredSemanticKeys = requiredSemanticKeys } }
 
-public enum BrushDefinitionValidationError: Error, Equatable, Sendable { case invalidIdentity, unsupportedSchema, unsupportedSchemaVersion(UInt16), unsorted(field: String), duplicate(field: String), invalidResource(field: String), invalidCoverage(field: String), nonfinite(field: String), outOfRange(field: String), invalidMapping(field: String), invalidCurve, missingCapability(String), invalidInteraction, invalidReplay, semanticLoss(String) }
+public enum BrushDefinitionValidationError: Error, Equatable, Sendable {
+    case invalidIdentity
+    case unsupportedSchemaVersion(UInt16)
+    case invalidComponentCount(actual: Int, maximum: Int)
+    case invalidComponentIdentifier(String)
+    case duplicateComponentIdentifier(String)
+    case invalidComponentOrdinal(expected: UInt8, actual: UInt8)
+    case conflictingComponentResource(String)
+    case unsupportedComponentInteraction(
+        ordinal: UInt8,
+        interaction: BrushInteractionMode
+    )
+    case unsorted(field: String)
+    case duplicate(field: String)
+    case invalidResource(field: String)
+    case invalidCoverage(field: String)
+    case nonfinite(field: String)
+    case outOfRange(field: String)
+    case invalidMapping(field: String)
+    case invalidCurve
+    case missingCapability(String)
+    case invalidInteraction
+    case invalidReplay
+    case semanticLoss(String)
+}
+
+private extension BrushDefinitionValidationError {
+    func prefixingComponentField(
+        _ ordinal: UInt8
+    ) -> BrushDefinitionValidationError {
+        switch self {
+        case let .unsorted(field):
+            .unsorted(field: prefixed(field, ordinal: ordinal))
+        case let .duplicate(field):
+            .duplicate(field: prefixed(field, ordinal: ordinal))
+        case let .invalidResource(field):
+            .invalidResource(field: prefixedResource(field, ordinal: ordinal))
+        case let .invalidCoverage(field):
+            .invalidCoverage(field: prefixedCoverage(field, ordinal: ordinal))
+        case let .nonfinite(field):
+            .nonfinite(field: prefixed(field, ordinal: ordinal))
+        case let .outOfRange(field):
+            .outOfRange(field: prefixed(field, ordinal: ordinal))
+        case let .invalidMapping(field):
+            .invalidMapping(field: prefixed(field, ordinal: ordinal))
+        default:
+            self
+        }
+    }
+
+    private func prefixed(
+        _ field: String,
+        ordinal: UInt8
+    ) -> String {
+        let rootPrefixes = [
+            "capabilities",
+            "compatibility",
+            "limits",
+            "stabilization",
+            "replay",
+            "termination",
+            "seedPolicy",
+            "sensorNormalization",
+            "stabilizationV2",
+            "direction",
+        ]
+        guard !rootPrefixes.contains(where: {
+            field == $0 || field.hasPrefix("\($0).")
+        }) else { return field }
+
+        let componentField: String
+        if field == "mapping"
+            || field.hasPrefix("mapping.")
+            || field == "constant"
+            || field == "boundedPower"
+            || field == "positive multiplier"
+            || field == "nonnegative multiplier"
+            || field == "rotation"
+            || field == "opacity"
+        {
+            componentField = "dynamics.\(field)"
+        } else {
+            componentField = field
+        }
+        return "components.\(ordinal).\(componentField)"
+    }
+
+    private func prefixedResource(
+        _ field: String,
+        ordinal: UInt8
+    ) -> String {
+        let componentField = field == "resources"
+            || field.hasPrefix("resources.")
+            ? field
+            : "resources.\(field)"
+        return "components.\(ordinal).\(componentField)"
+    }
+
+    private func prefixedCoverage(
+        _ field: String,
+        ordinal: UInt8
+    ) -> String {
+        let componentField = field == "tipSupports"
+            || field.hasPrefix("tipSupports.")
+            || field == "coverage"
+            || field.hasPrefix("coverage.")
+            ? field
+            : "coverage.\(field)"
+        return "components.\(ordinal).\(componentField)"
+    }
+}
 
 public struct BrushDefinition: Codable, Equatable, Sendable {
-    public static let legacySchemaVersion: UInt16 = 1
-    public static let currentSchemaVersion: UInt16 = 2
+    public static let currentSchemaVersion: UInt16 = 3
 
     public let id: BrushRecipeID
     public let schemaVersion: UInt16
     public let metadata: BrushMetadata
     public let capabilities: [BrushCapabilityDeclaration]
-    public let resources: [BrushResourceReference]
-    public let coverage: BrushCoverageDefinition
-    public let placement: BrushPlacementDefinition
-    public let dynamics: BrushDynamicsDefinition
-    public let color: BrushColorBehaviorDefinition
-    public let material: BrushMaterialDefinition
+    public let composition: BrushCompositionModeDeclaration
+    public let components: [BrushComponentDefinition]
     public let stabilization: Float
-    public let taper: BrushTaperConfiguration
     public let replayMode: BrushReplayMode
     public let replayLimits: BrushReplayLimits?
     public let termination: BrushTerminationDefinition
@@ -103,21 +207,12 @@ public struct BrushDefinition: Codable, Equatable, Sendable {
     public let limits: BrushDefinitionLimits
     public let performanceIntent: BrushPerformanceIntent
     public let compatibility: BrushCompatibilityMetadata
-    public let sensorNormalization: BrushSensorNormalizationDefinition?
-    public let sensorProgram: BrushSensorProgramDefinition?
-    public let stabilizationV2: BrushStabilizationDefinition?
-    public let direction: BrushDirectionDefinition?
-    public let emission: BrushEmissionDefinition?
-    public let tipSupports: [BrushTipSupportDefinition]?
-
-    /// This marker is deliberately absent from public initializers and the
-    /// wire format. It is derived only by the schema-v1 decoder or installed
-    /// by `LegacyBrushRecipeAdapter`.
-    let hasLegacySchemaV1Compatibility: Bool
+    public let sensorNormalization: BrushSensorNormalizationDefinition
+    public let stabilizationV2: BrushStabilizationDefinition
+    public let direction: BrushDirectionDefinition
 
     public init(
         id: BrushRecipeID,
-        schemaVersion: UInt16 = BrushDefinition.legacySchemaVersion,
         metadata: BrushMetadata,
         capabilities: [BrushCapabilityDeclaration],
         resources: [BrushResourceReference],
@@ -137,9 +232,7 @@ public struct BrushDefinition: Codable, Equatable, Sendable {
         compatibility: BrushCompatibilityMetadata
     ) throws {
         try self.init(
-            legacySchemaV1Compatibility: false,
             id: id,
-            schemaVersion: schemaVersion,
             metadata: metadata,
             capabilities: capabilities,
             resources: resources,
@@ -157,17 +250,78 @@ public struct BrushDefinition: Codable, Equatable, Sendable {
             limits: limits,
             performanceIntent: performanceIntent,
             compatibility: compatibility,
-            sensorNormalization: nil,
-            sensorProgram: nil,
-            stabilizationV2: nil,
-            direction: nil,
-            emission: nil,
-            tipSupports: nil
+            direction: BrushDirectionDefinition(
+                maximumAngularStep: .pi,
+                stationaryDirection: 0
+            )
         )
     }
 
     public init(
-        v2ID id: BrushRecipeID,
+        id: BrushRecipeID,
+        metadata: BrushMetadata,
+        capabilities: [BrushCapabilityDeclaration],
+        resources: [BrushResourceReference],
+        coverage: BrushCoverageDefinition,
+        placement: BrushPlacementDefinition,
+        dynamics: BrushDynamicsDefinition,
+        color: BrushColorBehaviorDefinition,
+        material: BrushMaterialDefinition,
+        stabilization: Float,
+        taper: BrushTaperConfiguration,
+        replayMode: BrushReplayMode,
+        replayLimits: BrushReplayLimits?,
+        termination: BrushTerminationDefinition = .cap,
+        seedPolicy: BrushSeedPolicy,
+        limits: BrushDefinitionLimits,
+        performanceIntent: BrushPerformanceIntent,
+        compatibility: BrushCompatibilityMetadata,
+        direction: BrushDirectionDefinition
+    ) throws {
+        try self.init(
+            id: id,
+            metadata: metadata,
+            capabilities: capabilities,
+            resources: resources,
+            coverage: coverage,
+            placement: placement,
+            dynamics: dynamics,
+            color: color,
+            material: material,
+            stabilization: stabilization,
+            taper: taper,
+            replayMode: replayMode,
+            replayLimits: replayLimits,
+            termination: termination,
+            seedPolicy: seedPolicy,
+            limits: limits,
+            performanceIntent: performanceIntent,
+            compatibility: compatibility,
+            sensorNormalization: BrushSensorNormalizationDefinition(
+                fullScaleWorldVelocity: BrushInputContract.maximumWorldVelocity,
+                minimumVelocityDeltaTime: 0.001,
+                fullScaleStrokeAge: 1,
+                fullScaleStrokeDistanceInDiameters: 10
+            ),
+            sensorProgram: BrushSensorProgramDefinition(
+                singleMappingDynamics: dynamics
+            ),
+            stabilizationV2: stabilization == 0
+                ? BrushStabilizationDefinition.none
+                : .weightedWindow(distance: stabilization),
+            direction: direction,
+            emission: BrushEmissionDefinition(mode: .distance, timeInterval: nil),
+            tipSupports: coverage.shapes.map { layer in
+                switch layer.shape {
+                case .chisel: .analyticRectangle
+                case .hardRound, .softRound, .asset: .analyticEllipse
+                }
+            }
+        )
+    }
+
+    public init(
+        id: BrushRecipeID,
         metadata: BrushMetadata,
         capabilities: [BrushCapabilityDeclaration],
         resources: [BrushResourceReference],
@@ -193,19 +347,25 @@ public struct BrushDefinition: Codable, Equatable, Sendable {
         tipSupports: [BrushTipSupportDefinition]
     ) throws {
         try self.init(
-            legacySchemaV1Compatibility: false,
             id: id,
-            schemaVersion: Self.currentSchemaVersion,
             metadata: metadata,
             capabilities: capabilities,
-            resources: resources,
-            coverage: coverage,
-            placement: placement,
-            dynamics: dynamics,
-            color: color,
-            material: material,
+            composition: .orderedSourceOver,
+            components: [BrushComponentDefinition(
+                identifier: BrushComponentIdentifier("primary"),
+                ordinal: 0,
+                resources: resources,
+                coverage: coverage,
+                placement: placement,
+                dynamics: dynamics,
+                color: color,
+                material: material,
+                taper: taper,
+                sensorProgram: sensorProgram,
+                emission: emission,
+                tipSupports: tipSupports
+            )],
             stabilization: stabilization,
-            taper: taper,
             replayMode: replayMode,
             replayLimits: replayLimits,
             termination: termination,
@@ -214,28 +374,18 @@ public struct BrushDefinition: Codable, Equatable, Sendable {
             performanceIntent: performanceIntent,
             compatibility: compatibility,
             sensorNormalization: sensorNormalization,
-            sensorProgram: sensorProgram,
             stabilizationV2: stabilizationV2,
-            direction: direction,
-            emission: emission,
-            tipSupports: tipSupports
+            direction: direction
         )
     }
 
-    init(
-        legacySchemaV1Compatibility: Bool,
+    public init(
         id: BrushRecipeID,
-        schemaVersion: UInt16,
         metadata: BrushMetadata,
         capabilities: [BrushCapabilityDeclaration],
-        resources: [BrushResourceReference],
-        coverage: BrushCoverageDefinition,
-        placement: BrushPlacementDefinition,
-        dynamics: BrushDynamicsDefinition,
-        color: BrushColorBehaviorDefinition,
-        material: BrushMaterialDefinition,
+        composition: BrushCompositionModeDeclaration,
+        components: [BrushComponentDefinition],
         stabilization: Float,
-        taper: BrushTaperConfiguration,
         replayMode: BrushReplayMode,
         replayLimits: BrushReplayLimits?,
         termination: BrushTerminationDefinition,
@@ -243,52 +393,57 @@ public struct BrushDefinition: Codable, Equatable, Sendable {
         limits: BrushDefinitionLimits,
         performanceIntent: BrushPerformanceIntent,
         compatibility: BrushCompatibilityMetadata,
-        sensorNormalization: BrushSensorNormalizationDefinition?,
-        sensorProgram: BrushSensorProgramDefinition?,
-        stabilizationV2: BrushStabilizationDefinition?,
-        direction: BrushDirectionDefinition?,
-        emission: BrushEmissionDefinition?,
-        tipSupports: [BrushTipSupportDefinition]?
+        sensorNormalization: BrushSensorNormalizationDefinition,
+        stabilizationV2: BrushStabilizationDefinition,
+        direction: BrushDirectionDefinition
     ) throws {
-        try BrushDefinitionValidator.validate(
-            id: id,
-            schemaVersion: schemaVersion,
-            metadata: metadata,
-            capabilities: capabilities,
-            resources: resources,
-            coverage: coverage,
-            placement: placement,
-            dynamics: dynamics,
-            color: color,
-            material: material,
-            stabilization: stabilization,
-            taper: taper,
-            replayMode: replayMode,
-            replayLimits: replayLimits,
-            termination: termination,
-            seedPolicy: seedPolicy,
-            limits: limits,
-            performanceIntent: performanceIntent,
-            compatibility: compatibility,
-            sensorNormalization: sensorNormalization,
-            sensorProgram: sensorProgram,
-            stabilizationV2: stabilizationV2,
-            direction: direction,
-            emission: emission,
-            tipSupports: tipSupports
-        )
+        try BrushDefinitionValidator.validateComponentTopology(components)
+        for component in components {
+            guard component.material.interaction == .none else {
+                throw BrushDefinitionValidationError
+                    .unsupportedComponentInteraction(
+                        ordinal: component.ordinal,
+                        interaction: component.material.interaction
+                    )
+            }
+            do {
+                try BrushDefinitionValidator.validate(
+                    id: id,
+                    metadata: metadata,
+                    capabilities: capabilities,
+                    resources: component.resources,
+                    coverage: component.coverage,
+                    placement: component.placement,
+                    dynamics: component.dynamics,
+                    color: component.color,
+                    material: component.material,
+                    stabilization: stabilization,
+                    taper: component.taper,
+                    replayMode: replayMode,
+                    replayLimits: replayLimits,
+                    termination: termination,
+                    seedPolicy: seedPolicy,
+                    limits: limits,
+                    performanceIntent: performanceIntent,
+                    compatibility: compatibility,
+                    sensorNormalization: sensorNormalization,
+                    sensorProgram: component.sensorProgram,
+                    stabilizationV2: stabilizationV2,
+                    direction: direction,
+                    emission: component.emission,
+                    tipSupports: component.tipSupports
+                )
+            } catch let error as BrushDefinitionValidationError {
+                throw error.prefixingComponentField(component.ordinal)
+            }
+        }
         self.id = id
-        self.schemaVersion = schemaVersion
+        self.schemaVersion = Self.currentSchemaVersion
         self.metadata = metadata
         self.capabilities = capabilities
-        self.resources = resources
-        self.coverage = coverage
-        self.placement = placement
-        self.dynamics = dynamics
-        self.color = color
-        self.material = material
+        self.composition = composition
+        self.components = components
         self.stabilization = stabilization
-        self.taper = taper
         self.replayMode = replayMode
         self.replayLimits = replayLimits
         self.termination = termination
@@ -297,53 +452,41 @@ public struct BrushDefinition: Codable, Equatable, Sendable {
         self.performanceIntent = performanceIntent
         self.compatibility = compatibility
         self.sensorNormalization = sensorNormalization
-        self.sensorProgram = sensorProgram
         self.stabilizationV2 = stabilizationV2
         self.direction = direction
-        self.emission = emission
-        self.tipSupports = tipSupports
-        self.hasLegacySchemaV1Compatibility =
-            legacySchemaV1Compatibility
     }
 
     fileprivate enum Keys: String, CodingKey {
-        case id, schemaVersion, metadata, capabilities, resources, coverage
-        case placement, dynamics, color, material, stabilization, taper
+        case id, schemaVersion, metadata, capabilities, composition, components
+        case stabilization
         case replayMode, replayLimits, termination, seedPolicy, limits
         case performanceIntent, compatibility
-        case sensorNormalization, sensorProgram, stabilizationV2, direction
-        case emission, tipSupports
+        case sensorNormalization, stabilizationV2, direction
     }
 
     public init(from decoder: Decoder) throws {
         let envelope = try BrushDefinitionVersionEnvelope(from: decoder)
-        switch envelope.schemaVersion {
-        case Self.legacySchemaVersion:
-            self = try BrushDefinitionV1DTO(from: decoder).definition
-        case Self.currentSchemaVersion:
-            self = try BrushDefinitionV2DTO(from: decoder).definition
-        default:
+        guard envelope.schemaVersion == Self.currentSchemaVersion else {
             throw BrushDefinitionValidationError.unsupportedSchemaVersion(
                 envelope.schemaVersion
             )
         }
+        self = try BrushDefinitionV3DTO(from: decoder).definition
     }
 
-    fileprivate static func decodeDTO(
-        from decoder: Decoder,
-        schemaVersion: UInt16
-    ) throws -> BrushDefinition {
+    fileprivate static func decodeDTO(from decoder: Decoder) throws
+        -> BrushDefinition
+    {
         let container = try decoder.container(keyedBy: Keys.self)
-        let taper = try container.decode(
-            BrushTaperConfiguration.self,
-            forKey: .taper
+        let components = try container.decode(
+            [BrushComponentDefinition].self,
+            forKey: .components
         )
         let replayMode = try container.decode(
             BrushReplayMode.self,
             forKey: .replayMode
         )
-        let hasEncodedTermination = container.contains(.termination)
-        if hasEncodedTermination,
+        if container.contains(.termination),
            try container.decodeNil(forKey: .termination)
         {
             throw DecodingError.valueNotFound(
@@ -356,53 +499,27 @@ public struct BrushDefinition: Codable, Equatable, Sendable {
             )
         }
         return try BrushDefinition(
-            legacySchemaV1Compatibility: LegacyBrushCompatibilityAdapter
-                .marksDecodedSchemaV1(
-                    schemaVersion: schemaVersion,
-                    hasEncodedTermination: hasEncodedTermination
-                ),
             id: container.decode(BrushRecipeID.self, forKey: .id),
-            schemaVersion: schemaVersion,
             metadata: container.decode(BrushMetadata.self, forKey: .metadata),
             capabilities: container.decode(
                 [BrushCapabilityDeclaration].self,
                 forKey: .capabilities
             ),
-            resources: container.decode(
-                [BrushResourceReference].self,
-                forKey: .resources
+            composition: container.decode(
+                BrushCompositionModeDeclaration.self,
+                forKey: .composition
             ),
-            coverage: container.decode(
-                BrushCoverageDefinition.self,
-                forKey: .coverage
-            ),
-            placement: container.decode(
-                BrushPlacementDefinition.self,
-                forKey: .placement
-            ),
-            dynamics: container.decode(
-                BrushDynamicsDefinition.self,
-                forKey: .dynamics
-            ),
-            color: container.decode(
-                BrushColorBehaviorDefinition.self,
-                forKey: .color
-            ),
-            material: container.decode(
-                BrushMaterialDefinition.self,
-                forKey: .material
-            ),
+            components: components,
             stabilization: container.decode(Float.self, forKey: .stabilization),
-            taper: taper,
             replayMode: replayMode,
             replayLimits: container.decodeIfPresent(
                 BrushReplayLimits.self,
                 forKey: .replayLimits
             ),
-            termination: try container.decodeIfPresent(
+            termination: try container.decode(
                 BrushTerminationDefinition.self,
                 forKey: .termination
-            ) ?? .cap,
+            ),
             seedPolicy: container.decode(BrushSeedPolicy.self, forKey: .seedPolicy),
             limits: container.decode(BrushDefinitionLimits.self, forKey: .limits),
             performanceIntent: container.decode(
@@ -413,36 +530,18 @@ public struct BrushDefinition: Codable, Equatable, Sendable {
                 BrushCompatibilityMetadata.self,
                 forKey: .compatibility
             ),
-            sensorNormalization: schemaVersion == Self.currentSchemaVersion
-                ? container.decode(
-                    BrushSensorNormalizationDefinition.self,
-                    forKey: .sensorNormalization
-                ) : nil,
-            sensorProgram: schemaVersion == Self.currentSchemaVersion
-                ? container.decode(
-                    BrushSensorProgramDefinition.self,
-                    forKey: .sensorProgram
-                ) : nil,
-            stabilizationV2: schemaVersion == Self.currentSchemaVersion
-                ? container.decode(
-                    BrushStabilizationDefinition.self,
-                    forKey: .stabilizationV2
-                ) : nil,
-            direction: schemaVersion == Self.currentSchemaVersion
-                ? container.decode(
-                    BrushDirectionDefinition.self,
-                    forKey: .direction
-                ) : nil,
-            emission: schemaVersion == Self.currentSchemaVersion
-                ? container.decode(
-                    BrushEmissionDefinition.self,
-                    forKey: .emission
-                ) : nil,
-            tipSupports: schemaVersion == Self.currentSchemaVersion
-                ? container.decode(
-                    [BrushTipSupportDefinition].self,
-                    forKey: .tipSupports
-                ) : nil
+            sensorNormalization: container.decode(
+                BrushSensorNormalizationDefinition.self,
+                forKey: .sensorNormalization
+            ),
+            stabilizationV2: container.decode(
+                BrushStabilizationDefinition.self,
+                forKey: .stabilizationV2
+            ),
+            direction: container.decode(
+                BrushDirectionDefinition.self,
+                forKey: .direction
+            )
         )
     }
 
@@ -452,31 +551,19 @@ public struct BrushDefinition: Codable, Equatable, Sendable {
         try container.encode(schemaVersion, forKey: .schemaVersion)
         try container.encode(metadata, forKey: .metadata)
         try container.encode(capabilities, forKey: .capabilities)
-        try container.encode(resources, forKey: .resources)
-        try container.encode(coverage, forKey: .coverage)
-        try container.encode(placement, forKey: .placement)
-        try container.encode(dynamics, forKey: .dynamics)
-        try container.encode(color, forKey: .color)
-        try container.encode(material, forKey: .material)
+        try container.encode(composition, forKey: .composition)
+        try container.encode(components, forKey: .components)
         try container.encode(stabilization, forKey: .stabilization)
-        try container.encode(taper, forKey: .taper)
         try container.encode(replayMode, forKey: .replayMode)
         try container.encodeIfPresent(replayLimits, forKey: .replayLimits)
-        if !hasLegacySchemaV1Compatibility {
-            try container.encode(termination, forKey: .termination)
-        }
+        try container.encode(termination, forKey: .termination)
         try container.encode(seedPolicy, forKey: .seedPolicy)
         try container.encode(limits, forKey: .limits)
         try container.encode(performanceIntent, forKey: .performanceIntent)
         try container.encode(compatibility, forKey: .compatibility)
-        if schemaVersion == Self.currentSchemaVersion {
-            try container.encode(sensorNormalization, forKey: .sensorNormalization)
-            try container.encode(sensorProgram, forKey: .sensorProgram)
-            try container.encode(stabilizationV2, forKey: .stabilizationV2)
-            try container.encode(direction, forKey: .direction)
-            try container.encode(emission, forKey: .emission)
-            try container.encode(tipSupports, forKey: .tipSupports)
-        }
+        try container.encode(sensorNormalization, forKey: .sensorNormalization)
+        try container.encode(stabilizationV2, forKey: .stabilizationV2)
+        try container.encode(direction, forKey: .direction)
     }
 }
 
@@ -484,36 +571,73 @@ private struct BrushDefinitionVersionEnvelope: Decodable {
     let schemaVersion: UInt16
 }
 
-private struct BrushDefinitionV1DTO: Decodable {
+private struct BrushDefinitionV3DTO: Decodable {
     let definition: BrushDefinition
 
     init(from decoder: Decoder) throws {
-        definition = try BrushDefinition.decodeDTO(
-            from: decoder,
-            schemaVersion: BrushDefinition.legacySchemaVersion
-        )
-    }
-}
-
-private struct BrushDefinitionV2DTO: Decodable {
-    let definition: BrushDefinition
-
-    init(from decoder: Decoder) throws {
-        definition = try BrushDefinition.decodeDTO(
-            from: decoder,
-            schemaVersion: BrushDefinition.currentSchemaVersion
-        )
+        definition = try BrushDefinition.decodeDTO(from: decoder)
     }
 }
 
 private enum BrushDefinitionValidator {
-    static func validate(id: BrushRecipeID, schemaVersion: UInt16, metadata: BrushMetadata, capabilities: [BrushCapabilityDeclaration], resources: [BrushResourceReference], coverage: BrushCoverageDefinition, placement: BrushPlacementDefinition, dynamics: BrushDynamicsDefinition, color: BrushColorBehaviorDefinition, material: BrushMaterialDefinition, stabilization: Float, taper: BrushTaperConfiguration, replayMode: BrushReplayMode, replayLimits: BrushReplayLimits?, termination: BrushTerminationDefinition, seedPolicy: BrushSeedPolicy, limits: BrushDefinitionLimits, performanceIntent: BrushPerformanceIntent, compatibility: BrushCompatibilityMetadata, sensorNormalization: BrushSensorNormalizationDefinition?, sensorProgram: BrushSensorProgramDefinition?, stabilizationV2: BrushStabilizationDefinition?, direction: BrushDirectionDefinition?, emission: BrushEmissionDefinition?, tipSupports: [BrushTipSupportDefinition]?) throws {
-        guard !id.rawValue.isEmpty, !metadata.displayName.isEmpty else { throw BrushDefinitionValidationError.invalidIdentity }
-        guard schemaVersion == BrushDefinition.legacySchemaVersion
-                || schemaVersion == BrushDefinition.currentSchemaVersion
-        else {
-            throw BrushDefinitionValidationError.unsupportedSchemaVersion(schemaVersion)
+    static func validateComponentTopology(
+        _ components: [BrushComponentDefinition]
+    ) throws {
+        guard (1...2).contains(components.count) else {
+            throw BrushDefinitionValidationError.invalidComponentCount(
+                actual: components.count,
+                maximum: 2
+            )
         }
+        var identifiers = Set<String>()
+        var resourcesByIdentifier: [String: BrushResourceReference] = [:]
+        for (index, component) in components.enumerated() {
+            let identifier = component.identifier.rawValue
+            guard isPortableComponentIdentifier(identifier) else {
+                throw BrushDefinitionValidationError
+                    .invalidComponentIdentifier(identifier)
+            }
+            guard identifiers.insert(identifier).inserted else {
+                throw BrushDefinitionValidationError
+                    .duplicateComponentIdentifier(identifier)
+            }
+            let expected = UInt8(index)
+            guard component.ordinal == expected else {
+                throw BrushDefinitionValidationError.invalidComponentOrdinal(
+                    expected: expected,
+                    actual: component.ordinal
+                )
+            }
+            for resource in component.resources {
+                if let existing = resourcesByIdentifier[resource.identifier],
+                   existing != resource
+                {
+                    throw BrushDefinitionValidationError
+                        .conflictingComponentResource(resource.identifier)
+                }
+                resourcesByIdentifier[resource.identifier] = resource
+            }
+        }
+    }
+
+    private static func isPortableComponentIdentifier(
+        _ identifier: String
+    ) -> Bool {
+        guard let first = identifier.utf8.first,
+              (first >= 97 && first <= 122)
+                || (first >= 48 && first <= 57)
+        else { return false }
+        return identifier.utf8.allSatisfy { byte in
+            (byte >= 97 && byte <= 122)
+                || (byte >= 48 && byte <= 57)
+                || byte == 46
+                || byte == 95
+                || byte == 45
+        }
+    }
+
+    static func validate(id: BrushRecipeID, metadata: BrushMetadata, capabilities: [BrushCapabilityDeclaration], resources: [BrushResourceReference], coverage: BrushCoverageDefinition, placement: BrushPlacementDefinition, dynamics: BrushDynamicsDefinition, color: BrushColorBehaviorDefinition, material: BrushMaterialDefinition, stabilization: Float, taper: BrushTaperConfiguration, replayMode: BrushReplayMode, replayLimits: BrushReplayLimits?, termination: BrushTerminationDefinition, seedPolicy: BrushSeedPolicy, limits: BrushDefinitionLimits, performanceIntent: BrushPerformanceIntent, compatibility: BrushCompatibilityMetadata, sensorNormalization: BrushSensorNormalizationDefinition, sensorProgram: BrushSensorProgramDefinition, stabilizationV2: BrushStabilizationDefinition, direction: BrushDirectionDefinition, emission: BrushEmissionDefinition, tipSupports: [BrushTipSupportDefinition]) throws {
+        guard !id.rawValue.isEmpty, !metadata.displayName.isEmpty else { throw BrushDefinitionValidationError.invalidIdentity }
         try sortedUnique(capabilities.map(\.identifier), field: "capabilities")
         try sortedUnique(compatibility.sourceSettingKeys, field: "compatibility.sourceSettingKeys")
         try sortedUnique(compatibility.requiredSemanticKeys, field: "compatibility.requiredSemanticKeys")
@@ -530,27 +654,16 @@ private enum BrushDefinitionValidator {
         try replayValidation(replayMode, replayLimits, taper.end)
         try terminationValidation(termination)
         if case let .fixed(seed) = seedPolicy, seed == 0 { throw BrushDefinitionValidationError.outOfRange(field: "seedPolicy") }
-        if schemaVersion == BrushDefinition.legacySchemaVersion {
-            guard sensorNormalization == nil, sensorProgram == nil,
-                  stabilizationV2 == nil, direction == nil, emission == nil,
-                  tipSupports == nil
-            else { throw BrushDefinitionValidationError.unsupportedSchema }
-        } else {
-            guard let sensorNormalization, let sensorProgram,
-                  let stabilizationV2, let direction, let emission,
-                  let tipSupports
-            else { throw BrushDefinitionValidationError.unsupportedSchema }
-            try stageCValidation(
-                normalization: sensorNormalization,
-                program: sensorProgram,
-                stabilization: stabilizationV2,
-                direction: direction,
-                emission: emission,
-                tipSupports: tipSupports,
-                shapeCount: coverage.shapes.count,
-                maximumOpacity: limits.maximumOpacity
-            )
-        }
+        try stageCValidation(
+            normalization: sensorNormalization,
+            program: sensorProgram,
+            stabilization: stabilizationV2,
+            direction: direction,
+            emission: emission,
+            tipSupports: tipSupports,
+            shapeCount: coverage.shapes.count,
+            maximumOpacity: limits.maximumOpacity
+        )
     }
 
     static func stageCValidation(
@@ -974,5 +1087,5 @@ private enum BrushDefinitionValidator {
             }
         }
     }
-    static func replayValidation(_ mode: BrushReplayMode, _ limits: BrushReplayLimits?, _ end: BrushTaperLength) throws { if mode == .appendOnly { guard limits == nil, { if case .disabled = end { return true }; return false }() else { throw BrushDefinitionValidationError.invalidReplay }; return }; guard let limits else { throw BrushDefinitionValidationError.invalidReplay }; let cap = mode == .replayTail ? BrushRecipePolicy.replayTailLimits : BrushRecipePolicy.wholeStrokeLimits; guard limits.maximumSamples > 0, limits.maximumSamples <= cap.maximumSamples, limits.maximumDabs > 0, limits.maximumDabs <= cap.maximumDabs, limits.maximumProjectedInstances > 0, limits.maximumProjectedInstances <= cap.maximumProjectedInstances else { throw BrushDefinitionValidationError.invalidReplay } }
+    static func replayValidation(_ mode: BrushReplayMode, _ limits: BrushReplayLimits?, _ end: BrushTaperLength) throws { if mode == .appendOnly { guard limits == nil, { if case .disabled = end { return true }; return false }() else { throw BrushDefinitionValidationError.invalidReplay }; return }; guard let limits else { throw BrushDefinitionValidationError.invalidReplay }; let cap = BrushRecipePolicy.replayTailLimits; guard limits.maximumSamples > 0, limits.maximumSamples <= cap.maximumSamples, limits.maximumDabs > 0, limits.maximumDabs <= cap.maximumDabs, limits.maximumProjectedInstances > 0, limits.maximumProjectedInstances <= cap.maximumProjectedInstances else { throw BrushDefinitionValidationError.invalidReplay } }
 }

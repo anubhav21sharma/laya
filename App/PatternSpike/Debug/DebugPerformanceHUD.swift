@@ -1,5 +1,6 @@
 #if DEBUG
 import Foundation
+import MetalRenderer
 import SwiftUI
 
 struct DebugPerformanceHUD: View {
@@ -45,6 +46,24 @@ struct DebugPerformanceHUD: View {
             metric(
                 "actual/pred q",
                 "\(actualQueueDepth)/\(predictedQueueDepth)"
+            )
+            metric(
+                "tiles/resident",
+                "\(paint?.tileIndexEntryCount ?? 0)/\(residentMiB) MiB"
+            )
+            metric(
+                "plans CPU/GPU",
+                "\(paint?.cpuCachedPlanCount ?? 0)/"
+                    + "\(paint?.gpuCachedPlanCount ?? 0)"
+            )
+            metric(
+                "lease/upload",
+                "\(paint?.activeTileLeaseCount ?? 0)/"
+                    + "\(paint?.activeUploadSlotCount ?? 0)"
+            )
+            metric(
+                "tile high-water",
+                "\(residentHighWaterMiB) MiB"
             )
             metric("log", loggingActive ? "REC" : "off")
         }
@@ -99,6 +118,20 @@ struct DebugPerformanceHUD: View {
     private var predictedQueueDepth: Int {
         snapshot.strokeRuntime?.predictedQueueDepth
             ?? snapshot.deposition.predictedBacklog
+    }
+
+    private var paint: StageDAcceptanceRendererEvidence? { snapshot.paint }
+
+    private var residentMiB: String {
+        formattedMiB(paint?.residentTileBytes ?? 0)
+    }
+
+    private var residentHighWaterMiB: String {
+        formattedMiB(paint?.residentTileHighWaterBytes ?? 0)
+    }
+
+    private func formattedMiB(_ bytes: Int) -> String {
+        String(format: "%.1f", Double(bytes) / 1_048_576)
     }
 }
 #endif

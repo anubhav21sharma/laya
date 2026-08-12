@@ -1,5 +1,6 @@
 import Foundation
 @testable import MetalRenderer
+@testable import MetalRendererDiagnostics
 @testable import ProfessionalBrushEvidenceValidation
 import Testing
 

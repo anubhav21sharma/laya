@@ -473,30 +473,6 @@ private func makeRasterCommand(
     )
 }
 
-private func makeFullRasterReference(
-    id: UInt64,
-    pixelSize: PixelSize,
-    retainedBytes: Int
-) -> RasterRevisionReference {
-    let regions = PixelRegionSet(
-        [
-            PixelRect(
-                minX: 0,
-                minY: 0,
-                maxX: pixelSize.width,
-                maxY: pixelSize.height
-            )!,
-        ],
-        clippedTo: pixelSize
-    )
-    return RasterRevisionReference(
-        id: StoredRasterRevisionID(rawValue: id),
-        pixelSize: pixelSize,
-        regions: regions,
-        retainedBytes: retainedBytes
-    )
-}
-
 private func makeRasterCommand(
     beforeID: UInt64,
     afterID: UInt64,
@@ -512,14 +488,26 @@ private func makeRasterCommand(
     let before = RasterRevisionReference(
         id: StoredRasterRevisionID(rawValue: beforeID),
         pixelSize: size,
+        documentPixelSize: size,
         regions: regions,
-        retainedBytes: bytes / 2
+        retainedBytes: bytes / 2,
+        storage: .tiledRGBA16Float(
+            layerID: historyLayerID,
+            generation: beforeID,
+            tileCoordinates: []
+        )
     )
     let after = RasterRevisionReference(
         id: StoredRasterRevisionID(rawValue: afterID),
         pixelSize: size,
+        documentPixelSize: size,
         regions: regions,
-        retainedBytes: bytes / 2
+        retainedBytes: bytes / 2,
+        storage: .tiledRGBA16Float(
+            layerID: historyLayerID,
+            generation: afterID,
+            tileCoordinates: []
+        )
     )
     return .raster(
         RasterHistoryCommand(

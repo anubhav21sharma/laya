@@ -1,12 +1,6 @@
 import Foundation
 import simd
 
-enum BrushStrokeBatchOperation {
-    case begin
-    case append
-    case finish
-}
-
 public enum BrushStrokeGeneratorFootprintError: Error, Equatable, Sendable {
     case nominalDiameterOutsideCompiledLimits(
         actual: Float,
@@ -19,7 +13,6 @@ public enum BrushStrokeGeneratorFootprintError: Error, Equatable, Sendable {
 
 public enum BrushStrokeGeneratorEmissionError: Error, Equatable, Sendable {
     case logicalOrdinalOverflow
-    case schemaV2Required
 }
 
 /// A conservative, compile-once proof that every accepted schema-v2 sample can
@@ -35,14 +28,9 @@ private struct BrushStrokeFootprintEnvelope: Equatable, Sendable {
 
     static func compile(
         program: BrushProgram,
+        component: BrushComponentProgram,
         nominalDiameter: Float
     ) -> BrushStrokeFootprintEnvelope {
-        guard program.stageC != nil else {
-            return BrushStrokeFootprintEnvelope(
-                rejection: nil,
-                maximumInputMagnitude: .greatestFiniteMagnitude
-            )
-        }
         let limits = program.definition.limits
         guard nominalDiameter >= limits.minimumDiameter,
               nominalDiameter <= limits.maximumDiameter
@@ -57,7 +45,7 @@ private struct BrushStrokeFootprintEnvelope: Equatable, Sendable {
             )
         }
 
-        let definition = program.definition
+        let definition = component.definition
         let nominal = Double(nominalDiameter)
         let maximumRadius = nominal * 4
         let aspect = Double(definition.coverage.aspectRatio)
@@ -123,7 +111,7 @@ private struct BrushStrokeFootprintEnvelope: Equatable, Sendable {
     }
 }
 
-extension BrushStrokeGenerator {
+extension BrushComponentStrokeGenerator {
     public struct EmissionPage: Equatable, Sendable {
         public let emittedCount: Int
         public let hasMore: Bool
@@ -134,12 +122,8 @@ extension BrushStrokeGenerator {
         case pause
     }
 
-    /// A copyable, exact continuation for one schema-v2 input sample.
-    ///
-    /// This is the bounded production-facing generation API. The older
-    /// callback and array-returning entry points are compatibility adapters;
-    /// they may drain an entire input synchronously and must not be used by the
-    /// renderer once C12 installs scheduler-owned continuation draining.
+    /// A copyable, exact continuation for one current input sample.
+    /// This is the sole production-facing generation API.
     public struct EmissionCursor: Equatable, Sendable {
         private enum Operation: Equatable, Sendable {
             case begin, append, finish
@@ -175,7 +159,7 @@ extension BrushStrokeGenerator {
             case finish
         }
 
-        fileprivate enum CandidateAdvance: Equatable, Sendable {
+        enum CandidateAdvance: Equatable, Sendable {
             case noDab
             case prepared
             case blocked
@@ -372,7 +356,7 @@ extension BrushStrokeGenerator {
 
             @inline(never)
             fileprivate mutating func prepareSpatialCandidate(
-                generator: borrowing BrushStrokeGenerator
+                generator: borrowing BrushComponentStrokeGenerator
             ) throws {
                 let distanceStep = generator.distanceUntilNext
                 let distanceCandidate: StrokeEmissionCandidate?
@@ -460,7 +444,7 @@ extension BrushStrokeGenerator {
 
             @inline(never)
             mutating func commitPreparedCandidate(
-                generator: inout BrushStrokeGenerator
+                generator: inout BrushComponentStrokeGenerator
             ) {
                 guard let decision = pendingMergeDecision else {
                     preconditionFailure(
@@ -486,7 +470,7 @@ extension BrushStrokeGenerator {
             }
 
             private mutating func commitPreparedCandidates(
-                generator: inout BrushStrokeGenerator,
+                generator: inout BrushComponentStrokeGenerator,
                 continuation: StrokeEmissionMerger,
                 consumesDistance: Bool,
                 consumesTimed: Bool,
@@ -551,7 +535,7 @@ extension BrushStrokeGenerator {
 
             @inline(never)
             mutating func finishSegment(
-                generator: inout BrushStrokeGenerator
+                generator: inout BrushComponentStrokeGenerator
             ) {
                 if generator.stageCUsesDistanceEmission,
                    traversed < length
@@ -571,7 +555,7 @@ extension BrushStrokeGenerator {
             }
         }
 
-        private var generator: BrushStrokeGenerator
+        var generator: BrushComponentStrokeGenerator
         private let sample: WorldStrokeSample
         private let operation: Operation
         private let maximumPathSubdivisionCount: Int
@@ -588,7 +572,7 @@ extension BrushStrokeGenerator {
         private var sourcePurpose: SourcePurpose
 
         fileprivate init(
-            generator: BrushStrokeGenerator,
+            generator: BrushComponentStrokeGenerator,
             sample: WorldStrokeSample,
             maximumPathSubdivisionCount: Int
         ) {
@@ -618,7 +602,7 @@ extension BrushStrokeGenerator {
 
         /// The exact generator continuation becomes available only after the
         /// input cursor has no authoritative or prediction suffix remaining.
-        public var completedGenerator: BrushStrokeGenerator? {
+        public var completedGenerator: BrushComponentStrokeGenerator? {
             isComplete ? generator : nil
         }
 
@@ -684,7 +668,7 @@ extension BrushStrokeGenerator {
             )
         }
 
-        private mutating func advanceOne(
+        mutating func advanceOne(
             allowEmission: Bool
         ) throws -> CandidateAdvance {
             switch phase {
@@ -750,7 +734,7 @@ extension BrushStrokeGenerator {
             }
         }
 
-        private var preparedCandidate: StrokeEmissionCandidate? {
+        var preparedCandidate: StrokeEmissionCandidate? {
             switch phase {
             case .source:
                 sourceCursor?.preparedCandidate
@@ -766,7 +750,7 @@ extension BrushStrokeGenerator {
             }
         }
 
-        private mutating func commitPreparedCandidate() {
+        mutating func commitPreparedCandidate() {
             switch phase {
             case .source:
                 guard var cursor = sourceCursor else {
@@ -827,7 +811,7 @@ extension BrushStrokeGenerator {
             }
 
             if operation == .finish,
-               case .weightedWindow = generator.program.stageC?.stabilization
+               case .weightedWindow = generator.component.stageC.stabilization
             {
                 let update = try generator.directionTracker.update(
                     to: attributed.position
@@ -873,7 +857,7 @@ extension BrushStrokeGenerator {
                 )
             }
             let resets = operation == .finish
-            if generator.program.stageC?.usesTravelDirection == true {
+            if generator.component.stageC.usesTravelDirection {
                 generator.heldDirectionalBegin = attributed
                 if resets {
                     pendingDirection = generator.stageCStationaryDirection
@@ -1271,16 +1255,12 @@ extension BrushStrokeGenerator {
         }
     }
 
-    /// Creates a schema-v2 emission cursor without mutating this generator.
-    /// C12 drains the returned value under renderer budgets and installs
-    /// `completedGenerator` only after `hasMore` becomes false.
+    /// Creates an emission cursor without mutating this generator. Consumers
+    /// install `completedGenerator` only after `hasMore` becomes false.
     public func emissionCursor(
         for sample: WorldStrokeSample,
         maximumPathSubdivisionCount: Int
     ) throws -> EmissionCursor {
-        guard program.stageC != nil else {
-            throw BrushStrokeGeneratorEmissionError.schemaV2Required
-        }
         precondition(maximumPathSubdivisionCount > 0)
         precondition(sample.phase != .cancelled)
         return EmissionCursor(
@@ -1290,35 +1270,12 @@ extension BrushStrokeGenerator {
         )
     }
 
-    /// Compatibility bridge for callback and batch clients. It deliberately
-    /// drains every bounded page synchronously; renderer production must retain
-    /// the cursor instead (C12). Keeping this adapter on the cursor path makes
-    /// the bounded implementation the semantic source of truth.
-    private mutating func drainStageCCompatibilityCursor(
-        for sample: WorldStrokeSample,
-        maximumPathSubdivisionCount: Int,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        var cursor = try emissionCursor(
-            for: sample,
-            maximumPathSubdivisionCount: maximumPathSubdivisionCount
-        )
-        repeat {
-            _ = try cursor.emitNextPage(emit)
-        } while !cursor.isComplete
-        guard let continuation = cursor.completedGenerator else {
-            preconditionFailure(
-                "A completed emission cursor must expose its generator"
-            )
-        }
-        self = continuation
-    }
-
 }
 
 /// Deterministic input-to-dab generator for one captured stroke configuration.
-public struct BrushStrokeGenerator: Equatable, Sendable {
+struct BrushComponentStrokeGenerator: Equatable, Sendable {
     public let program: BrushProgram
+    let component: BrushComponentProgram
     public let nominalDiameter: Float
     public let color: InkColor
     public let seed: UInt64
@@ -1345,47 +1302,67 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
     private var lastEmittedSourcePosition: WorldPoint?
     private let footprintEnvelope: BrushStrokeFootprintEnvelope
 
-    public init(
+    init(
         program: BrushProgram,
         nominalDiameter: Float,
         color: InkColor,
         seed: UInt64
+    ) {
+        self.init(
+            program: program,
+            component: program.primaryComponent,
+            nominalDiameter: nominalDiameter,
+            color: color,
+            seed: seed
+        )
+    }
+
+    init(
+        program rootProgram: BrushProgram,
+        component: BrushComponentProgram,
+        nominalDiameter: Float,
+        color: InkColor,
+        seed: UInt64,
+        randomNamespaceOrdinal: UInt8? = nil
     ) {
         precondition(
             nominalDiameter.isFinite && nominalDiameter > 0,
             "Nominal brush diameter must be finite and positive"
         )
         let effectiveSeed: UInt64
-        switch program.definition.seedPolicy {
+        switch rootProgram.definition.seedPolicy {
         case .perStroke:
             effectiveSeed = seed
         case let .fixed(value):
             effectiveSeed = value
         }
         precondition(effectiveSeed != 0, "Brush stroke seed must be nonzero")
+        let componentSeed = BrushComponentRandomNamespace.seed(
+            strokeSeed: effectiveSeed,
+            componentOrdinal:
+                randomNamespaceOrdinal ?? component.definition.ordinal
+        )
         let spacing = Self.initialSpacing(
-            program: program,
+            component: component,
             nominalDiameter: nominalDiameter
         )
-        self.program = program
+        program = rootProgram
+        self.component = component
         self.nominalDiameter = nominalDiameter
         self.color = color
-        self.seed = effectiveSeed
+        self.seed = componentSeed
         currentSpacing = spacing
         emittedDabCount = 0
-        stabilizer = Self.makeStabilizer(program: program)
+        stabilizer = Self.makeStabilizer(component: component)
         directionTracker = BrushDirectionTracker()
-        cornerEmitter = Self.makeCornerEmitter(program: program)
-        path = CentripetalCatmullRomPathInterpolator(
-            maximumSegmentLength: min(0.5, spacing * 0.2),
-            minimumSubdivisionEstimate: spacing
-        )
-        random = BrushRandom(seed: effectiveSeed)
+        cornerEmitter = Self.makeCornerEmitter(component: component)
+        path = Self.makePath(component: component, spacing: spacing)
+        random = BrushRandom(seed: componentSeed)
         isActive = false
         hasAttributedPath = false
         heldDirectionalBegin = nil
         nextCornerSequence = 0
-        timedEmitter = Self.makeTimedEmitter(program: program)
+        timedEmitter = Self.makeTimedEmitter(component: component)
         authoritativeEmissionMerger = StrokeEmissionMerger(
             provenance: .authoritative
         )
@@ -1398,14 +1375,15 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         lastDirection = 0
         lastEmittedSourcePosition = nil
         footprintEnvelope = BrushStrokeFootprintEnvelope.compile(
-            program: program,
+            program: rootProgram,
+            component: component,
             nominalDiameter: nominalDiameter
         )
     }
 
     public static func == (
-        lhs: borrowing BrushStrokeGenerator,
-        rhs: borrowing BrushStrokeGenerator
+        lhs: borrowing BrushComponentStrokeGenerator,
+        rhs: borrowing BrushComponentStrokeGenerator
     ) -> Bool {
         configurationEqual(lhs, rhs)
             && stabilizationStateEqual(lhs, rhs)
@@ -1416,10 +1394,11 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
 
     @inline(never)
     private static func configurationEqual(
-        _ lhs: borrowing BrushStrokeGenerator,
-        _ rhs: borrowing BrushStrokeGenerator
+        _ lhs: borrowing BrushComponentStrokeGenerator,
+        _ rhs: borrowing BrushComponentStrokeGenerator
     ) -> Bool {
         lhs.program == rhs.program
+            && lhs.component == rhs.component
             && lhs.nominalDiameter == rhs.nominalDiameter
             && lhs.color == rhs.color
             && lhs.seed == rhs.seed
@@ -1428,16 +1407,16 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
 
     @inline(never)
     private static func stabilizationStateEqual(
-        _ lhs: borrowing BrushStrokeGenerator,
-        _ rhs: borrowing BrushStrokeGenerator
+        _ lhs: borrowing BrushComponentStrokeGenerator,
+        _ rhs: borrowing BrushComponentStrokeGenerator
     ) -> Bool {
         lhs.stabilizer == rhs.stabilizer
     }
 
     @inline(never)
     private static func directionStateEqual(
-        _ lhs: borrowing BrushStrokeGenerator,
-        _ rhs: borrowing BrushStrokeGenerator
+        _ lhs: borrowing BrushComponentStrokeGenerator,
+        _ rhs: borrowing BrushComponentStrokeGenerator
     ) -> Bool {
         lhs.directionTracker == rhs.directionTracker
             && lhs.cornerEmitter == rhs.cornerEmitter
@@ -1448,8 +1427,8 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
 
     @inline(never)
     private static func pathStateEqual(
-        _ lhs: borrowing BrushStrokeGenerator,
-        _ rhs: borrowing BrushStrokeGenerator
+        _ lhs: borrowing BrushComponentStrokeGenerator,
+        _ rhs: borrowing BrushComponentStrokeGenerator
     ) -> Bool {
         lhs.path == rhs.path
             && lhs.hasAttributedPath == rhs.hasAttributedPath
@@ -1460,8 +1439,8 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
 
     @inline(never)
     private static func emissionStateEqual(
-        _ lhs: borrowing BrushStrokeGenerator,
-        _ rhs: borrowing BrushStrokeGenerator
+        _ lhs: borrowing BrushComponentStrokeGenerator,
+        _ rhs: borrowing BrushComponentStrokeGenerator
     ) -> Bool {
         lhs.currentSpacing == rhs.currentSpacing
             && lhs.emittedDabCount == rhs.emittedDabCount
@@ -1475,990 +1454,8 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
             && lhs.distanceUntilNext == rhs.distanceUntilNext
     }
 
-    public mutating func begin(
-        _ sample: WorldStrokeSample,
-        emit: (DabAttributes) -> Void
-    ) {
-        do {
-            try beginTransaction(sample, emit: emit)
-        } catch {
-            preconditionFailure(
-                "Unbounded stroke generation exceeded a typed bound: \(error)"
-            )
-        }
-    }
-
-    public mutating func begin(
-        _ sample: WorldStrokeSample,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        try beginTransaction(sample, emit: emit)
-    }
-
-    private mutating func beginTransaction(
-        _ sample: WorldStrokeSample,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        precondition(sample.phase == .began)
-        if program.stageC != nil {
-            try drainStageCCompatibilityCursor(
-                for: sample,
-                maximumPathSubdivisionCount: .max,
-                emit: emit
-            )
-            return
-        }
-        var updated = self
-        try updated.start(sample, emit: emit)
-        self = updated
-    }
-
-    public mutating func append(
-        _ sample: WorldStrokeSample,
-        emit: (DabAttributes) -> Void
-    ) {
-        do {
-            try appendTransaction(sample, emit: emit)
-        } catch {
-            preconditionFailure(
-                "Unbounded stroke generation exceeded a typed bound: \(error)"
-            )
-        }
-    }
-
-    public mutating func append(
-        _ sample: WorldStrokeSample,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        try appendTransaction(sample, emit: emit)
-    }
-
-    private mutating func appendTransaction(
-        _ sample: WorldStrokeSample,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        precondition(sample.phase == .moved)
-        if program.stageC != nil {
-            try drainStageCCompatibilityCursor(
-                for: sample,
-                maximumPathSubdivisionCount: .max,
-                emit: emit
-            )
-            return
-        }
-        var updated = self
-        try updated.footprintEnvelope.validate(sample)
-        if updated.isActive {
-            try updated.appendActive(sample, emit: emit)
-        } else {
-            try updated.start(sample, emit: emit)
-        }
-        self = updated
-    }
-
-    /// Bounded renderer entry point. Rejects pathological interpolation work
-    /// before sampling a segment, while preserving the transactional generator
-    /// state used by the throwing emission path.
-    public mutating func append(
-        _ sample: WorldStrokeSample,
-        maximumPathSubdivisionCount: Int,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        precondition(maximumPathSubdivisionCount > 0)
-        precondition(sample.phase == .moved)
-        if program.stageC != nil {
-            try drainStageCCompatibilityCursor(
-                for: sample,
-                maximumPathSubdivisionCount: maximumPathSubdivisionCount,
-                emit: emit
-            )
-            return
-        }
-        var updated = self
-        try updated.footprintEnvelope.validate(sample)
-        if updated.isActive {
-            try updated.appendActive(
-                sample,
-                maximumPathSubdivisionCount:
-                    maximumPathSubdivisionCount,
-                emit: emit
-            )
-        } else {
-            try updated.start(sample, emit: emit)
-        }
-        self = updated
-    }
-
-    /// Prediction-only bounded entry point. It emits the true path prefix that
-    /// fits the interpolation budget, but commits generator state only when
-    /// the complete input sample was processed.
-    @discardableResult
-    public mutating func appendPredictionPrefix(
-        _ sample: WorldStrokeSample,
-        maximumPathSubdivisionCount: Int,
-        emit: (DabAttributes) throws -> Void
-    ) throws -> StrokePathInterpolationOutcome {
-        precondition(maximumPathSubdivisionCount > 0)
-        precondition(sample.phase == .moved)
-        precondition(sample.kind == .predicted)
-        var updated = self
-        try updated.footprintEnvelope.validate(sample)
-        let outcome: StrokePathInterpolationOutcome
-        if updated.isActive {
-            outcome = try updated.appendActivePredictionPrefix(
-                sample,
-                maximumPathSubdivisionCount:
-                    maximumPathSubdivisionCount,
-                emit: emit
-            )
-        } else {
-            try updated.start(sample, emit: emit)
-            outcome = .completed
-        }
-        if outcome == .completed {
-            self = updated
-        }
-        return outcome
-    }
-
-    public mutating func finish(
-        _ sample: WorldStrokeSample,
-        emit: (DabAttributes) -> Void
-    ) {
-        do {
-            try finishTransaction(sample, emit: emit)
-        } catch {
-            preconditionFailure(
-                "Unbounded stroke generation exceeded a typed bound: \(error)"
-            )
-        }
-    }
-
-    public mutating func finish(
-        _ sample: WorldStrokeSample,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        try finishTransaction(sample, emit: emit)
-    }
-
-    private mutating func finishTransaction(
-        _ sample: WorldStrokeSample,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        precondition(sample.phase == .ended)
-        if program.stageC != nil {
-            try drainStageCCompatibilityCursor(
-                for: sample,
-                maximumPathSubdivisionCount: .max,
-                emit: emit
-            )
-            return
-        }
-        var updated = self
-        try updated.footprintEnvelope.validate(sample)
-        if !updated.isActive {
-            try updated.start(sample, emit: emit)
-        } else {
-            try updated.finishActive(sample, emit: emit)
-        }
-        updated.resetRuntimeState()
-        self = updated
-    }
-
-    /// Bounded renderer entry point matching `append`'s interpolation-work
-    /// contract for a terminal sample.
-    public mutating func finish(
-        _ sample: WorldStrokeSample,
-        maximumPathSubdivisionCount: Int,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        precondition(maximumPathSubdivisionCount > 0)
-        precondition(sample.phase == .ended)
-        if program.stageC != nil {
-            try drainStageCCompatibilityCursor(
-                for: sample,
-                maximumPathSubdivisionCount: maximumPathSubdivisionCount,
-                emit: emit
-            )
-            return
-        }
-        var updated = self
-        try updated.footprintEnvelope.validate(sample)
-        if !updated.isActive {
-            try updated.start(sample, emit: emit)
-        } else {
-            try updated.finishActive(
-                sample,
-                maximumPathSubdivisionCount:
-                    maximumPathSubdivisionCount,
-                emit: emit
-            )
-        }
-        updated.resetRuntimeState()
-        self = updated
-    }
-
-    /// Prediction-only terminal counterpart to `appendPredictionPrefix`.
-    /// Truncation neither commits state nor synthesizes the terminal dab.
-    @discardableResult
-    public mutating func finishPredictionPrefix(
-        _ sample: WorldStrokeSample,
-        maximumPathSubdivisionCount: Int,
-        emit: (DabAttributes) throws -> Void
-    ) throws -> StrokePathInterpolationOutcome {
-        precondition(maximumPathSubdivisionCount > 0)
-        precondition(sample.phase == .ended)
-        precondition(sample.kind == .predicted)
-        var updated = self
-        try updated.footprintEnvelope.validate(sample)
-        let outcome: StrokePathInterpolationOutcome
-        if !updated.isActive {
-            try updated.start(sample, emit: emit)
-            outcome = .completed
-        } else {
-            outcome = try updated.finishActivePredictionPrefix(
-                sample,
-                maximumPathSubdivisionCount:
-                    maximumPathSubdivisionCount,
-                emit: emit
-            )
-        }
-        guard outcome == .completed else { return .truncated }
-        updated.resetRuntimeState()
-        self = updated
-        return .completed
-    }
-
     public mutating func cancel() {
         resetRuntimeState()
-    }
-
-    public mutating func beginBatches(
-        _ sample: WorldStrokeSample
-    ) -> [LogicalDabBatch] {
-        invariantBatches(sample, operation: .begin)
-    }
-
-    public mutating func appendBatches(
-        _ sample: WorldStrokeSample
-    ) -> [LogicalDabBatch] {
-        invariantBatches(sample, operation: .append)
-    }
-
-    public mutating func finishBatches(
-        _ sample: WorldStrokeSample
-    ) -> [LogicalDabBatch] {
-        invariantBatches(sample, operation: .finish)
-    }
-
-    public mutating func beginBatch(
-        _ sample: WorldStrokeSample
-    ) throws -> LogicalDabBatch {
-        try validatedBatch(sample, operation: .begin)
-    }
-
-    public mutating func appendBatch(
-        _ sample: WorldStrokeSample
-    ) throws -> LogicalDabBatch {
-        try validatedBatch(sample, operation: .append)
-    }
-
-    public mutating func finishBatch(
-        _ sample: WorldStrokeSample
-    ) throws -> LogicalDabBatch {
-        try validatedBatch(sample, operation: .finish)
-    }
-
-    mutating func validatedBatch(
-        _ sample: WorldStrokeSample,
-        operation: BrushStrokeBatchOperation,
-        validator: (
-            _ seed: UInt64,
-            _ startingOrdinal: UInt64,
-            _ isPredicted: Bool,
-            _ dabs: [LogicalDab]
-        ) throws -> LogicalDabBatch
-    ) throws -> LogicalDabBatch {
-        let emission = try collectCandidateEmission(
-            sample,
-            operation: operation
-        )
-        let batch = try validator(
-            seed,
-            emission.startingOrdinal,
-            sample.kind == .predicted,
-            emission.dabs
-        )
-        self = emission.candidate
-        return batch
-    }
-
-    mutating func validatedBatch(
-        _ sample: WorldStrokeSample,
-        operation: BrushStrokeBatchOperation
-    ) throws -> LogicalDabBatch {
-        try validatedBatch(
-            sample,
-            operation: operation
-        ) { seed, startingOrdinal, isPredicted, dabs in
-            try LogicalDabBatch(
-                seed: seed,
-                startingOrdinal: startingOrdinal,
-                isPredicted: isPredicted,
-                dabs: dabs
-            )
-        }
-    }
-
-    mutating func validatedBatches(
-        _ sample: WorldStrokeSample,
-        operation: BrushStrokeBatchOperation,
-        validator: (
-            _ seed: UInt64,
-            _ startingOrdinal: UInt64,
-            _ isPredicted: Bool,
-            _ dabs: [LogicalDab]
-        ) throws -> LogicalDabBatch
-    ) throws -> [LogicalDabBatch] {
-        let emission = try collectCandidateEmission(
-            sample,
-            operation: operation
-        )
-        let starts: [Int]
-        if emission.dabs.isEmpty {
-            starts = [0]
-        } else {
-            starts = Array(
-                stride(
-                    from: 0,
-                    to: emission.dabs.count,
-                    by: LogicalDabBatch.maximumDabCount
-                )
-            )
-        }
-        var batches: [LogicalDabBatch] = []
-        batches.reserveCapacity(starts.count)
-        for start in starts {
-            let end = min(
-                start + LogicalDabBatch.maximumDabCount,
-                emission.dabs.count
-            )
-            let batch = try validator(
-                seed,
-                emission.startingOrdinal + UInt64(start),
-                sample.kind == .predicted,
-                Array(emission.dabs[start..<end])
-            )
-            batches.append(batch)
-        }
-        self = emission.candidate
-        return batches
-    }
-
-    private mutating func invariantBatches(
-        _ sample: WorldStrokeSample,
-        operation: BrushStrokeBatchOperation
-    ) -> [LogicalDabBatch] {
-        do {
-            return try validatedBatches(
-                sample,
-                operation: operation
-            ) { seed, startingOrdinal, isPredicted, dabs in
-                try LogicalDabBatch(
-                    seed: seed,
-                    startingOrdinal: startingOrdinal,
-                    isPredicted: isPredicted,
-                    dabs: dabs
-                )
-            }
-        } catch {
-            preconditionFailure(
-                "Generated logical-dab chunks violated an invariant: \(error)"
-            )
-        }
-    }
-
-    private func collectCandidateEmission(
-        _ sample: WorldStrokeSample,
-        operation: BrushStrokeBatchOperation
-    ) throws -> (
-        candidate: BrushStrokeGenerator,
-        startingOrdinal: UInt64,
-        dabs: [LogicalDab]
-    ) {
-        let startingOrdinal: UInt64 = operation == .begin
-            ? 0
-            : emittedDabCount
-        var candidate = self
-        var dabs: [LogicalDab] = []
-        let collect: (DabAttributes) throws -> Void = { dabs.append($0) }
-        switch operation {
-        case .begin:
-            try candidate.begin(sample, emit: collect)
-        case .append:
-            try candidate.append(sample, emit: collect)
-        case .finish:
-            try candidate.finish(sample, emit: collect)
-        }
-        return (candidate, startingOrdinal, dabs)
-    }
-
-    private mutating func start(
-        _ sample: WorldStrokeSample,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        try footprintEnvelope.validate(sample)
-        resetRuntimeState()
-        isActive = true
-        strokeStartTimestamp = sample.timestamp
-        guard program.stageC != nil else {
-            let stabilized = stabilizer.process(sample)
-            let attributed = InterpolatedStrokeSample(stabilized)
-            _ = path.begin(at: attributed)
-            hasAttributedPath = true
-            let dab = nextDab(
-                sample: attributed,
-                traveledDistance: 0,
-                direction: 0,
-                totalDistance: sample.phase == .ended
-                    && program.termination.isLegacySchemaV1EndTaper
-                    ? 0
-                    : nil,
-                isPredicted: sample.kind == .predicted
-            )
-            try emit(dab)
-            lastEmittedSourcePosition = attributed.position
-            currentSpacing = dab.spacing
-            distanceUntilNext = dab.spacing
-            return
-        }
-        guard let stabilized = processStageCStabilizer(sample) else {
-            return
-        }
-        let attributed = InterpolatedStrokeSample(stabilized)
-        try beginStageCAttributedPath(attributed, emit: emit)
-        if sample.phase == .ended {
-            try resolveHeldDirectionalBegin(
-                direction: stageCStationaryDirection,
-                isPredicted: sample.kind == .predicted,
-                emit: emit
-            )
-        }
-    }
-
-    private mutating func appendActive(
-        _ sample: WorldStrokeSample,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        let isPredicted = sample.kind == .predicted
-        guard program.stageC != nil else {
-            let stabilized = stabilizer.process(sample)
-            let attributed = InterpolatedStrokeSample(stabilized)
-            var updatedPath = path
-            try updatedPath.append(attributed) { segment in
-                try consumeLegacy(
-                    segment,
-                    isPredicted: isPredicted,
-                    emit: emit
-                )
-            }
-            path = updatedPath
-            return
-        }
-        guard let stabilized = processStageCStabilizer(sample) else {
-            return
-        }
-        try validateCornerCanonicalDomain(for: stabilized)
-        let attributed = InterpolatedStrokeSample(stabilized)
-        guard hasAttributedPath else {
-            try beginStageCAttributedPath(attributed, emit: emit)
-            return
-        }
-        var updatedPath = path
-        try updatedPath.append(attributed) { segment in
-            try consumeStageC(
-                segment,
-                isPredicted: isPredicted,
-                emit: emit
-            )
-        }
-        path = updatedPath
-        try drainStageCTimedAdvance(
-            to: attributed,
-            direction: lastDirection,
-            isPredicted: isPredicted,
-            emit: emit
-        )
-    }
-
-    private mutating func appendActive(
-        _ sample: WorldStrokeSample,
-        maximumPathSubdivisionCount: Int,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        let isPredicted = sample.kind == .predicted
-        guard program.stageC != nil else {
-            let stabilized = stabilizer.process(sample)
-            let attributed = InterpolatedStrokeSample(stabilized)
-            var updatedPath = path
-            try updatedPath.append(
-                attributed,
-                maximumSubdivisionCount: maximumPathSubdivisionCount
-            ) { segment in
-                try consumeLegacy(
-                    segment,
-                    isPredicted: isPredicted,
-                    emit: emit
-                )
-            }
-            path = updatedPath
-            return
-        }
-        guard let stabilized = processStageCStabilizer(sample) else {
-            return
-        }
-        try validateCornerCanonicalDomain(for: stabilized)
-        let attributed = InterpolatedStrokeSample(stabilized)
-        guard hasAttributedPath else {
-            try beginStageCAttributedPath(attributed, emit: emit)
-            return
-        }
-        var updatedPath = path
-        try updatedPath.append(
-            attributed,
-            maximumSubdivisionCount: maximumPathSubdivisionCount
-        ) { segment in
-            try consumeStageC(
-                segment,
-                isPredicted: isPredicted,
-                emit: emit
-            )
-        }
-        path = updatedPath
-        try drainStageCTimedAdvance(
-            to: attributed,
-            direction: lastDirection,
-            isPredicted: isPredicted,
-            emit: emit
-        )
-    }
-
-    private mutating func appendActivePredictionPrefix(
-        _ sample: WorldStrokeSample,
-        maximumPathSubdivisionCount: Int,
-        emit: (DabAttributes) throws -> Void
-    ) throws -> StrokePathInterpolationOutcome {
-        guard program.stageC != nil else {
-            let stabilized = stabilizer.process(sample)
-            let attributed = InterpolatedStrokeSample(stabilized)
-            var updatedPath = path
-            let outcome = try updatedPath.appendBoundedPrefix(
-                attributed,
-                maximumSubdivisionCount: maximumPathSubdivisionCount
-            ) { segment in
-                try consumeLegacy(
-                    segment,
-                    isPredicted: true,
-                    emit: emit
-                )
-            }
-            guard outcome == .completed else { return .truncated }
-            path = updatedPath
-            return .completed
-        }
-        guard let stabilized = processStageCStabilizer(sample) else {
-            return .completed
-        }
-        try validateCornerCanonicalDomain(for: stabilized)
-        let attributed = InterpolatedStrokeSample(stabilized)
-        guard hasAttributedPath else {
-            try beginStageCAttributedPath(attributed, emit: emit)
-            return .completed
-        }
-        var updatedPath = path
-        let outcome = try updatedPath.appendBoundedPrefix(
-            attributed,
-            maximumSubdivisionCount: maximumPathSubdivisionCount
-        ) { segment in
-            try consumeStageC(
-                segment,
-                isPredicted: true,
-                emit: emit
-            )
-        }
-        guard outcome == .completed else { return .truncated }
-        path = updatedPath
-        try drainStageCTimedAdvance(
-            to: attributed,
-            direction: lastDirection,
-            isPredicted: true,
-            emit: emit
-        )
-        return .completed
-    }
-
-    private mutating func finishActive(
-        _ sample: WorldStrokeSample,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        let isPredicted = sample.kind == .predicted
-        guard program.stageC != nil else {
-            let terminalSample = program.termination
-                .usesLegacySchemaV1EndpointFiltering
-                ? stabilizer.process(sample)
-                : sample
-            let attributed = InterpolatedStrokeSample(terminalSample)
-            var updatedPath = path
-            let endpoint = try updatedPath.finish(at: attributed) { segment in
-                try consumeLegacy(
-                    segment,
-                    isPredicted: isPredicted,
-                    emit: emit
-                )
-            }
-            path = updatedPath
-            try emitTerminalDabIfNeeded(
-                endpoint,
-                isPredicted: isPredicted,
-                emit: emit
-            )
-            return
-        }
-        guard let terminalSample = processStageCStabilizer(sample) else {
-            return
-        }
-        try validateCornerCanonicalDomain(for: terminalSample)
-        let attributed = InterpolatedStrokeSample(terminalSample)
-        guard hasAttributedPath else {
-            try beginStageCAttributedPath(attributed, emit: emit)
-            try resolveHeldDirectionalBegin(
-                direction: stageCStationaryDirection,
-                isPredicted: isPredicted,
-                emit: emit
-            )
-            try emitStageCFinish(
-                attributed,
-                direction: stageCStationaryDirection,
-                isPredicted: isPredicted,
-                emit: emit
-            )
-            return
-        }
-        if case .weightedWindow = program.stageC?.stabilization {
-            try emitWeightedEndpointCorrection(
-                attributed,
-                isPredicted: isPredicted,
-                emit: emit
-            )
-            return
-        }
-        var updatedPath = path
-        let endpoint = try updatedPath.finish(at: attributed) { segment in
-            try consumeStageC(
-                segment,
-                isPredicted: isPredicted,
-                emit: emit
-            )
-        }
-        path = updatedPath
-        try resolveHeldDirectionalBegin(
-            direction: stageCStationaryDirection,
-            isPredicted: isPredicted,
-            emit: emit
-        )
-        try emitStageCFinish(
-            endpoint,
-            direction: lastDirection,
-            isPredicted: isPredicted,
-            emit: emit
-        )
-    }
-
-    private mutating func finishActive(
-        _ sample: WorldStrokeSample,
-        maximumPathSubdivisionCount: Int,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        let isPredicted = sample.kind == .predicted
-        guard program.stageC != nil else {
-            let terminalSample = program.termination
-                .usesLegacySchemaV1EndpointFiltering
-                ? stabilizer.process(sample)
-                : sample
-            let attributed = InterpolatedStrokeSample(terminalSample)
-            var updatedPath = path
-            let endpoint = try updatedPath.finish(
-                at: attributed,
-                maximumSubdivisionCount: maximumPathSubdivisionCount
-            ) { segment in
-                try consumeLegacy(
-                    segment,
-                    isPredicted: isPredicted,
-                    emit: emit
-                )
-            }
-            path = updatedPath
-            try emitTerminalDabIfNeeded(
-                endpoint,
-                isPredicted: isPredicted,
-                emit: emit
-            )
-            return
-        }
-        guard let terminalSample = processStageCStabilizer(sample) else {
-            return
-        }
-        try validateCornerCanonicalDomain(for: terminalSample)
-        let attributed = InterpolatedStrokeSample(terminalSample)
-        guard hasAttributedPath else {
-            try beginStageCAttributedPath(attributed, emit: emit)
-            try resolveHeldDirectionalBegin(
-                direction: stageCStationaryDirection,
-                isPredicted: isPredicted,
-                emit: emit
-            )
-            try emitStageCFinish(
-                attributed,
-                direction: stageCStationaryDirection,
-                isPredicted: isPredicted,
-                emit: emit
-            )
-            return
-        }
-        if case .weightedWindow = program.stageC?.stabilization {
-            try emitWeightedEndpointCorrection(
-                attributed,
-                isPredicted: isPredicted,
-                emit: emit
-            )
-            return
-        }
-        var updatedPath = path
-        let endpoint = try updatedPath.finish(
-            at: attributed,
-            maximumSubdivisionCount: maximumPathSubdivisionCount
-        ) { segment in
-            try consumeStageC(
-                segment,
-                isPredicted: isPredicted,
-                emit: emit
-            )
-        }
-        path = updatedPath
-
-        try resolveHeldDirectionalBegin(
-            direction: stageCStationaryDirection,
-            isPredicted: isPredicted,
-            emit: emit
-        )
-        try emitStageCFinish(
-            endpoint,
-            direction: lastDirection,
-            isPredicted: isPredicted,
-            emit: emit
-        )
-    }
-
-    private mutating func finishActivePredictionPrefix(
-        _ sample: WorldStrokeSample,
-        maximumPathSubdivisionCount: Int,
-        emit: (DabAttributes) throws -> Void
-    ) throws -> StrokePathInterpolationOutcome {
-        guard program.stageC != nil else {
-            let terminalSample = program.termination
-                .usesLegacySchemaV1EndpointFiltering
-                ? stabilizer.process(sample)
-                : sample
-            let attributed = InterpolatedStrokeSample(terminalSample)
-            var updatedPath = path
-            let outcome = try updatedPath.finishBoundedPrefix(
-                at: attributed,
-                maximumSubdivisionCount: maximumPathSubdivisionCount
-            ) { segment in
-                try consumeLegacy(
-                    segment,
-                    isPredicted: true,
-                    emit: emit
-                )
-            }
-            guard outcome == .completed else { return .truncated }
-            path = updatedPath
-            try emitTerminalDabIfNeeded(
-                attributed,
-                isPredicted: true,
-                emit: emit
-            )
-            return .completed
-        }
-        guard let terminalSample = processStageCStabilizer(sample) else {
-            return .completed
-        }
-        try validateCornerCanonicalDomain(for: terminalSample)
-        let attributed = InterpolatedStrokeSample(terminalSample)
-        guard hasAttributedPath else {
-            try beginStageCAttributedPath(attributed, emit: emit)
-            try resolveHeldDirectionalBegin(
-                direction: stageCStationaryDirection,
-                isPredicted: true,
-                emit: emit
-            )
-            try emitStageCFinish(
-                attributed,
-                direction: stageCStationaryDirection,
-                isPredicted: true,
-                emit: emit
-            )
-            return .completed
-        }
-        if case .weightedWindow = program.stageC?.stabilization {
-            try emitWeightedEndpointCorrection(
-                attributed,
-                isPredicted: true,
-                emit: emit
-            )
-            return .completed
-        }
-        var updatedPath = path
-        let outcome = try updatedPath.finishBoundedPrefix(
-            at: attributed,
-            maximumSubdivisionCount: maximumPathSubdivisionCount
-        ) { segment in
-            try consumeStageC(
-                segment,
-                isPredicted: true,
-                emit: emit
-            )
-        }
-        guard outcome == .completed else { return .truncated }
-        path = updatedPath
-
-        try resolveHeldDirectionalBegin(
-            direction: stageCStationaryDirection,
-            isPredicted: true,
-            emit: emit
-        )
-        try emitStageCFinish(
-            attributed,
-            direction: lastDirection,
-            isPredicted: true,
-            emit: emit
-        )
-        return .completed
-    }
-
-    private mutating func consumeLegacy(
-        _ segment: AttributedStrokePathSegment,
-        isPredicted: Bool,
-        emit: (DabAttributes) throws -> Void
-    ) rethrows {
-        let length = segment.length
-        guard length > 0 else { return }
-
-        let delta = segment.end.position.simd - segment.start.position.simd
-        let direction = atan2(delta.y, delta.x)
-        var distanceFromStart: Float = 0
-        var remainingLength = length
-
-        while remainingLength >= distanceUntilNext {
-            distanceFromStart += distanceUntilNext
-            let fraction = min(1, distanceFromStart / length)
-            let exactPosition = WorldPoint(
-                segment.start.position.simd + delta * fraction
-            )
-            let sample = segment.sample(
-                at: fraction,
-                exactPosition: exactPosition
-            )
-            let sourceDistance = processedPathDistance + distanceFromStart
-            if lastEmittedSourcePosition != sample.position {
-                let dab = nextDab(
-                    sample: sample,
-                    traveledDistance: sourceDistance,
-                    direction: direction,
-                    totalDistance: nil,
-                    isPredicted: isPredicted
-                )
-                try emit(dab)
-                lastEmittedSourcePosition = sample.position
-                currentSpacing = dab.spacing
-                distanceUntilNext = dab.spacing
-            } else {
-                // A rounded path position is not a dab: it must not consume
-                // the ordinal or deterministic random channels.
-                distanceUntilNext = currentSpacing
-            }
-            remainingLength = length - distanceFromStart
-        }
-
-        distanceUntilNext -= remainingLength
-        processedPathDistance += length
-        lastDirection = direction
-    }
-
-    private mutating func consumeStageC(
-        _ segment: AttributedStrokePathSegment,
-        isPredicted: Bool,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        guard segment.length > 0 else { return }
-        let update = try directionTracker.update(to: segment.end.position)
-        let direction = update.direction ?? lastDirection
-        if update.direction != nil {
-            try resolveHeldDirectionalBegin(
-                direction: direction,
-                isPredicted: isPredicted,
-                emit: emit
-            )
-        }
-        let corners = try stageCCornerCandidates(
-            segment,
-            endingDirection: direction,
-            signedTurn: update.signedTurn,
-            isPredicted: isPredicted
-        )
-        let timedCursor = try stageCTimedCursor(
-            to: segment.end,
-            sourceDistance: Double(processedPathDistance + segment.length),
-            direction: direction,
-            isPredicted: isPredicted
-        )
-        try consumeUnifiedStageCSegment(
-            segment,
-            direction: direction,
-            corners: corners,
-            timedCursor: timedCursor,
-            isPredicted: isPredicted,
-            emit: emit
-        )
-        lastDirection = direction
-    }
-
-    @inline(never)
-    private mutating func stageCCornerCandidates(
-        _ segment: AttributedStrokePathSegment,
-        endingDirection: Float,
-        signedTurn: Float?,
-        isPredicted: Bool
-    ) throws -> StrokeEmissionCandidateBuffer {
-        var candidates = StrokeEmissionCandidateBuffer()
-        guard let signedTurn, let cornerEmitter else { return candidates }
-        let startDirection = endingDirection - signedTurn
-        let sourceDistance = Double(processedPathDistance)
-        let vertex = try stageCCandidate(
-            sample: segment.start,
-            sourceDistance: sourceDistance,
-            direction: startDirection,
-            kind: .distance,
-            isPredicted: isPredicted
-        )
-        try cornerEmitter.emit(
-            from: startDirection,
-            signedTurn: signedTurn,
-            vertex: vertex,
-            into: &candidates,
-            nextCornerSequence: &nextCornerSequence
-        )
-        return candidates
     }
 
     private mutating func stageCTimedCursor(
@@ -2483,319 +1480,6 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         return cursor
     }
 
-    private mutating func drainStageCTimedAdvance(
-        to sample: InterpolatedStrokeSample,
-        direction: Float,
-        isPredicted: Bool,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        let cursor = try stageCTimedCursor(
-            to: sample,
-            sourceDistance: Double(processedPathDistance),
-            direction: direction,
-            isPredicted: isPredicted
-        )
-        try drainStageCEmissionCursor(
-            distance: nil,
-            timedCursor: cursor,
-            isPredicted: isPredicted,
-            emit: emit
-        )
-    }
-
-    private mutating func drainStageCEmissionCursor(
-        distance: StrokeEmissionCandidate?,
-        timedCursor: TimedStrokeEmissionCursor?,
-        isPredicted: Bool,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        var distanceHead = distance
-        var timedCursor = timedCursor
-        var merger = isPredicted
-            ? predictionEmissionMerger
-            : authoritativeEmissionMerger
-        while distanceHead != nil || timedCursor?.isComplete == false {
-            let timedStep = try timedCursor?.nextCandidate()
-            guard let mergeStep = try merger.next(
-                distance: distanceHead,
-                timed: timedStep?.candidate
-            ) else { break }
-            if let candidate = mergeStep.candidate {
-                try emitAcceptedCandidate(candidate, emit: emit)
-            }
-            merger = mergeStep.continuation
-            if mergeStep.consumesDistance { distanceHead = nil }
-            if mergeStep.consumesTimed {
-                timedCursor = timedStep?.continuation
-            }
-        }
-        if isPredicted {
-            predictionEmissionMerger = merger
-        } else {
-            authoritativeEmissionMerger = merger
-        }
-    }
-
-    private mutating func emitStageCFinish(
-        _ sample: InterpolatedStrokeSample,
-        direction: Float,
-        isPredicted: Bool,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        if isPredicted {
-            try drainStageCTimedAdvance(
-                to: sample,
-                direction: direction,
-                isPredicted: true,
-                emit: emit
-            )
-            return
-        }
-        let finishCandidate = try stageCCandidate(
-            sample: sample,
-            sourceDistance: Double(processedPathDistance),
-            direction: direction,
-            kind: .finish,
-            isPredicted: false
-        )
-        let distance = stageCUsesDistanceEmission
-                && lastEmittedSourcePosition != sample.position
-            ? finishCandidate
-            : nil
-        var timedCursor: TimedStrokeEmissionCursor?
-        if stageCUsesTimedEmission, var emitter = timedEmitter {
-            timedCursor = try emitter.finish(
-                at: TimedStrokePoint(
-                    sample: sample,
-                    sourceDistance: Double(processedPathDistance),
-                    direction: direction
-                )
-            )
-            timedEmitter = emitter
-        }
-        try drainStageCEmissionCursor(
-            distance: distance,
-            timedCursor: timedCursor,
-            isPredicted: false,
-            emit: emit
-        )
-    }
-
-    private mutating func consumeUnifiedStageCSegment(
-        _ segment: AttributedStrokePathSegment,
-        direction: Float,
-        corners: StrokeEmissionCandidateBuffer,
-        timedCursor: TimedStrokeEmissionCursor?,
-        isPredicted: Bool,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        let length = segment.length
-        let delta = segment.end.position.simd - segment.start.position.simd
-        let baseDistance = processedPathDistance
-        var traversed: Float = 0
-        var cornerIndex = 0
-        var timedCursor = timedCursor
-        var merger = isPredicted
-            ? predictionEmissionMerger
-            : authoritativeEmissionMerger
-
-        while true {
-            let distanceStep = distanceUntilNext
-            let distanceCandidate: StrokeEmissionCandidate?
-            if stageCUsesDistanceEmission,
-               distanceStep.isFinite,
-               distanceStep >= 0,
-               traversed + distanceStep <= length
-            {
-                let candidateOffset = traversed + distanceStep
-                let fraction = length == 0
-                    ? 0
-                    : min(1, candidateOffset / length)
-                let exactPosition = WorldPoint(
-                    segment.start.position.simd + delta * fraction
-                )
-                let sample = segment.sample(
-                    at: fraction,
-                    exactPosition: exactPosition
-                )
-                distanceCandidate = try stageCCandidate(
-                    sample: sample,
-                    sourceDistance: Double(baseDistance + candidateOffset),
-                    direction: direction,
-                    kind: .distance,
-                    isPredicted: isPredicted
-                )
-            } else {
-                distanceCandidate = nil
-            }
-
-            let cornerCandidate = cornerIndex < corners.count
-                ? corners[cornerIndex]
-                : nil
-            let spatialCandidate: StrokeEmissionCandidate?
-            let spatialIsCorner: Bool
-            if let cornerCandidate, let distanceCandidate {
-                if StrokeEmissionMerger.precedes(
-                    cornerCandidate,
-                    distanceCandidate
-                ) {
-                    spatialCandidate = cornerCandidate
-                    spatialIsCorner = true
-                } else {
-                    spatialCandidate = distanceCandidate
-                    spatialIsCorner = false
-                }
-            } else if let cornerCandidate {
-                spatialCandidate = cornerCandidate
-                spatialIsCorner = true
-            } else {
-                spatialCandidate = distanceCandidate
-                spatialIsCorner = false
-            }
-            let timedStep = try timedCursor?.nextCandidate()
-            guard spatialCandidate != nil || timedStep != nil else { break }
-            guard let mergeStep = try merger.next(
-                distance: spatialCandidate,
-                timed: timedStep?.candidate
-            ) else { break }
-
-            guard let selected = mergeStep.consumesDistance
-                ? spatialCandidate
-                : timedStep?.candidate
-            else {
-                preconditionFailure(
-                    "Emission merger consumed a source without a candidate"
-                )
-            }
-            let selectedOffset = min(
-                length,
-                max(0, Float(selected.sourceDistance) - baseDistance)
-            )
-            if selectedOffset > traversed {
-                distanceUntilNext = max(
-                    0,
-                    distanceUntilNext - (selectedOffset - traversed)
-                )
-                traversed = selectedOffset
-            }
-            if let accepted = mergeStep.candidate {
-                try emitAcceptedCandidate(accepted, emit: emit)
-            } else if mergeStep.consumesDistance && !spatialIsCorner {
-                // A begin or timed candidate already accepted this exact
-                // distance source event, so it still advances the carry once.
-                distanceUntilNext = currentSpacing
-            }
-
-            merger = mergeStep.continuation
-            if mergeStep.consumesDistance, spatialIsCorner {
-                cornerIndex += 1
-            }
-            if mergeStep.consumesTimed {
-                timedCursor = timedStep?.continuation
-            }
-        }
-
-        if stageCUsesDistanceEmission, traversed < length {
-            distanceUntilNext = max(
-                0,
-                distanceUntilNext - (length - traversed)
-            )
-        }
-        processedPathDistance += length
-        if isPredicted {
-            predictionEmissionMerger = merger
-        } else {
-            authoritativeEmissionMerger = merger
-        }
-    }
-
-    private mutating func consumeDistanceSegment(
-        _ segment: AttributedStrokePathSegment,
-        direction: Float,
-        isPredicted: Bool,
-        emit: (DabAttributes) throws -> Void
-    ) rethrows {
-        let length = segment.length
-        guard length > 0 else { return }
-        let delta = segment.end.position.simd - segment.start.position.simd
-        var distanceFromStart: Float = 0
-        var remainingLength = length
-
-        while remainingLength >= distanceUntilNext {
-            distanceFromStart += distanceUntilNext
-            let fraction = min(1, distanceFromStart / length)
-            let exactPosition = WorldPoint(
-                segment.start.position.simd + delta * fraction
-            )
-            let sample = segment.sample(
-                at: fraction,
-                exactPosition: exactPosition
-            )
-            let sourceDistance = processedPathDistance + distanceFromStart
-            if lastEmittedSourcePosition != sample.position {
-                let dab = nextDab(
-                    sample: sample,
-                    traveledDistance: sourceDistance,
-                    direction: direction,
-                    totalDistance: nil,
-                    isPredicted: isPredicted
-                )
-                try emit(dab)
-                lastEmittedSourcePosition = sample.position
-                currentSpacing = dab.spacing
-                distanceUntilNext = dab.spacing
-            } else {
-                distanceUntilNext = currentSpacing
-            }
-            remainingLength = length - distanceFromStart
-        }
-
-        distanceUntilNext -= remainingLength
-        processedPathDistance += length
-    }
-
-    private mutating func beginStageCAttributedPath(
-        _ attributed: InterpolatedStrokeSample,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        _ = path.begin(at: attributed)
-        hasAttributedPath = true
-        try initializeTimedEmission(at: attributed)
-        do {
-            try directionTracker.begin(at: attributed.position)
-        } catch {
-            preconditionFailure(
-                "Validated world input must have a finite position: \(error)"
-            )
-        }
-        if program.stageC?.usesTravelDirection == true {
-            heldDirectionalBegin = attributed
-            return
-        }
-        try emitStageCBegin(
-            attributed,
-            direction: 0,
-            isPredicted: attributed.kind == .predicted,
-            emit: emit
-        )
-    }
-
-    private mutating func resolveHeldDirectionalBegin(
-        direction: Float,
-        isPredicted: Bool,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        guard let held = heldDirectionalBegin else { return }
-        try emitStageCBegin(
-            held,
-            direction: direction,
-            isPredicted: isPredicted,
-            emit: emit
-        )
-        heldDirectionalBegin = nil
-        lastDirection = direction
-    }
-
     private mutating func initializeTimedEmission(
         at attributed: InterpolatedStrokeSample
     ) throws {
@@ -2810,82 +1494,7 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         timedEmitter = emitter
     }
 
-    private mutating func emitStageCBegin(
-        _ sample: InterpolatedStrokeSample,
-        direction: Float,
-        isPredicted: Bool,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        let candidate = try stageCCandidate(
-            sample: sample,
-            sourceDistance: 0,
-            direction: direction,
-            kind: .begin,
-            isPredicted: isPredicted
-        )
-        switch stageCEmissionMode {
-        case .distance:
-            try acceptMergedCandidates(
-                distance: candidate,
-                timed: nil,
-                emit: emit
-            )
-        case .time:
-            try acceptMergedCandidates(
-                distance: nil,
-                timed: candidate,
-                emit: emit
-            )
-        case .distanceAndTime:
-            try acceptMergedCandidates(
-                distance: candidate,
-                timed: candidate,
-                emit: emit
-            )
-        }
-    }
-
-    private mutating func acceptMergedCandidates(
-        distance: StrokeEmissionCandidate?,
-        timed: StrokeEmissionCandidate?,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        guard let first = distance ?? timed else { return }
-        var merger = first.provenance == .prediction
-            ? predictionEmissionMerger
-            : authoritativeEmissionMerger
-        var distanceHead = distance
-        var timedHead = timed
-        while distanceHead != nil || timedHead != nil {
-            guard let step = try merger.next(
-                distance: distanceHead,
-                timed: timedHead
-            ) else { break }
-            if let candidate = step.candidate {
-                try emitAcceptedCandidate(candidate, emit: emit)
-            }
-            merger = step.continuation
-            if step.consumesDistance { distanceHead = nil }
-            if step.consumesTimed { timedHead = nil }
-        }
-        if first.provenance == .prediction {
-            predictionEmissionMerger = merger
-        } else {
-            authoritativeEmissionMerger = merger
-        }
-    }
-
-    private mutating func emitAcceptedCandidate(
-        _ candidate: StrokeEmissionCandidate,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        _ = try offerCandidate(candidate) { dab in
-            try emit(dab)
-            return .accept
-        }
-    }
-
-    private mutating func offerCandidate(
+    mutating func offerCandidate(
         _ candidate: StrokeEmissionCandidate,
         emit: (DabAttributes) throws -> EmissionSinkDecision
     ) throws -> Bool {
@@ -2995,7 +1604,7 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
     }
 
     private var stageCEmissionMode: BrushEmissionMode {
-        program.stageC?.emission.mode ?? .distance
+        component.stageC.emission.mode
     }
 
     private var stageCUsesDistanceEmission: Bool {
@@ -3004,48 +1613,6 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
 
     private var stageCUsesTimedEmission: Bool {
         stageCEmissionMode != .distance
-    }
-
-    private mutating func emitWeightedEndpointCorrection(
-        _ endpoint: InterpolatedStrokeSample,
-        isPredicted: Bool,
-        emit: (DabAttributes) throws -> Void
-    ) throws {
-        let update = try directionTracker.update(to: endpoint.position)
-        let direction = update.direction ?? lastDirection
-        try resolveHeldDirectionalBegin(
-            direction: update.direction == nil
-                ? stageCStationaryDirection
-                : direction,
-            isPredicted: isPredicted,
-            emit: emit
-        )
-        lastDirection = update.direction ?? lastDirection
-        try emitStageCFinish(
-            endpoint,
-            direction: lastDirection,
-            isPredicted: isPredicted,
-            emit: emit
-        )
-    }
-
-    private mutating func emitTerminalDabIfNeeded(
-        _ endpoint: InterpolatedStrokeSample,
-        isPredicted: Bool,
-        emit: (DabAttributes) throws -> Void
-    ) rethrows {
-        guard lastEmittedSourcePosition != endpoint.position else { return }
-        let dab = nextDab(
-            sample: endpoint,
-            traveledDistance: processedPathDistance,
-            direction: lastDirection,
-            totalDistance: nil,
-            isPredicted: isPredicted
-        )
-        try emit(dab)
-        lastEmittedSourcePosition = endpoint.position
-        currentSpacing = dab.spacing
-        distanceUntilNext = dab.spacing
     }
 
     private mutating func processStageCStabilizer(
@@ -3061,7 +1628,7 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
     }
 
     private var stageCStationaryDirection: Float {
-        program.stageC?.direction.stationaryDirection ?? 0
+        component.stageC.direction.stationaryDirection
     }
 
     private func validateCornerCanonicalDomain(
@@ -3137,6 +1704,7 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
             sample: sample,
             context: context,
             program: program,
+            component: component,
             random: randomValues,
             strokeSeed: seed
         )
@@ -3144,24 +1712,21 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
 
     private mutating func resetRuntimeState() {
         let spacing = Self.initialSpacing(
-            program: program,
+            component: component,
             nominalDiameter: nominalDiameter
         )
         currentSpacing = spacing
         emittedDabCount = 0
-        stabilizer = Self.makeStabilizer(program: program)
+        stabilizer.reset()
         directionTracker = BrushDirectionTracker()
-        cornerEmitter = Self.makeCornerEmitter(program: program)
-        path = CentripetalCatmullRomPathInterpolator(
-            maximumSegmentLength: min(0.5, spacing * 0.2),
-            minimumSubdivisionEstimate: spacing
-        )
+        cornerEmitter = Self.makeCornerEmitter(component: component)
+        path = Self.makePath(component: component, spacing: spacing)
         random = BrushRandom(seed: seed)
         isActive = false
         hasAttributedPath = false
         heldDirectionalBegin = nil
         nextCornerSequence = 0
-        timedEmitter = Self.makeTimedEmitter(program: program)
+        timedEmitter = Self.makeTimedEmitter(component: component)
         authoritativeEmissionMerger = StrokeEmissionMerger(
             provenance: .authoritative
         )
@@ -3176,13 +1741,9 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
     }
 
     private static func makeStabilizer(
-        program: BrushProgram
+        component: BrushComponentProgram
     ) -> StrokeStabilizer {
-        guard let stageC = program.stageC else {
-            return StrokeStabilizer(
-                strength: program.definition.stabilization
-            )
-        }
+        let stageC = component.stageC
         let mode: StrokeStabilizerMode = switch stageC.stabilization {
         case .none: .none
         case let .weightedWindow(distance):
@@ -3199,9 +1760,9 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
     }
 
     private static func makeTimedEmitter(
-        program: BrushProgram
+        component: BrushComponentProgram
     ) -> TimedStrokeEmitter? {
-        guard let stageC = program.stageC else { return nil }
+        let stageC = component.stageC
         switch stageC.emission.mode {
         case .distance:
             return nil
@@ -3224,13 +1785,10 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
     }
 
     private static func makeCornerEmitter(
-        program: BrushProgram
+        component: BrushComponentProgram
     ) -> BrushCornerEmitter? {
-        guard let stageC = program.stageC,
-              stageC.usesTravelDirection
-        else {
-            return nil
-        }
+        let stageC = component.stageC
+        guard stageC.usesTravelDirection else { return nil }
         do {
             return try BrushCornerEmitter(
                 maximumAngularStep: stageC.direction.maximumAngularStep
@@ -3242,11 +1800,24 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         }
     }
 
+    private static func makePath(
+        component: BrushComponentProgram,
+        spacing: Float
+    ) -> CentripetalCatmullRomPathInterpolator {
+        let isRigidDirectionalMarker = component.stageC.usesTravelDirection
+            && component.definition.material.edgeTreatment == .markerOverlap
+        return CentripetalCatmullRomPathInterpolator(
+            maximumSegmentLength: min(0.5, spacing * 0.2),
+            minimumSubdivisionEstimate: spacing,
+            clampsToSegmentBounds: isRigidDirectionalMarker
+        )
+    }
+
     private static func initialSpacing(
-        program: BrushProgram,
+        component: BrushComponentProgram,
         nominalDiameter: Float
     ) -> Float {
-        let placement = program.definition.placement
+        let placement = component.definition.placement
         let upperBound = max(
             1,
             min(8, nominalDiameter * placement.maximumSpacingFraction)

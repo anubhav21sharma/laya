@@ -160,9 +160,8 @@ public enum ProfessionalBrushDefinitions {
                 termination: replayTailTermination,
                 seedPolicy: .perStroke,
                 limits: limits,
-                performanceIntent: .realtime120,
+                performanceIntent: .realtime60,
                 compatibility: BrushCompatibilityMetadata(
-                    nativeFeatureVersion: 1,
                     sourceSettingKeys: [],
                     requiredSemanticKeys: []
                 )
@@ -190,10 +189,10 @@ public enum ProfessionalBrushDefinitions {
                         fallback: .builtIn(identifier: "builtin.grain.graphite")
                     ),
                     BrushResourceReference(
-                        identifier: "builtin.grain.paper",
+                        identifier: "builtin.grain.graphite-paper",
                         kind: .grain,
                         required: false,
-                        fallback: .builtIn(identifier: "builtin.grain.paper")
+                        fallback: .builtIn(identifier: "builtin.grain.graphite-paper")
                     ),
                     BrushResourceReference(
                         identifier: "builtin.shape.graphite-tip",
@@ -222,7 +221,7 @@ public enum ProfessionalBrushDefinitions {
                             strength: 1
                         ),
                         BrushGrainLayerDefinition(
-                            grain: .asset("builtin.grain.paper"),
+                            grain: .asset("builtin.grain.graphite-paper"),
                             coordinateMode: .canonical,
                             transform: .identity,
                             grainMovementFraction: 0.12,
@@ -231,7 +230,7 @@ public enum ProfessionalBrushDefinitions {
                         ),
                     ],
                     baseHardness: 0.72,
-                    aspectRatio: 0.34,
+                    aspectRatio: 0.82,
                     tipThreshold: 0.01,
                     antialiasing: true
                 ),
@@ -314,9 +313,8 @@ public enum ProfessionalBrushDefinitions {
                 termination: replayTailTermination,
                 seedPolicy: .perStroke,
                 limits: limits,
-                performanceIntent: .realtime120,
+                performanceIntent: .realtime60,
                 compatibility: BrushCompatibilityMetadata(
-                    nativeFeatureVersion: 1,
                     sourceSettingKeys: [],
                     requiredSemanticKeys: []
                 )
@@ -344,10 +342,10 @@ public enum ProfessionalBrushDefinitions {
                         fallback: .builtIn(identifier: "builtin.grain.charcoal")
                     ),
                     BrushResourceReference(
-                        identifier: "builtin.grain.paper",
+                        identifier: "builtin.grain.charcoal-fine-paper",
                         kind: .grain,
                         required: false,
-                        fallback: .builtIn(identifier: "builtin.grain.paper")
+                        fallback: .builtIn(identifier: "builtin.grain.charcoal-fine-paper")
                     ),
                     BrushResourceReference(
                         identifier: "builtin.shape.charcoal-tip",
@@ -367,7 +365,7 @@ public enum ProfessionalBrushDefinitions {
                         ),
                         BrushShapeLayerDefinition(
                             shape: .softRound,
-                            combination: .multiply,
+                            combination: .maximum,
                             scale: 1,
                             rotation: 0,
                             offset: .zero
@@ -383,7 +381,7 @@ public enum ProfessionalBrushDefinitions {
                             strength: 1
                         ),
                         BrushGrainLayerDefinition(
-                            grain: .asset("builtin.grain.paper"),
+                            grain: .asset("builtin.grain.charcoal-fine-paper"),
                             coordinateMode: .canonical,
                             transform: .identity,
                             grainMovementFraction: 0.12,
@@ -399,7 +397,7 @@ public enum ProfessionalBrushDefinitions {
                 placement: BrushPlacementDefinition(
                     baseSpacingFraction: 0.09,
                     maximumSpacingFraction: 0.22,
-                    baseFlow: 0.24,
+                    baseFlow: 0.82,
                     strokeOpacity: 0.92,
                     baseScatterFraction: 0.08,
                     baseRotation: 0,
@@ -479,9 +477,8 @@ public enum ProfessionalBrushDefinitions {
                 termination: replayTailTermination,
                 seedPolicy: .perStroke,
                 limits: limits,
-                performanceIntent: .realtime120,
+                performanceIntent: .realtime60,
                 compatibility: BrushCompatibilityMetadata(
-                    nativeFeatureVersion: 1,
                     sourceSettingKeys: [],
                     requiredSemanticKeys: []
                 )
@@ -519,7 +516,7 @@ public enum ProfessionalBrushDefinitions {
                     ],
                     grains: [],
                     baseHardness: 0.96,
-                    aspectRatio: 0.22,
+                    aspectRatio: 1,
                     tipThreshold: 0.01,
                     antialiasing: true
                 ),
@@ -577,7 +574,7 @@ public enum ProfessionalBrushDefinitions {
                     accumulationLimit: 0.82,
                     interactionParameters: nil
                 ),
-                stabilization: 0.12,
+                stabilization: 0,
                 taper: BrushTaperConfiguration(
                     start: .diameterMultiples(0.35),
                     end: .diameterMultiples(0.35),
@@ -590,11 +587,14 @@ public enum ProfessionalBrushDefinitions {
                 termination: replayTailTermination,
                 seedPolicy: .perStroke,
                 limits: limits,
-                performanceIntent: .realtime120,
+                performanceIntent: .realtime60,
                 compatibility: BrushCompatibilityMetadata(
-                    nativeFeatureVersion: 1,
                     sourceSettingKeys: [],
                     requiredSemanticKeys: []
+                ),
+                direction: BrushDirectionDefinition(
+                    maximumAngularStep: .pi / 12,
+                    stationaryDirection: 0
                 )
             )
         } catch {

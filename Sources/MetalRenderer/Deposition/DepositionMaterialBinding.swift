@@ -44,13 +44,7 @@ public struct DepositionTextureBindings {
 public struct DepositionMaterialBinding {
     public let uniforms: PatternDepositionMaterialUniforms
     public let textures: DepositionTextureBindings
-
-    public init(compiledBrush: CompiledBrush) throws {
-        try self.init(
-            uniformTemplate: compiledBrush.uniformTemplate,
-            textures: compiledBrush.textures
-        )
-    }
+    public let tipSupports: [CompiledBrushTipSupport]
 
     static var harnessOpaque: Self {
         Self(
@@ -65,21 +59,25 @@ public struct DepositionMaterialBinding {
                     PatternDepositionShapeKindHardRound
                 )
             ),
-            textures: DepositionTextureBindings([:])
+            textures: DepositionTextureBindings([:]),
+            tipSupports: []
         )
     }
 
     private init(
         uniforms: PatternDepositionMaterialUniforms,
-        textures: DepositionTextureBindings
+        textures: DepositionTextureBindings,
+        tipSupports: [CompiledBrushTipSupport]
     ) {
         self.uniforms = uniforms
         self.textures = textures
+        self.tipSupports = tipSupports
     }
 
     init(
         uniformTemplate: BrushUniformTemplate,
-        textures: [String: any MTLTexture]
+        textures: [String: any MTLTexture],
+        tipSupports: [CompiledBrushTipSupport] = []
     ) throws {
         let coverage = uniformTemplate.coverage
         let material = uniformTemplate.material
@@ -148,6 +146,7 @@ public struct DepositionMaterialBinding {
             )
         )
         self.textures = DepositionTextureBindings(slots)
+        self.tipSupports = tipSupports
     }
 
     private static func bind(
@@ -184,12 +183,8 @@ public struct DepositionMaterialBinding {
         _ shape: BrushShapeDescriptor
     ) -> String? {
         switch shape {
-        case .hardRound:
+        case .hardRound, .softRound, .chisel:
             nil
-        case .softRound:
-            BrushTextureIdentity.softRoundShape.rawValue
-        case .chisel:
-            BrushTextureIdentity.chiselShape.rawValue
         case let .asset(resourceID):
             resourceID
         }
@@ -216,7 +211,11 @@ public struct DepositionMaterialBinding {
         switch shape {
         case .hardRound:
             PatternDepositionShapeKindHardRound
-        case .softRound, .chisel, .asset:
+        case .softRound:
+            PatternDepositionShapeKindSoftRound
+        case .chisel:
+            PatternDepositionShapeKindRectangle
+        case .asset:
             PatternDepositionShapeKindTexture
         }
     }

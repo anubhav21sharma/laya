@@ -22,7 +22,6 @@ enum BrushFormatTestSupport {
         provenance: BrushPackageProvenance? = nil
     ) throws -> BrushPackage {
         let bytes = try resourceBytes ?? fixturePNG()
-        let definition = try definition()
         let resource = try BrushPackageResource(
             id: shapeID,
             kind: .shape,
@@ -36,20 +35,22 @@ enum BrushFormatTestSupport {
                 resources: [resource],
                 provenance: provenance
             ),
-            definition: definition,
+            definition: try currentDefinition(),
             resourceData: [shapeID: bytes]
         )
     }
 
     static func fallbackOnlyPackage() throws -> BrushPackage {
         try BrushPackage(
-            manifest: BrushPackageManifest(resources: []),
-            definition: definition(),
+            manifest: BrushPackageManifest(
+                resources: []
+            ),
+            definition: currentDefinition(),
             resourceData: [:]
         )
     }
 
-    static func v2Package(
+    static func currentPackage(
         metadata: BrushMetadata? = nil,
         compatibility: BrushCompatibilityMetadata? = nil,
         sensorNormalization: BrushSensorNormalizationDefinition? = nil,
@@ -70,10 +71,9 @@ enum BrushFormatTestSupport {
         )
         return try BrushPackage(
             manifest: BrushPackageManifest(
-                schemaVersion: BrushPackageManifest.currentVersion,
                 resources: [resource]
             ),
-            definition: v2Definition(
+            definition: currentDefinition(
                 metadata: metadata,
                 compatibility: compatibility,
                 sensorNormalization: sensorNormalization,
@@ -87,7 +87,7 @@ enum BrushFormatTestSupport {
         )
     }
 
-    static func v2Definition(
+    static func currentDefinition(
         metadata: BrushMetadata? = nil,
         compatibility: BrushCompatibilityMetadata? = nil,
         sensorNormalization: BrushSensorNormalizationDefinition? = nil,
@@ -98,18 +98,19 @@ enum BrushFormatTestSupport {
         tipSupports: [BrushTipSupportDefinition]? = nil
     ) throws -> BrushDefinition {
         let base = try definition()
+        let component = base.components[0]
         return try BrushDefinition(
-            v2ID: base.id,
+            id: base.id,
             metadata: metadata ?? base.metadata,
             capabilities: base.capabilities,
-            resources: base.resources,
-            coverage: base.coverage,
-            placement: base.placement,
-            dynamics: base.dynamics,
-            color: base.color,
-            material: base.material,
+            resources: component.resources,
+            coverage: component.coverage,
+            placement: component.placement,
+            dynamics: component.dynamics,
+            color: component.color,
+            material: component.material,
             stabilization: base.stabilization,
-            taper: base.taper,
+            taper: component.taper,
             replayMode: base.replayMode,
             replayLimits: base.replayLimits,
             termination: base.termination,
@@ -124,7 +125,7 @@ enum BrushFormatTestSupport {
                     fullScaleStrokeAge: 4,
                     fullScaleStrokeDistanceInDiameters: 32
                 ),
-            sensorProgram: sensorProgram ?? v2SensorProgram(),
+            sensorProgram: sensorProgram ?? currentSensorProgram(),
             stabilizationV2: stabilizationV2
                 ?? .weightedWindow(distance: 8),
             direction: direction ?? BrushDirectionDefinition(
@@ -139,7 +140,7 @@ enum BrushFormatTestSupport {
         )
     }
 
-    static func v2SensorProgram(
+    static func currentSensorProgram(
         reversedInsertion: Bool = false,
         rotationTerms: [BrushResponseTermDefinition]? = nil
     ) -> BrushSensorProgramDefinition {
@@ -155,14 +156,14 @@ enum BrushFormatTestSupport {
             values[output] = BrushOutputProgramDefinition(
                 baseValue: base,
                 terms: output == .rotation
-                    ? (rotationTerms ?? [v2Term(input: .direction)])
+                    ? (rotationTerms ?? [currentTerm(input: .direction)])
                     : []
             )
         }
         return BrushSensorProgramDefinition(outputs: values)
     }
 
-    static func v2Term(
+    static func currentTerm(
         input: BrushDynamicsInput = .direction,
         response: BrushResponseDefinition = .linear,
         inputInverted: Bool = false,
@@ -207,33 +208,105 @@ enum BrushFormatTestSupport {
         performanceIntent: BrushPerformanceIntent? = nil,
         compatibility: BrushCompatibilityMetadata? = nil
     ) throws -> BrushDefinition {
-        let base = try LegacyBrushRecipeAdapter.definition(
-            from: BrushRecipe(
-                id: BrushRecipeID("test.package"),
-                shape: .asset(shapeID)
-            ),
-            displayName: "Package Test"
+        let resolvedResources = resources ?? [BrushResourceReference(
+            identifier: shapeID,
+            kind: .shape,
+            required: false,
+            fallback: .builtIn(identifier: shapeID)
+        )]
+        let resolvedCoverage = coverage ?? BrushCoverageDefinition(
+            shapes: [BrushShapeLayerDefinition(
+                shape: .asset(shapeID),
+                combination: .replace,
+                scale: 1,
+                rotation: 0,
+                offset: .zero
+            )],
+            grains: [],
+            baseHardness: 1,
+            aspectRatio: 1,
+            tipThreshold: 0,
+            antialiasing: true
         )
         return try BrushDefinition(
-            id: base.id,
-            schemaVersion: base.schemaVersion,
-            metadata: metadata ?? base.metadata,
-            capabilities: capabilities ?? base.capabilities,
-            resources: resources ?? base.resources,
-            coverage: coverage ?? base.coverage,
-            placement: placement ?? base.placement,
-            dynamics: dynamics ?? base.dynamics,
-            color: color ?? base.color,
-            material: material ?? base.material,
-            stabilization: stabilization ?? base.stabilization,
-            taper: taper ?? base.taper,
-            replayMode: replayMode ?? base.replayMode,
-            replayLimits: replayLimits ?? base.replayLimits,
-            termination: termination ?? base.termination,
-            seedPolicy: seedPolicy ?? base.seedPolicy,
-            limits: limits ?? base.limits,
-            performanceIntent: performanceIntent ?? base.performanceIntent,
-            compatibility: compatibility ?? base.compatibility
+            id: BrushRecipeID("test.package"),
+            metadata: metadata ?? BrushMetadata(displayName: "Package Test"),
+            capabilities: capabilities ?? [],
+            resources: resolvedResources,
+            coverage: resolvedCoverage,
+            placement: placement ?? BrushPlacementDefinition(
+                baseSpacingFraction: 0.125,
+                maximumSpacingFraction: 0.125,
+                baseFlow: 1,
+                strokeOpacity: 1,
+                baseScatterFraction: 0,
+                baseRotation: 0,
+                baseJitterFraction: 0,
+                baseOffset: .zero
+            ),
+            dynamics: dynamics ?? BrushDynamicsDefinition(
+                size: constantMapping(1),
+                flow: constantMapping(1),
+                opacity: constantMapping(1),
+                spacing: constantMapping(1),
+                rotation: constantMapping(0),
+                scatter: constantMapping(1),
+                hardness: constantMapping(1),
+                grain: constantMapping(1),
+                offsetX: constantMapping(0),
+                offsetY: constantMapping(0),
+                hue: constantMapping(0),
+                saturation: constantMapping(0),
+                brightness: constantMapping(0),
+                secondaryColorMix: constantMapping(0),
+                noPressureNeutral: 1,
+                randomization: .none
+            ),
+            color: color ?? BrushColorBehaviorDefinition(
+                baseAdjustment: .identity,
+                perStampJitter: BrushColorJitter(
+                    hue: 0,
+                    saturation: 0,
+                    brightness: 0,
+                    secondaryColorMix: 0
+                ),
+                perStrokeJitter: BrushColorJitter(
+                    hue: 0,
+                    saturation: 0,
+                    brightness: 0,
+                    secondaryColorMix: 0
+                )
+            ),
+            material: material ?? BrushMaterialDefinition(
+                accumulation: .flow,
+                interaction: .none,
+                edgeTreatment: .none,
+                strength: 1,
+                wetness: 0,
+                bleedRadius: 0,
+                softenPasses: 0,
+                accumulationLimit: 1,
+                interactionParameters: nil
+            ),
+            stabilization: stabilization ?? 0,
+            taper: taper ?? .none,
+            replayMode: replayMode ?? .appendOnly,
+            replayLimits: replayLimits ?? nil,
+            termination: termination ?? .cap,
+            seedPolicy: seedPolicy ?? .perStroke,
+            limits: limits ?? BrushDefinitionLimits(
+                minimumDiameter: 0.01,
+                maximumDiameter: 16_384,
+                maximumOpacity: 1,
+                maximumSpacingFraction: 4,
+                maximumResourceDimension: 4_096,
+                maximumResidentBytes: 64 * 1_024 * 1_024
+            ),
+            performanceIntent: performanceIntent ?? .realtime120,
+            compatibility: compatibility ?? BrushCompatibilityMetadata(
+                sourceSettingKeys: [],
+                requiredSemanticKeys: []
+            )
         )
     }
 
@@ -252,6 +325,39 @@ enum BrushFormatTestSupport {
             data: bytes ?? fixturePNG(),
             pixelWidth: width,
             pixelHeight: height
+        )
+    }
+
+    static func replacing(
+        _ definition: BrushDefinition,
+        resources: [BrushResourceReference]
+    ) throws -> BrushDefinition {
+        let component = definition.components[0]
+        return try BrushDefinition(
+            id: definition.id,
+            metadata: definition.metadata,
+            capabilities: definition.capabilities,
+            resources: resources,
+            coverage: component.coverage,
+            placement: component.placement,
+            dynamics: component.dynamics,
+            color: component.color,
+            material: component.material,
+            stabilization: definition.stabilization,
+            taper: component.taper,
+            replayMode: definition.replayMode,
+            replayLimits: definition.replayLimits,
+            termination: definition.termination,
+            seedPolicy: definition.seedPolicy,
+            limits: definition.limits,
+            performanceIntent: definition.performanceIntent,
+            compatibility: definition.compatibility,
+            sensorNormalization: definition.sensorNormalization,
+            sensorProgram: component.sensorProgram,
+            stabilizationV2: definition.stabilizationV2,
+            direction: definition.direction,
+            emission: component.emission,
+            tipSupports: component.tipSupports
         )
     }
 

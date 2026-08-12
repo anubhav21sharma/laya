@@ -109,6 +109,86 @@ public struct BrushSensorProgramDefinition: Codable, Equatable, Sendable {
     ) {
         self.outputs = outputs
     }
+
+    public init(from decoder: Decoder) throws {
+        var container = try decoder.unkeyedContainer()
+        var outputs: [BrushDynamicOutput: BrushOutputProgramDefinition] = [:]
+        outputs.reserveCapacity(BrushDynamicOutput.allCases.count)
+        while !container.isAtEnd {
+            let output = try container.decode(BrushDynamicOutput.self)
+            guard outputs[output] == nil else {
+                throw DecodingError.dataCorruptedError(
+                    in: container,
+                    debugDescription: "Duplicate sensor output"
+                )
+            }
+            outputs[output] = try container.decode(
+                BrushOutputProgramDefinition.self
+            )
+        }
+        self.outputs = outputs
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.unkeyedContainer()
+        for output in BrushDynamicOutput.allCases {
+            guard let definition = outputs[output] else { continue }
+            try container.encode(output)
+            try container.encode(definition)
+        }
+    }
+
+    /// Lifts each exact schema-2 single-mapping field into the ordered sensor
+    /// program without changing its response, clamp, jitter, or missing-input
+    /// behavior. Schema 3 may replace this duplicated wire shape; schema 2 has
+    /// one current evaluator.
+    public init(singleMappingDynamics dynamics: BrushDynamicsDefinition) {
+        outputs = [
+            .size: Self.output(dynamics.size, as: .size),
+            .flow: Self.output(dynamics.flow, as: .flow),
+            .opacity: Self.output(dynamics.opacity, as: .opacity),
+            .spacing: Self.output(dynamics.spacing, as: .spacing),
+            .rotation: Self.output(dynamics.rotation, as: .rotation),
+            .scatter: Self.output(dynamics.scatter, as: .scatter),
+            .hardness: Self.output(dynamics.hardness, as: .hardness),
+            .grain: Self.output(dynamics.grain, as: .grain),
+            .offsetX: Self.output(dynamics.offsetX, as: .offsetX),
+            .offsetY: Self.output(dynamics.offsetY, as: .offsetY),
+            .hue: Self.output(dynamics.hue, as: .hue),
+            .saturation: Self.output(dynamics.saturation, as: .saturation),
+            .brightness: Self.output(dynamics.brightness, as: .brightness),
+            .secondaryColorMix: Self.output(
+                dynamics.secondaryColorMix,
+                as: .secondaryColorMix
+            ),
+        ]
+    }
+
+    private static func output(
+        _ mapping: BrushMappingDefinition,
+        as output: BrushDynamicOutput
+    ) -> BrushOutputProgramDefinition {
+        let baseValue: Float = switch output {
+        case .size, .spacing, .grain: 1
+        case .flow, .opacity, .rotation, .scatter, .hardness, .offsetX,
+             .offsetY, .hue, .saturation, .brightness, .secondaryColorMix: 0
+        }
+        return BrushOutputProgramDefinition(
+            baseValue: baseValue,
+            terms: [BrushResponseTermDefinition(
+                input: mapping.input,
+                response: mapping.response,
+                inputInverted: mapping.inverted,
+                missingInputValue: mapping.missingInputValue,
+                responseScale: mapping.scale,
+                responseOffset: mapping.offset,
+                responseLowerClamp: mapping.lowerClamp,
+                responseUpperClamp: mapping.upperClamp,
+                jitter: mapping.jitter,
+                operation: .replace
+            )]
+        )
+    }
 }
 
 public enum BrushStabilizationDefinition: Codable, Equatable, Sendable {

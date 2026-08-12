@@ -1,5 +1,10 @@
 # Native Current-Only Cleanup Implementation Plan
 
+**Execution status (2026-08-12):** Task 4 is complete and verified as part of
+corrective Task 18. Tasks 1 through 3 and Task 5 remain open where their full
+current-only or validation-consolidation boundaries are not yet satisfied;
+this document does not infer completion from adjacent corrective work.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Remove all Laya-native pre-release compatibility paths and consolidate validation at genuine trust, resource, publication, and ownership boundaries without weakening correctness.
@@ -141,14 +146,14 @@ before Stage E Task 15. The exact four-slice brief is
   the manifest wire layout itself changes; `BrushPackage` requires its payload
   definition to be schema 3.
 
-- [ ] Write failing tests proving schema 3 represents one/two current components and schemas 1/2 are rejected without migration.
-- [ ] Move every in-tree native producer to schema 3 in the same slice.
-- [ ] Remove schema-2 decode/compile/hash branches instead of adding an adapter.
-- [ ] Keep manifest decoding at exact schema 2, continue rejecting manifest
+- [x] Write failing tests proving schema 3 represents one/two current components and schemas 1/2 are rejected without migration.
+- [x] Move every in-tree native producer to schema 3 in the same slice.
+- [x] Remove schema-2 decode/compile/hash branches instead of adding an adapter.
+- [x] Keep manifest decoding at exact schema 2, continue rejecting manifest
   schema 1/future versions, and update package validation to require definition
   schema 3 without inventing a redundant package-manifest version.
-- [ ] Preserve foreign-import provenance while emitting schema-3 native values directly.
-- [ ] Run composite semantics, raster, resource, cancellation, performance, and package gates plus scoped independent review.
+- [x] Preserve foreign-import provenance while emitting schema-3 native values directly.
+- [x] Run composite semantics, raster, resource, cancellation, performance, and package gates plus scoped independent review.
 
 ### Task 5: Consolidate Validation And Acceptance Gates
 

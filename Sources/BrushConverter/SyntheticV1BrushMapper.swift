@@ -101,13 +101,18 @@ public struct SyntheticV1BrushMapper: ForeignBrushMapper {
             settings: settings
         )
         let sizePressure = try sizePressure(settings)
-        let material = try material(settings)
+        let materialFamily = try materialFamily(settings)
         let wet = try wetIntent(settings)
+        guard !wet else {
+            throw SyntheticV1MappingError.invalidSetting(
+                key: SyntheticV1SemanticKeys.wet,
+                reason: "unsupported-by-native-schema-3"
+            )
+        }
 
         let sourceKeys = document.ir.settings.map(\.semanticKey)
         let requiredKeys = sourceKeys.filter {
-            $0 == SyntheticV1SemanticKeys.wet
-                || !SyntheticV1SemanticKeys.all.contains($0)
+            !SyntheticV1SemanticKeys.all.contains($0)
         }
         let definition = try makeDefinition(
             document: document,
@@ -119,8 +124,7 @@ public struct SyntheticV1BrushMapper: ForeignBrushMapper {
             rotation: rotation,
             scatter: scatter,
             sizePressure: sizePressure,
-            material: material,
-            wet: wet,
+            materialFamily: materialFamily,
             sourceKeys: sourceKeys,
             requiredKeys: requiredKeys
         )
@@ -155,8 +159,7 @@ public struct SyntheticV1BrushMapper: ForeignBrushMapper {
             rotation: rotation,
             scatter: scatter,
             sizePressure: sizePressure,
-            material: material,
-            wet: wet
+            materialFamily: materialFamily
         )
         let diagnostics = try conversionDiagnostics(
             document.ir.diagnostics
@@ -225,63 +228,73 @@ public struct SyntheticV1BrushMapper: ForeignBrushMapper {
         rotation: Float,
         scatter: Float,
         sizePressure: (minimum: Float, maximum: Float),
-        material: BrushMaterial,
-        wet: Bool,
+        materialFamily: BrushMaterialFamily,
         sourceKeys: [String],
         requiredKeys: [String]
     ) throws -> BrushDefinition {
-        let recipe = try BrushRecipe(
-            id: BrushRecipeID(
-                "converted.synthetic."
-                    + document.ir.provenance.sourceContentSHA256
-            ),
-            material: material,
-            baseSpacingFraction: spacing.base,
-            maximumSpacingFraction: spacing.maximum,
-            baseFlow: flow,
-            strokeOpacity: opacity,
-            baseScatterFraction: scatter,
-            baseRotation: rotation,
-            sizeMapping: .linear(
+        let id = BrushRecipeID(
+            "converted.synthetic."
+                + document.ir.provenance.sourceContentSHA256
+        )
+        func constant(_ value: Float) -> BrushMappingDefinition {
+            BrushMappingDefinition(
                 input: .pressure,
-                output: sizePressure.minimum...sizePressure.maximum
+                response: .constant(value),
+                scale: 1,
+                offset: 0,
+                lowerClamp: value,
+                upperClamp: value,
+                inverted: false,
+                jitter: 0,
+                missingInputValue: 1
             )
+        }
+        let sizeMapping = BrushMappingDefinition(
+            input: .pressure,
+            response: .linear,
+            scale: sizePressure.maximum - sizePressure.minimum,
+            offset: sizePressure.minimum,
+            lowerClamp: sizePressure.minimum,
+            upperClamp: sizePressure.maximum,
+            inverted: false,
+            jitter: 0,
+            missingInputValue: 1
         )
-        let base = try LegacyBrushRecipeAdapter.definition(
-            from: recipe,
-            displayName: document.ir.displayName
+        let dynamics = BrushDynamicsDefinition(
+            size: sizeMapping,
+            flow: constant(1),
+            opacity: constant(1),
+            spacing: constant(1),
+            rotation: constant(0),
+            scatter: constant(1),
+            hardness: constant(1),
+            grain: constant(1),
+            offsetX: constant(0),
+            offsetY: constant(0),
+            hue: constant(0),
+            saturation: constant(0),
+            brightness: constant(0),
+            secondaryColorMix: constant(0),
+            noPressureNeutral: 1,
+            randomization: .none
         )
-        let capabilities = wet
-            ? [
-                BrushCapabilityDeclaration(
-                    identifier: BrushCapability.wetMix.rawValue,
-                    required: true
-                ),
-            ]
-            : []
-        let interaction = wet
-            ? BrushInteractionMode.wetMix
-            : BrushInteractionMode.none
-        let interactionParameters = wet
-            ? BrushInteractionDefinition(
-                pickup: 0.25,
-                pull: 0.5,
-                dilution: 0.5,
-                charge: 0.5,
-                persistence: 0.5,
-                dirtyHaloRadius: 2
-            )
-            : nil
+        let materialSemantics: (BrushAccumulationMode, BrushEdgeTreatment) =
+            switch materialFamily {
+            case .ink: (.flow, .none)
+            case .dry: (.flow, .dryBreakup)
+            case .glaze: (.uniformGlaze, .markerOverlap)
+            case .boundedWash: (.flow, .wetConcentration)
+            }
         let mappedMaterial = BrushMaterialDefinition(
-            accumulation: base.material.accumulation,
-            interaction: interaction,
-            edgeTreatment: base.material.edgeTreatment,
-            strength: base.material.strength,
-            wetness: base.material.wetness,
-            bleedRadius: base.material.bleedRadius,
-            softenPasses: base.material.softenPasses,
-            accumulationLimit: base.material.accumulationLimit,
-            interactionParameters: interactionParameters
+            accumulation: materialSemantics.0,
+            interaction: .none,
+            edgeTreatment: materialSemantics.1,
+            strength: 1,
+            wetness: 0,
+            bleedRadius: 0,
+            softenPasses: 0,
+            accumulationLimit: 1,
+            interactionParameters: nil
         )
         let references = [
             BrushResourceReference(
@@ -299,8 +312,7 @@ public struct SyntheticV1BrushMapper: ForeignBrushMapper {
         ].sorted { $0.identifier < $1.identifier }
 
         return try BrushDefinition(
-            id: base.id,
-            schemaVersion: base.schemaVersion,
+            id: id,
             metadata: BrushMetadata(
                 displayName: document.ir.displayName,
                 author: document.ir.author,
@@ -308,7 +320,7 @@ public struct SyntheticV1BrushMapper: ForeignBrushMapper {
                     document.ir.provenance.sourceFormatFamily,
                 sourceIdentifier: document.ir.sourceBrushIdentifier
             ),
-            capabilities: capabilities,
+            capabilities: [],
             resources: references,
             coverage: BrushCoverageDefinition(
                 shapes: [
@@ -330,27 +342,77 @@ public struct SyntheticV1BrushMapper: ForeignBrushMapper {
                         strength: 1
                     ),
                 ],
-                baseHardness: base.coverage.baseHardness,
-                aspectRatio: base.coverage.aspectRatio,
-                tipThreshold: base.coverage.tipThreshold,
-                antialiasing: base.coverage.antialiasing
+                baseHardness: 1,
+                aspectRatio: 1,
+                tipThreshold: 0,
+                antialiasing: true
             ),
-            placement: base.placement,
-            dynamics: base.dynamics,
-            color: base.color,
+            placement: BrushPlacementDefinition(
+                baseSpacingFraction: spacing.base,
+                maximumSpacingFraction: spacing.maximum,
+                baseFlow: flow,
+                strokeOpacity: opacity,
+                baseScatterFraction: scatter,
+                baseRotation: rotation,
+                baseJitterFraction: 0,
+                baseOffset: .zero
+            ),
+            dynamics: dynamics,
+            color: BrushColorBehaviorDefinition(
+                baseAdjustment: .identity,
+                perStampJitter: BrushColorJitter(
+                    hue: 0,
+                    saturation: 0,
+                    brightness: 0,
+                    secondaryColorMix: 0
+                ),
+                perStrokeJitter: BrushColorJitter(
+                    hue: 0,
+                    saturation: 0,
+                    brightness: 0,
+                    secondaryColorMix: 0
+                )
+            ),
             material: mappedMaterial,
-            stabilization: base.stabilization,
-            taper: base.taper,
-            replayMode: base.replayMode,
-            replayLimits: base.replayLimits,
-            seedPolicy: base.seedPolicy,
-            limits: base.limits,
-            performanceIntent: base.performanceIntent,
+            stabilization: 0,
+            taper: .none,
+            replayMode: .appendOnly,
+            replayLimits: nil,
+            termination: .cap,
+            seedPolicy: .perStroke,
+            limits: BrushDefinitionLimits(
+                minimumDiameter: 0.01,
+                maximumDiameter: 16_384,
+                maximumOpacity: 1,
+                maximumSpacingFraction: 4,
+                maximumResourceDimension: 4_096,
+                maximumResidentBytes: 64 * 1_024 * 1_024
+            ),
+            performanceIntent: .realtime120,
             compatibility: BrushCompatibilityMetadata(
-                nativeFeatureVersion: 1,
                 sourceSettingKeys: sourceKeys,
                 requiredSemanticKeys: requiredKeys
-            )
+            ),
+            sensorNormalization: BrushSensorNormalizationDefinition(
+                fullScaleWorldVelocity:
+                    BrushInputContract.maximumWorldVelocity,
+                minimumVelocityDeltaTime: 0.001,
+                fullScaleStrokeAge: 1,
+                fullScaleStrokeDistanceInDiameters: 10
+            ),
+            sensorProgram: BrushSensorProgramDefinition(
+                singleMappingDynamics: dynamics
+            ),
+            stabilizationV2: .none,
+            direction: BrushDirectionDefinition(
+                maximumAngularStep: .pi,
+                stationaryDirection: 0
+            ),
+            emission: BrushEmissionDefinition(
+                mode: .distance,
+                timeInterval: nil
+            ),
+            tipSupports: [.analyticEllipse]
         )
     }
 
@@ -365,38 +427,40 @@ public struct SyntheticV1BrushMapper: ForeignBrushMapper {
         rotation: Float,
         scatter: Float,
         sizePressure: (minimum: Float, maximum: Float),
-        material: BrushMaterial,
-        wet: Bool
+        materialFamily: BrushMaterialFamily
     ) throws -> [BrushConversionEntry] {
         var entries: [String: BrushConversionEntry] = [:]
         entries[SyntheticV1SemanticKeys.accumulation] = try exactEntry(
             key: SyntheticV1SemanticKeys.accumulation,
             nativeKeys: [
-                "material.accumulation",
-                "material.edgeTreatment",
+                "components[0].material.accumulation",
+                "components[0].material.edgeTreatment",
             ],
             source: try token(
                 SyntheticV1SemanticKeys.accumulation,
                 settings: settings
             ),
             target:
-                "\(material.family)"
+                "\(materialFamily)"
         )
         entries[SyntheticV1SemanticKeys.flow] = try exactEntry(
             key: SyntheticV1SemanticKeys.flow,
-            nativeKeys: ["placement.baseFlow"],
+            nativeKeys: ["components[0].placement.baseFlow"],
             source: "\(flow)",
             target: "\(flow)"
         )
         entries[SyntheticV1SemanticKeys.grain] = try resourceEntry(
             key: SyntheticV1SemanticKeys.grain,
-            nativeKeys: ["coverage.grains[0]", "resources"],
+            nativeKeys: [
+                "components[0].coverage.grains[0]",
+                "components[0].resources",
+            ],
             resourceID: grain.descriptor.id,
             transform: grain.transform
         )
         entries[SyntheticV1SemanticKeys.opacity] = try exactEntry(
             key: SyntheticV1SemanticKeys.opacity,
-            nativeKeys: ["placement.strokeOpacity"],
+            nativeKeys: ["components[0].placement.strokeOpacity"],
             source: "\(opacity)",
             target: "\(opacity)"
         )
@@ -407,54 +471,40 @@ public struct SyntheticV1BrushMapper: ForeignBrushMapper {
         )
         entries[SyntheticV1SemanticKeys.rotation] = try exactEntry(
             key: SyntheticV1SemanticKeys.rotation,
-            nativeKeys: ["placement.baseRotation"],
+            nativeKeys: ["components[0].placement.baseRotation"],
             source: "\(rotationDegrees) degrees",
             target: "\(rotation) radians"
         )
         entries[SyntheticV1SemanticKeys.scatter] = try exactEntry(
             key: SyntheticV1SemanticKeys.scatter,
-            nativeKeys: ["placement.baseScatterFraction"],
+            nativeKeys: ["components[0].placement.baseScatterFraction"],
             source: "\(scatter)",
             target: "\(scatter)"
         )
         entries[SyntheticV1SemanticKeys.shape] = try resourceEntry(
             key: SyntheticV1SemanticKeys.shape,
-            nativeKeys: ["coverage.shapes[0]", "resources"],
+            nativeKeys: [
+                "components[0].coverage.shapes[0]",
+                "components[0].resources",
+            ],
             resourceID: shape.descriptor.id,
             transform: shape.transform
         )
         entries[SyntheticV1SemanticKeys.sizePressure] = try exactEntry(
             key: SyntheticV1SemanticKeys.sizePressure,
-            nativeKeys: ["dynamics.size"],
+            nativeKeys: ["components[0].dynamics.size"],
             source: "\(sizePressure.minimum)...\(sizePressure.maximum)",
             target: "\(sizePressure.minimum)...\(sizePressure.maximum)"
         )
         entries[SyntheticV1SemanticKeys.spacing] = try exactEntry(
             key: SyntheticV1SemanticKeys.spacing,
             nativeKeys: [
-                "placement.baseSpacingFraction",
-                "placement.maximumSpacingFraction",
+                "components[0].placement.baseSpacingFraction",
+                "components[0].placement.maximumSpacingFraction",
             ],
             source: "\(spacing.base)...\(spacing.maximum)",
             target: "\(spacing.base)...\(spacing.maximum)"
         )
-        if wet {
-            entries[SyntheticV1SemanticKeys.wet] = try BrushConversionEntry(
-                sourceSemanticKey: SyntheticV1SemanticKeys.wet,
-                nativeSemanticKeys: [
-                    "capabilities",
-                    "material.interaction",
-                    "material.interactionParameters",
-                ],
-                disposition: .unsupported,
-                sourceSummary: "wet=true",
-                targetSummary: "wetMix intent retained but gated",
-                reasonCode: "unsupported-wet",
-                message:
-                    "Wet intent was retained for inspection, but this engine stage cannot activate it faithfully.",
-                requiredForFaithfulRendering: true
-            )
-        }
         for setting in document.ir.settings
         where entries[setting.semanticKey] == nil {
             entries[setting.semanticKey] = try BrushConversionEntry(
@@ -680,40 +730,19 @@ public struct SyntheticV1BrushMapper: ForeignBrushMapper {
         )
     }
 
-    private func material(
+    private func materialFamily(
         _ settings: [String: ForeignBrushSetting]
-    ) throws -> BrushMaterial {
+    ) throws -> BrushMaterialFamily {
         let key = SyntheticV1SemanticKeys.accumulation
         return switch try token(key, settings: settings) {
         case "flow":
             .ink
         case "dry-flow":
-            BrushMaterial(
-                family: .dry,
-                strength: 1,
-                wetness: 0,
-                bleedRadius: 0,
-                softenPasses: 0,
-                accumulationLimit: 1
-            )
+            .dry
         case "uniform-glaze":
-            BrushMaterial(
-                family: .glaze,
-                strength: 1,
-                wetness: 0,
-                bleedRadius: 0,
-                softenPasses: 0,
-                accumulationLimit: 1
-            )
+            .glaze
         case "bounded-wash":
-            BrushMaterial(
-                family: .boundedWash,
-                strength: 1,
-                wetness: 0,
-                bleedRadius: 0,
-                softenPasses: 0,
-                accumulationLimit: 1
-            )
+            .boundedWash
         default:
             throw invalidValue(key)
         }
@@ -813,6 +842,8 @@ public struct SyntheticV1BrushMapper: ForeignBrushMapper {
 
     private func summary(of setting: ForeignBrushSetting) -> String {
         switch setting.value {
+        case .null:
+            "null"
         case let .boolean(value):
             "\(setting.domain.rawValue):\(value)"
         case let .integer(value):

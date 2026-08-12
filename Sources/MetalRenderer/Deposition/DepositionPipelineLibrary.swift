@@ -38,7 +38,7 @@ public final class DepositionPipelineBinding {
     public let key: DepositionPipelineKey
     public let state: any MTLRenderPipelineState
 
-    init(
+    package init(
         key: DepositionPipelineKey,
         state: any MTLRenderPipelineState
     ) {
@@ -48,7 +48,7 @@ public final class DepositionPipelineBinding {
 }
 
 @MainActor
-protocol DepositionPipelinePreparing: AnyObject {
+package protocol DepositionPipelinePreparing: AnyObject {
     func prepare(
         for key: DepositionPipelineKey
     ) async throws -> DepositionPipelineBinding
@@ -59,7 +59,7 @@ public final class DepositionPipelineLibrary: DepositionPipelinePreparing {
     var debugPreparedPipelineCount: Int {
         prepared.count
     }
-    private(set) var debugPrepareCallCount = 0
+    package private(set) var debugPrepareCallCount = 0
 
     private let device: any MTLDevice
     private let library: (any MTLLibrary)?
@@ -214,6 +214,13 @@ public final class DepositionPipelineLibrary: DepositionPipelinePreparing {
         }
         attachment.pixelFormat = DocumentColorPipeline.workingPixelFormat
         configureBlend(attachment, accumulation: key.brush.accumulation)
+        guard let componentCoverage = descriptor.colorAttachments[1] else {
+            throw DepositionPipelineLibraryError.pipelineCreationFailed(
+                "Metal did not provide component-coverage attachment one."
+            )
+        }
+        componentCoverage.pixelFormat = DepositionComponentCoverage.pixelFormat
+        componentCoverage.isBlendingEnabled = false
         return descriptor
     }
 

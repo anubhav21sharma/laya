@@ -6,13 +6,16 @@ public enum ProcreateBrushParserError: Error, Equatable, Sendable {
     case invalidBrushMember(String)
     case invalidBrushArchive(String)
     case invalidEmbeddedPNG(String)
+    case nonContiguousActiveComponents(String)
+    case invalidActiveComponentPath(String)
+    case tooManyActiveComponents(String)
 }
 
 /// Signature-and-structure router for the supported Procreate container
 /// variants. Filename extensions are intentionally not part of this API.
 public struct ProcreateBrushParser: ForeignBrushParser {
     public static let parserIdentifier = "laya.procreate-router"
-    public static let parserVersion = "1"
+    public static let parserVersion = "2"
 
     public let identifier = parserIdentifier
 
@@ -51,7 +54,7 @@ public struct ProcreateExportedBrushParser: ForeignBrushParser {
     public static let sourceFormatFamily = "procreate"
     public static let sourceFormatVersion = "individual-export"
     public static let parserIdentifier = "laya.procreate-individual-export"
-    public static let parserVersion = "1"
+    public static let parserVersion = "2"
 
     public let identifier = parserIdentifier
 
@@ -89,7 +92,7 @@ public struct ProcreateLegacyBrushSetParser: ForeignBrushParser {
     public static let sourceFormatFamily = "procreate"
     public static let sourceFormatVersion = "legacy-brushset"
     public static let parserIdentifier = "laya.procreate-legacy-brushset"
-    public static let parserVersion = "1"
+    public static let parserVersion = "2"
 
     public let identifier = parserIdentifier
 
@@ -198,6 +201,20 @@ private enum ProcreateArchiveAdapter {
         let semanticKey: String?
     }
 
+    private struct ComponentSpec {
+        let identifier: String
+        let ordinal: UInt16
+        let archivePath: String
+        let resourcePrefix: String
+    }
+
+    private struct ParsedComponent {
+        let component: ForeignBrushComponent
+        let displayName: String?
+        let author: String?
+        let resourceData: [String: Data]
+    }
+
     private static let resourceSpecs = [
         ResourceSpec(
             id: "grain.procreate",
@@ -228,68 +245,33 @@ private enum ProcreateArchiveAdapter {
         parserIdentifier: String,
         parserVersion: String
     ) throws -> ForeignBrushDocument {
-        let archivePath = "\(prefix)Brush.archive"
-        let graph: ForeignPropertyListGraph
-        let view: BoundedKeyedArchiveView
-        do {
-            graph = try ForeignPropertyListReader.parse(
-                archive.data(for: archivePath)
-            )
-            view = try BoundedKeyedArchiveView(graph: graph)
-        } catch {
-            throw ProcreateBrushParserError.invalidBrushArchive(archivePath)
-        }
-        guard let root = try view.topObject(forKey: "root") else {
-            throw ProcreateBrushParserError.invalidBrushArchive(archivePath)
-        }
-        let fields: [String: ForeignPropertyListObjectID]
-        do {
-            fields = try view.dictionaryFields(at: root)
-        } catch {
-            throw ProcreateBrushParserError.invalidBrushArchive(archivePath)
-        }
-
-        let displayName = try optionalString(
-            key: "name",
-            fields: fields,
-            view: view
-        ) ?? "Untitled Procreate Brush"
-        let author = try optionalString(
-            key: "authorName",
-            fields: fields,
-            view: view
-        )
-
-        var diagnostics = try structuralDiagnostics(
-            archive: archive,
-            prefix: prefix,
-            fields: fields,
-            hasName: fields["name"] != nil
-        )
-        let extracted = try resources(
-            archive: archive,
-            prefix: prefix
-        )
-        diagnostics.append(contentsOf: extracted.diagnostics)
-
-        var settings = try rawSettings(fields: fields)
-        for resource in extracted.resources {
-            guard let spec = resourceSpecs.first(where: {
-                $0.id == resource.id
-            }), let semanticKey = spec.semanticKey else {
-                continue
-            }
-            try settings.append(ForeignBrushSetting(
-                semanticKey: semanticKey,
-                unit: .unitless,
-                domain: .resource,
-                location: "\(prefix)\(spec.relativePath)",
-                value: .resourceReference(resource.id)
+        let specs = try componentSpecs(archive: archive, prefix: prefix)
+        let propertyListBudget = ForeignPropertyListBudget()
+        var parsed = [ParsedComponent]()
+        parsed.reserveCapacity(specs.count)
+        for spec in specs {
+            try parsed.append(parseComponent(
+                archive: archive,
+                spec: spec,
+                propertyListBudget: propertyListBudget
             ))
         }
-        settings.sort { $0.semanticKey < $1.semanticKey }
-        diagnostics.sort { $0.stableIdentity < $1.stableIdentity }
-
+        guard let root = parsed.first else {
+            throw ProcreateBrushParserError.invalidBrushArchive(
+                "\(prefix)Brush.archive"
+            )
+        }
+        var resourceData: [String: Data] = [:]
+        for component in parsed {
+            for (identifier, data) in component.resourceData {
+                guard resourceData.updateValue(data, forKey: identifier) == nil
+                else {
+                    throw ProcreateBrushParserError.invalidBrushArchive(
+                        component.component.sourcePath
+                    )
+                }
+            }
+        }
         let provenance = try ForeignBrushProvenance(
             sourceFormatFamily: ProcreateExportedBrushParser.sourceFormatFamily,
             sourceFormatVersion: sourceFormatVersion,
@@ -300,16 +282,187 @@ private enum ProcreateArchiveAdapter {
         let ir = try ForeignBrushIR(
             provenance: provenance,
             sourceBrushIdentifier: sourceBrushIdentifier,
-            displayName: displayName,
-            author: author,
+            displayName: root.displayName ?? "Untitled Procreate Brush",
+            author: root.author,
+            components: parsed.map(\.component)
+        )
+        return try ForeignBrushDocument(ir: ir, resourceData: resourceData)
+    }
+
+    private static func parseComponent(
+        archive: ForeignZIPReader,
+        spec: ComponentSpec,
+        propertyListBudget: ForeignPropertyListBudget
+    ) throws -> ParsedComponent {
+        let graph: ForeignPropertyListGraph
+        let view: BoundedKeyedArchiveView
+        do {
+            graph = try ForeignPropertyListReader.parse(
+                archive.data(for: spec.archivePath),
+                budget: propertyListBudget
+            )
+            view = try BoundedKeyedArchiveView(
+                graph: graph,
+                budget: propertyListBudget
+            )
+        } catch {
+            throw ProcreateBrushParserError.invalidBrushArchive(
+                spec.archivePath
+            )
+        }
+        guard let root = try view.topObject(forKey: "root") else {
+            throw ProcreateBrushParserError.invalidBrushArchive(
+                spec.archivePath
+            )
+        }
+        let fields: [String: ForeignPropertyListObjectID]
+        do {
+            fields = try view.dictionaryFields(at: root)
+        } catch {
+            throw ProcreateBrushParserError.invalidBrushArchive(
+                spec.archivePath
+            )
+        }
+
+        let displayName = try optionalString(
+            key: "name",
+            fields: fields,
+            view: view
+        )
+        let author = try optionalString(
+            key: "authorName",
+            fields: fields,
+            view: view
+        )
+
+        let decoded = try rawSettings(
+            fields: fields,
+            view: view,
+            archivePath: spec.archivePath
+        )
+        var diagnostics = decoded.diagnostics
+        if fields["name"] == nil {
+            try diagnostics.append(ForeignBrushDiagnostic(
+                severity: .warning,
+                code: "procreate.missing-name",
+                location: spec.archivePath,
+                message: "The source brush has no supported display name."
+            ))
+        }
+        let extracted = try resources(
+            archive: archive,
+            prefix: spec.resourcePrefix,
+            componentIdentifier: spec.identifier
+        )
+        diagnostics.append(contentsOf: extracted.diagnostics)
+
+        var settings = decoded.settings
+        for resource in extracted.resources {
+            guard let resourceSpec = resourceSpecs.first(where: {
+                resource.id.hasSuffix(".\($0.id)")
+            }), let semanticKey = resourceSpec.semanticKey else {
+                continue
+            }
+            try settings.append(ForeignBrushSetting(
+                semanticKey: semanticKey,
+                unit: .unitless,
+                domain: .resource,
+                location: "\(spec.resourcePrefix)\(resourceSpec.relativePath)",
+                value: .resourceReference(resource.id)
+            ))
+        }
+        settings.sort { $0.semanticKey < $1.semanticKey }
+        diagnostics.sort { $0.stableIdentity < $1.stableIdentity }
+
+        let component = try ForeignBrushComponent(
+            identifier: spec.identifier,
+            ordinal: spec.ordinal,
+            sourcePath: spec.archivePath,
             settings: settings,
             resources: extracted.resources,
             diagnostics: diagnostics
         )
-        return try ForeignBrushDocument(
-            ir: ir,
+        return ParsedComponent(
+            component: component,
+            displayName: displayName,
+            author: author,
             resourceData: extracted.data
         )
+    }
+
+    private static func componentSpecs(
+        archive: ForeignZIPReader,
+        prefix: String
+    ) throws -> [ComponentSpec] {
+        let rootPath = "\(prefix)Brush.archive"
+        guard archive.contains(rootPath) else {
+            throw ProcreateBrushParserError.invalidBrushArchive(rootPath)
+        }
+        var active: [Int: String] = [:]
+        for path in archive.paths where path.hasPrefix(prefix) {
+            let relative = String(path.dropFirst(prefix.count))
+            guard relative != "Brush.archive",
+                  !relative.hasPrefix("Reset/")
+            else { continue }
+            let parts = relative.split(separator: "/").map(String.init)
+            if parts.count >= 2,
+               parts[0].hasPrefix("Sub"),
+               parts[1] == "Reset"
+            {
+                continue
+            }
+            guard relative.lowercased().hasSuffix("brush.archive"),
+                  relative.lowercased().hasPrefix("sub")
+            else { continue }
+            guard parts.count == 2,
+                  parts[1] == "Brush.archive",
+                  parts[0].hasPrefix("Sub"),
+                  parts[0].count == 5,
+                  let index = Int(parts[0].dropFirst(3)),
+                  index > 0
+            else {
+                throw ProcreateBrushParserError.invalidActiveComponentPath(
+                    path
+                )
+            }
+            guard active.updateValue(path, forKey: index) == nil else {
+                throw ProcreateBrushParserError.invalidActiveComponentPath(
+                    path
+                )
+            }
+        }
+        let indices = active.keys.sorted()
+        let expectedIndices = indices.isEmpty
+            ? []
+            : Array(1...indices.count)
+        guard indices == expectedIndices else {
+            throw ProcreateBrushParserError.nonContiguousActiveComponents(
+                prefix.hasSuffix("/") ? String(prefix.dropLast()) : prefix
+            )
+        }
+        guard indices.count + 1
+                <= ForeignBrushLimits.maximumComponentsPerBrush
+        else {
+            throw ProcreateBrushParserError.tooManyActiveComponents(
+                prefix.hasSuffix("/") ? String(prefix.dropLast()) : prefix
+            )
+        }
+        var result = [ComponentSpec(
+            identifier: "root",
+            ordinal: 0,
+            archivePath: rootPath,
+            resourcePrefix: prefix
+        )]
+        for index in indices {
+            let directory = String(format: "Sub%02d", index)
+            result.append(ComponentSpec(
+                identifier: directory.lowercased(),
+                ordinal: UInt16(index),
+                archivePath: "\(prefix)\(directory)/Brush.archive",
+                resourcePrefix: "\(prefix)\(directory)/"
+            ))
+        }
+        return result
     }
 
     private static func optionalString(
@@ -329,68 +482,66 @@ private enum ProcreateArchiveAdapter {
     }
 
     private static func rawSettings(
-        fields: [String: ForeignPropertyListObjectID]
-    ) throws -> [ForeignBrushSetting] {
-        try fields.keys
-            .filter { !metadataKeys.contains($0) }
-            .map { sourceKey in
-                let semanticKey = ProcreateBrushSemanticKeys.raw(sourceKey)
-                return try ForeignBrushSetting(
-                    semanticKey: semanticKey,
-                    unit: .unitless,
-                    domain: .token,
-                    location: "Brush.archive/fields/\(semanticKey)",
-                    value: .token("present")
-                )
-            }
-            .sorted { $0.semanticKey < $1.semanticKey }
-    }
-
-    private static func structuralDiagnostics(
-        archive: ForeignZIPReader,
-        prefix: String,
         fields: [String: ForeignPropertyListObjectID],
-        hasName: Bool
-    ) throws -> [ForeignBrushDiagnostic] {
-        var result = [ForeignBrushDiagnostic]()
-        if !hasName {
-            try result.append(ForeignBrushDiagnostic(
-                severity: .warning,
-                code: "procreate.missing-name",
-                location: "\(prefix)Brush.archive",
-                message: "The source brush has no supported display name."
-            ))
-        }
+        view: BoundedKeyedArchiveView,
+        archivePath: String
+    ) throws -> (
+        settings: [ForeignBrushSetting],
+        diagnostics: [ForeignBrushDiagnostic]
+    ) {
+        var settings = [ForeignBrushSetting]()
+        var diagnostics = [ForeignBrushDiagnostic]()
         for sourceKey in fields.keys.sorted()
             where !metadataKeys.contains(sourceKey)
         {
-            let semanticKey = ProcreateBrushSemanticKeys.raw(sourceKey)
-            try result.append(ForeignBrushDiagnostic(
-                severity: .information,
-                code: "procreate.unverified-setting",
-                location: "Brush.archive/fields/\(semanticKey)",
-                message:
-                "A source field is retained as present but has no verified semantic mapping."
+            let verified = ProcreateBrushSemanticKeys.verified(sourceKey)
+            let semanticKey = verified
+                ?? ProcreateBrushSemanticKeys.raw(sourceKey)
+            let location = "\(archivePath)/fields/\(semanticKey)"
+            let decoded = try ProcreateArchiveValueDecoder.decode(
+                fields[sourceKey]!,
+                from: view
+            )
+            let value = decoded ?? .token("present")
+            try settings.append(ForeignBrushSetting(
+                semanticKey: semanticKey,
+                unit: unit(for: semanticKey, value: value),
+                domain: value.domain,
+                location: location,
+                value: value
             ))
+            if verified == nil || decoded == nil {
+                try diagnostics.append(ForeignBrushDiagnostic(
+                    severity: .information,
+                    code: decoded == nil
+                        ? "procreate.uncharacterized-object"
+                        : "procreate.unverified-setting",
+                    location: location,
+                    message: decoded == nil
+                        ? "An uncharacterized source object is retained as presence-only."
+                        : "A direct source scalar is retained without a verified native mapping."
+                ))
+            }
         }
-        if archive.paths.contains(where: {
-            $0.hasPrefix("\(prefix)Sub")
-                && $0.hasSuffix("/Brush.archive")
-        }) {
-            try result.append(ForeignBrushDiagnostic(
-                severity: .warning,
-                code: "procreate.unsupported-sub-brush",
-                location: "\(prefix)Brush.archive",
-                message:
-                "The source contains a sub-brush that is not supported by this adapter."
-            ))
-        }
-        return result
+        settings.sort { $0.semanticKey < $1.semanticKey }
+        diagnostics.sort { $0.stableIdentity < $1.stableIdentity }
+        return (settings, diagnostics)
+    }
+
+    private static func unit(
+        for semanticKey: String,
+        value: ForeignBrushSettingValue
+    ) -> ForeignBrushSettingUnit {
+        guard case .scalar = value else { return .unitless }
+        return semanticKey.hasPrefix(ProcreateBrushSemanticKeys.rawPrefix)
+            ? .unitless
+            : .normalized
     }
 
     private static func resources(
         archive: ForeignZIPReader,
-        prefix: String
+        prefix: String,
+        componentIdentifier: String
     ) throws -> (
         resources: [ForeignBrushResourceDescriptor],
         data: [String: Data],
@@ -423,7 +574,7 @@ private enum ProcreateArchiveAdapter {
                 )
             }
             try descriptors.append(ForeignBrushResourceDescriptor(
-                id: spec.id,
+                id: "\(componentIdentifier).\(spec.id)",
                 role: spec.role,
                 containerLocation: "\(prefix)\(spec.relativePath)",
                 mediaType: "image/png",
@@ -437,7 +588,7 @@ private enum ProcreateArchiveAdapter {
                 inverted: false,
                 orientation: .up
             ))
-            payloads[spec.id] = data
+            payloads["\(componentIdentifier).\(spec.id)"] = data
         }
         descriptors.sort { $0.id < $1.id }
 

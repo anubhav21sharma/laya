@@ -1,4 +1,5 @@
 #if DEBUG
+import AppKit
 import BrushConverter
 import BrushFormat
 import EditorCore
@@ -7,6 +8,7 @@ import Metal
 @testable import MetalRenderer
 import PatternEngine
 @testable import ProfessionalBrushEvidenceValidation
+import SwiftUI
 import Testing
 
 @Suite("Brush Lab session", .serialized)
@@ -25,9 +27,13 @@ struct BrushLabSessionTests {
             forPersistedID: BrushRecipeID(persistedID)
         ))
 
-        #expect(entry.status == .correctiveRebuildRequired)
+        #expect(entry.status.engineIntegrated)
+        #expect(entry.status.softwarePerformancePassed)
+        #expect(!entry.status.manualQualityPassed)
+        #expect(!entry.status.physicalProfilePassed)
+        #expect(!entry.status.productAccepted)
         #expect(entry.status.laboratoryOnlyMessage ==
-            "Available only in Brush Lab while a corrective rebuild is required.")
+            "Available only in Brush Lab while manual quality and physical profile validation are pending.")
     }
 
     @Test
@@ -85,8 +91,19 @@ struct BrushLabSessionTests {
         )
 
         runtime.session.selectReviewMatrix(.stageFiveProfessional)
-        try await runtime.session.selectReviewCard(card.cardID)
-        let replay = try await runtime.session.replaySelectedReviewCard()
+        do {
+            try await runtime.session.selectReviewCard(card.cardID)
+        } catch {
+            Issue.record("Hosted card selection failed: \(error)")
+            return
+        }
+        let replay: BrushLabCompletedReplay
+        do {
+            replay = try await runtime.session.replaySelectedReviewCard()
+        } catch {
+            Issue.record("Hosted card replay failed: \(error)")
+            return
+        }
 
         #expect(runtime.session.selectedReviewCardID == card.cardID)
         #expect(
@@ -217,6 +234,7 @@ struct BrushLabSessionTests {
         try await runtime.session.selectReviewCard(crossHatch.cardID)
         let crossHatchReplay = try await runtime.session
             .replaySelectedReviewCard()
+        #expect(!crossHatchReplay.logicalDabs.isEmpty)
         #expect(crossHatchReplay.input.filter {
             $0.phase == "began"
         }.count == 4)
@@ -224,6 +242,7 @@ struct BrushLabSessionTests {
 
         try await runtime.session.selectReviewCard(buildup.cardID)
         let buildupReplay = try await runtime.session.replaySelectedReviewCard()
+        #expect(!buildupReplay.logicalDabs.isEmpty)
         #expect(buildupReplay.input.filter {
             $0.phase == "began"
         }.count == 4)
@@ -287,6 +306,48 @@ struct BrushLabSessionTests {
     }
 
     @Test
+    func hostedProductionCanvasStillReplaysProfessionalLogicalDabs()
+        async throws
+    {
+        guard let runtime = try makeRuntime() else { return }
+        let host = NSHostingView(
+            rootView: EditorCanvasHost(
+                controller: runtime.controller,
+                brushDiameter: runtime.controller.model.brushDiameter,
+                requestEditorFocus: {},
+                pointerCancellationGeneration: 0
+            )
+        )
+        let window = NSWindow(
+            contentRect: CGRect(x: 0, y: 0, width: 1_024, height: 768),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        host.layoutSubtreeIfNeeded()
+        await Task.yield()
+        host.layoutSubtreeIfNeeded()
+
+        runtime.session.selectReviewMatrix(.stageFiveProfessional)
+        let card = try #require(
+            BrushLabManualCard.professionalFixedMatrix.first {
+                $0.brushID
+                    == ProfessionalBrushCatalog.technicalInk.id.rawValue
+                    && $0.gesture == .slowLine
+            }
+        )
+        try await runtime.session.selectReviewCard(card.cardID)
+        let replay = try await runtime.session.replaySelectedReviewCard()
+
+        #expect(runtime.controller.renderer.viewport.drawableSize.width > 64)
+        #expect(!replay.logicalDabs.isEmpty)
+    }
+
+    @Test
     func professionalSelectionResetsPlainPeriodicAndRadialReviewDocuments()
         async throws
     {
@@ -327,6 +388,7 @@ struct BrushLabSessionTests {
 
             let replay = try await runtime.session.replaySelectedReviewCard()
             #expect(replay.cardID == card.cardID)
+            #expect(!replay.logicalDabs.isEmpty)
             #expect(
                 replay.snapshot.documentConfiguration
                     == card.documentConfiguration
@@ -342,9 +404,11 @@ struct BrushLabSessionTests {
                 ProfessionalBrushCatalog.graphitePencil.id.rawValue
         )
         guard let runtime = try makeRuntime(
-            compilerHooks: BrushCompilerTestHooks { context in
-                await gate.pauseFirstMatching(context)
-            }
+            compilerHooks: BrushCompilerTestHooks(
+                onPackageHash: { definitionID in
+                    await gate.pauseFirstMatching(definitionID: definitionID)
+                }
+            )
         ) else {
             return
         }
@@ -397,9 +461,11 @@ struct BrushLabSessionTests {
                 ProfessionalBrushCatalog.graphitePencil.id.rawValue
         )
         guard let runtime = try makeRuntime(
-            compilerHooks: BrushCompilerTestHooks { context in
-                await gate.pauseFirstMatching(context)
-            }
+            compilerHooks: BrushCompilerTestHooks(
+                onPackageHash: { definitionID in
+                    await gate.pauseFirstMatching(definitionID: definitionID)
+                }
+            )
         ) else {
             return
         }
@@ -453,9 +519,11 @@ struct BrushLabSessionTests {
             definitionID: AnchorBrushCatalog.ink.id.rawValue
         )
         guard let runtime = try makeRuntime(
-            compilerHooks: BrushCompilerTestHooks { context in
-                await gate.pauseFirstMatching(context)
-            }
+            compilerHooks: BrushCompilerTestHooks(
+                onPackageHash: { definitionID in
+                    await gate.pauseFirstMatching(definitionID: definitionID)
+                }
+            )
         ) else {
             return
         }
@@ -1668,7 +1736,7 @@ struct BrushLabSessionTests {
 
         #expect(
             Set(runtime.session.compiledBrush.map {
-                Array($0.textures.keys)
+                Array($0.primaryComponent.textures.keys)
             } ?? []) == [
                 "brush-lab.custom-asymmetric.grain",
                 "brush-lab.custom-asymmetric.shape",
@@ -1824,7 +1892,7 @@ struct BrushLabSessionTests {
         #expect(runtime.session.package?.conversionReport == mapped.report)
         #expect(runtime.session.drawingAvailability == .available)
         let compiled = try #require(runtime.session.compiledBrush)
-        #expect(Set(compiled.textures.keys) == [
+        #expect(Set(compiled.primaryComponent.textures.keys) == [
             "grain.synthetic",
             "shape.synthetic",
         ])
@@ -1920,22 +1988,16 @@ struct BrushLabSessionTests {
     }
 
     @Test
-    func wetPackageRemainsInspectableWithTypedUnsupportedAvailability()
-        async throws
-    {
-        guard let runtime = try makeRuntime() else { return }
-
-        await runtime.session.loadPackage(
-            try makePackage(wet: true),
-            sourceName: "wet.layabrush"
-        )
-
-        #expect(runtime.session.compilationReport?.backend == .canvasInteraction)
+    func wetPackageIsRejectedAtTheSchemaThreeDefinitionBoundary() {
         #expect(
-            runtime.session.drawingAvailability == .unsupportedInteraction(.wetMix)
-        )
-        #expect(runtime.session.compilationFailure == nil)
-        #expect(runtime.session.compiledBrush == nil)
+            throws: BrushDefinitionValidationError
+                .unsupportedComponentInteraction(
+                    ordinal: 0,
+                    interaction: .wetMix
+                )
+        ) {
+            _ = try makePackage(wet: true)
+        }
     }
 
     @Test
@@ -2277,12 +2339,9 @@ struct BrushLabSessionTests {
             self.definitionID = definitionID
         }
 
-        func pauseFirstMatching(
-            _ context: BrushCompilerPhaseContext
-        ) async {
+        func pauseFirstMatching(definitionID: String) async {
             guard !hasPaused,
-                  context.phase == .beforeDecode,
-                  context.definitionID == definitionID
+                  definitionID == self.definitionID
             else {
                 return
             }
@@ -2352,52 +2411,45 @@ struct BrushLabSessionTests {
     ) throws
         -> BrushPackage
     {
-        let base = try LegacyBrushRecipeAdapter.definition(
-            from: BrushRecipe(id: BrushRecipeID("brush-lab.fixture")),
-            displayName: "Brush Lab Fixture"
-        )
-        let definition: BrushDefinition
-        if nativeOnly || wet {
-            let material = wet ? BrushMaterialDefinition(
-                accumulation: base.material.accumulation,
+        let base = AnchorBrushCatalog.ink.definition
+        let material = wet ? BrushMaterialDefinition(
+                accumulation: base.components[0].material.accumulation,
                 interaction: .wetMix,
-                edgeTreatment: base.material.edgeTreatment,
-                strength: base.material.strength,
-                wetness: base.material.wetness,
-                bleedRadius: base.material.bleedRadius,
-                softenPasses: base.material.softenPasses,
-                accumulationLimit: base.material.accumulationLimit,
+                edgeTreatment: base.components[0].material.edgeTreatment,
+                strength: base.components[0].material.strength,
+                wetness: base.components[0].material.wetness,
+                bleedRadius: base.components[0].material.bleedRadius,
+                softenPasses: base.components[0].material.softenPasses,
+                accumulationLimit: base.components[0].material.accumulationLimit,
                 interactionParameters: BrushInteractionDefinition(
                     pickup: 0.2, pull: 0.4, dilution: 0.3, charge: 0.4,
                     persistence: 0.5, dirtyHaloRadius: 2
                 )
-            ) : base.material
-            definition = try BrushDefinition(
-                id: base.id,
-                schemaVersion: base.schemaVersion,
-                metadata: base.metadata,
-                capabilities: wet ? [BrushCapabilityDeclaration(
-                    identifier: BrushCapability.wetMix.rawValue,
-                    required: true
-                )] : base.capabilities,
-                resources: base.resources,
-                coverage: base.coverage,
-                placement: base.placement,
-                dynamics: base.dynamics,
-                color: base.color,
-                material: material,
-                stabilization: base.stabilization,
-                taper: base.taper,
-                replayMode: base.replayMode,
-                replayLimits: base.replayLimits,
-                seedPolicy: base.seedPolicy,
-                limits: base.limits,
-                performanceIntent: .quality,
-                compatibility: base.compatibility
-            )
-        } else {
-            definition = base
-        }
+            ) : base.components[0].material
+        let definition = try BrushDefinition(
+            id: BrushRecipeID("brush-lab.fixture"),
+            metadata: BrushMetadata(displayName: "Brush Lab Fixture"),
+            capabilities: wet ? [BrushCapabilityDeclaration(
+                identifier: BrushCapability.wetMix.rawValue,
+                required: true
+            )] : base.capabilities,
+            resources: base.components[0].resources,
+            coverage: base.components[0].coverage,
+            placement: base.components[0].placement,
+            dynamics: base.components[0].dynamics,
+            color: base.components[0].color,
+            material: material,
+            stabilization: base.stabilization,
+            taper: base.components[0].taper,
+            replayMode: base.replayMode,
+            replayLimits: base.replayLimits,
+            termination: base.termination,
+            seedPolicy: base.seedPolicy,
+            limits: base.limits,
+            performanceIntent: nativeOnly || wet
+                ? .quality : base.performanceIntent,
+            compatibility: base.compatibility
+        )
         return try BrushPackage(
             manifest: BrushPackageManifest(resources: []),
             definition: definition,
@@ -2419,7 +2471,6 @@ struct BrushLabSessionTests {
         let base = AnchorBrushCatalog.ink.definition
         let definition = try BrushDefinition(
             id: BrushRecipeID("brush-lab.corrupt"),
-            schemaVersion: base.schemaVersion,
             metadata: base.metadata,
             capabilities: base.capabilities,
             resources: [
@@ -2441,17 +2492,17 @@ struct BrushLabSessionTests {
                     ),
                 ],
                 grains: [],
-                baseHardness: base.coverage.baseHardness,
-                aspectRatio: base.coverage.aspectRatio,
-                tipThreshold: base.coverage.tipThreshold,
-                antialiasing: base.coverage.antialiasing
+                baseHardness: base.components[0].coverage.baseHardness,
+                aspectRatio: base.components[0].coverage.aspectRatio,
+                tipThreshold: base.components[0].coverage.tipThreshold,
+                antialiasing: base.components[0].coverage.antialiasing
             ),
-            placement: base.placement,
-            dynamics: base.dynamics,
-            color: base.color,
-            material: base.material,
+            placement: base.components[0].placement,
+            dynamics: base.components[0].dynamics,
+            color: base.components[0].color,
+            material: base.components[0].material,
             stabilization: base.stabilization,
-            taper: base.taper,
+            taper: base.components[0].taper,
             replayMode: base.replayMode,
             replayLimits: base.replayLimits,
             seedPolicy: base.seedPolicy,

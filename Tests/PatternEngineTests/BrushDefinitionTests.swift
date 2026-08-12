@@ -2,96 +2,6 @@ import Foundation
 import Testing
 @testable import PatternEngine
 
-@Test(arguments: AnchorRecipeFixtures.all)
-func legacyRecipeRoundTripsExactly(_ fixture: AnchorRecipeFixture) throws {
-    let definition = try LegacyBrushRecipeAdapter.definition(from: fixture.recipe, displayName: fixture.displayName)
-    let roundTrip = try LegacyBrushRecipeAdapter.recipe(from: definition)
-
-    #expect(roundTrip == fixture.recipe)
-    #expect(definition.id == fixture.recipe.id)
-    #expect(definition.schemaVersion == 1)
-    #expect(definition.metadata == BrushMetadata(displayName: fixture.displayName))
-    #expect(definition.capabilities.isEmpty)
-    #expect(definition.resources.map(\.identifier).sorted() == definition.resources.map(\.identifier))
-    #expect(definition.coverage.shapes == [BrushShapeLayerDefinition(shape: fixture.recipe.shape, combination: .replace, scale: 1, rotation: 0, offset: .zero)])
-    #expect(definition.coverage.grains == (fixture.recipe.grain == .opaque ? [] : [BrushGrainLayerDefinition(grain: fixture.recipe.grain, coordinateMode: fixture.recipe.grainCoordinateMode, transform: fixture.recipe.grainTransform, grainMovementFraction: 0, grainFollowsBrushRotation: false, strength: 1)]))
-    #expect(definition.coverage.baseHardness == fixture.recipe.baseHardness)
-    #expect(definition.coverage.aspectRatio == fixture.recipe.aspectRatio)
-    #expect(definition.coverage.tipThreshold == 0)
-    #expect(definition.coverage.antialiasing)
-    #expect(definition.placement.baseSpacingFraction == fixture.recipe.baseSpacingFraction)
-    #expect(definition.placement.maximumSpacingFraction == fixture.recipe.maximumSpacingFraction)
-    #expect(definition.placement.baseFlow == fixture.recipe.baseFlow)
-    #expect(definition.placement.strokeOpacity == fixture.recipe.strokeOpacity)
-    #expect(definition.placement.baseScatterFraction == fixture.recipe.baseScatterFraction)
-    #expect(definition.placement.baseRotation == fixture.recipe.baseRotation)
-    #expect(definition.placement.baseJitterFraction == 0)
-    #expect(definition.placement.baseOffset == .zero)
-    #expect(definition.dynamics.size == nativeMapping(fixture.recipe.sizeMapping, disabled: 1))
-    #expect(definition.dynamics.flow == nativeMapping(fixture.recipe.flowMapping, disabled: 1))
-    #expect(definition.dynamics.spacing == nativeMapping(fixture.recipe.spacingMapping, disabled: 1))
-    #expect(definition.dynamics.rotation == nativeMapping(fixture.recipe.rotationMapping, disabled: 0))
-    #expect(definition.dynamics.scatter == nativeMapping(fixture.recipe.scatterMapping, disabled: 1))
-    #expect(definition.dynamics.hardness == nativeMapping(fixture.recipe.hardnessMapping, disabled: 1))
-    #expect(definition.dynamics.grain == nativeMapping(fixture.recipe.grainMapping, disabled: 1))
-    #expect(definition.dynamics.opacity == nativeConstant(1))
-    #expect(definition.dynamics.offsetX == nativeConstant(0))
-    #expect(definition.dynamics.offsetY == nativeConstant(0))
-    #expect(definition.dynamics.hue == nativeConstant(0))
-    #expect(definition.dynamics.saturation == nativeConstant(0))
-    #expect(definition.dynamics.brightness == nativeConstant(0))
-    #expect(definition.dynamics.secondaryColorMix == nativeConstant(0))
-    #expect(definition.dynamics.noPressureNeutral == fixture.recipe.noPressureNeutral)
-    #expect(definition.dynamics.randomization == fixture.recipe.randomization)
-    #expect(definition.color.baseAdjustment == fixture.recipe.colorAdjustment)
-    #expect(definition.color.perStampJitter == BrushColorJitter(hue: 0, saturation: 0, brightness: 0, secondaryColorMix: 0))
-    #expect(definition.color.perStrokeJitter == BrushColorJitter(hue: 0, saturation: 0, brightness: 0, secondaryColorMix: 0))
-    #expect(definition.material == expectedMaterial(fixture.recipe.material))
-    #expect(definition.stabilization == fixture.recipe.stabilization)
-    #expect(definition.taper == fixture.recipe.taper)
-    #expect(definition.replayMode == fixture.recipe.replayMode)
-    #expect(definition.replayLimits == fixture.recipe.replayLimits)
-    #expect(definition.seedPolicy == .perStroke)
-    #expect(definition.limits == BrushDefinitionLimits(minimumDiameter: 0.01, maximumDiameter: 16_384, maximumOpacity: 1, maximumSpacingFraction: 4, maximumResourceDimension: 4_096, maximumResidentBytes: 64 * 1_024 * 1_024))
-    #expect(definition.performanceIntent == .realtime120)
-    #expect(definition.compatibility == BrushCompatibilityMetadata(nativeFeatureVersion: 1, sourceSettingKeys: [], requiredSemanticKeys: []))
-}
-
-@Test
-func reverseAdapterRequiresLegacyCompatibilityAndRejectsNativeTermination()
-    throws
-{
-    let fixture = AnchorRecipeFixtures.all[0]
-    let legacy = try LegacyBrushRecipeAdapter.definition(
-        from: fixture.recipe,
-        displayName: fixture.displayName
-    )
-    #expect(try LegacyBrushRecipeAdapter.recipe(from: legacy) == fixture.recipe)
-    #expect(
-        try BrushProgramCompiler.compile(legacy).termination
-            == .legacySchemaV1Cap
-    )
-
-    for termination in [
-        BrushTerminationDefinition.cap,
-        .pressureRelease(maximumWorldLength: 4),
-        .boundedCorrection(
-            maximumSamples: 3,
-            maximumWorldLength: 8,
-            maximumDabs: 5
-        ),
-    ] {
-        let native = try legacy.replacing(termination: termination)
-        #expect(
-            throws: BrushDefinitionValidationError.semanticLoss(
-                "definition is not marked legacy-compatible"
-            )
-        ) {
-            try LegacyBrushRecipeAdapter.recipe(from: native)
-        }
-    }
-}
-
 @Test func definitionDecodingRejectsExplicitNullTermination() throws {
     let definition = try BrushDefinition.fixture()
     let encoded = try JSONEncoder().encode(definition)
@@ -108,117 +18,24 @@ func reverseAdapterRequiresLegacyCompatibilityAndRejectsNativeTermination()
     }
 }
 
-@Test func reverseAdapterRejectsEveryNativeOnlyDynamicsChannel() throws {
-    let definition = try LegacyBrushRecipeAdapter.definition(from: AnchorRecipeFixtures.all[0].recipe, displayName: "Technical Ink")
-    for dynamics in [
-        replacing(definition.dynamics, opacity: nativeConstant(0.5)),
-        replacing(definition.dynamics, offsetX: nativeConstant(1)),
-        replacing(definition.dynamics, offsetY: nativeConstant(1)),
-        replacing(definition.dynamics, hue: nativeConstant(1)),
-        replacing(definition.dynamics, saturation: nativeConstant(1)),
-        replacing(definition.dynamics, brightness: nativeConstant(1)),
-        replacing(definition.dynamics, secondaryColorMix: nativeConstant(1)),
-    ] {
-        #expect(throws: BrushDefinitionValidationError.self) {
-            try LegacyBrushRecipeAdapter.recipe(from: definition.replacing(dynamics: dynamics))
-        }
-    }
-}
-
-@Test func reverseAdapterRequiresChannelSpecificDisabledMappingNeutrals() throws {
-    let definition = try LegacyBrushRecipeAdapter.definition(from: AnchorRecipeFixtures.all[0].recipe, displayName: "Technical Ink")
-    #expect(throws: BrushDefinitionValidationError.self) {
-        try LegacyBrushRecipeAdapter.recipe(from: definition.replacing(dynamics: replacing(definition.dynamics, size: nativeConstant(0))))
-    }
-    #expect(throws: BrushDefinitionValidationError.self) {
-        try LegacyBrushRecipeAdapter.recipe(from: definition.replacing(dynamics: replacing(definition.dynamics, rotation: nativeConstant(1))))
-    }
-}
-
-@Test func reverseAdapterAllowsDryConversionProvenance() throws {
-    let fixture = AnchorRecipeFixtures.all[0]
-    let definition = try LegacyBrushRecipeAdapter.definition(
-        from: fixture.recipe,
-        displayName: fixture.displayName
-    )
-    let compatibility = BrushCompatibilityMetadata(
-        nativeFeatureVersion: 1,
-        sourceSettingKeys: [
-            "synthetic.v1.coverage.shape",
-            "synthetic.v1.placement.spacing",
-        ],
-        requiredSemanticKeys: []
-    )
-
-    let encoder = JSONEncoder()
-    var object = try #require(
-        JSONSerialization.jsonObject(
-            with: encoder.encode(definition)
-        ) as? [String: Any]
-    )
-    object["compatibility"] = try JSONSerialization.jsonObject(
-        with: encoder.encode(compatibility)
-    )
-    let decodedLegacy = try JSONDecoder().decode(
-        BrushDefinition.self,
-        from: JSONSerialization.data(withJSONObject: object)
-    )
-
-    #expect(
-        try LegacyBrushRecipeAdapter.recipe(from: decodedLegacy)
-            == fixture.recipe
-    )
-}
-
-@Test func reverseAdapterRejectsUnknownVersionAndRequiredSemantics() throws {
-    let definition = try LegacyBrushRecipeAdapter.definition(
-        from: AnchorRecipeFixtures.all[0].recipe,
-        displayName: "Technical Ink"
-    )
-    let unsupported = [
-        BrushCompatibilityMetadata(
-            nativeFeatureVersion: 2,
-            sourceSettingKeys: ["synthetic.v1.placement.spacing"],
-            requiredSemanticKeys: []
-        ),
-        BrushCompatibilityMetadata(
-            nativeFeatureVersion: 1,
-            sourceSettingKeys: ["synthetic.v1.material.wet"],
-            requiredSemanticKeys: ["synthetic.v1.material.wet"]
-        ),
-    ]
-
-    for compatibility in unsupported {
-        #expect(
-            throws: BrushDefinitionValidationError.semanticLoss(
-                "definition contains a native-only field"
-            )
-        ) {
-            try LegacyBrushRecipeAdapter.recipe(
-                from: definition.replacing(compatibility: compatibility)
-            )
-        }
-    }
-}
-
-@Test func definitionRejectsLegacyMappingDomainAndDeclaredLimitViolations() throws {
+@Test func definitionRejectsMappingDomainAndDeclaredLimitViolations() throws {
     let definition = try BrushDefinition.fixture()
     let invalidPositive = BrushMappingDefinition(input: .pressure, response: .linear, scale: 1, offset: 0, lowerClamp: 0, upperClamp: 1, inverted: false, jitter: 0, missingInputValue: 1)
     for dynamics in [
-        replacing(definition.dynamics, size: invalidPositive),
-        replacing(definition.dynamics, spacing: invalidPositive),
-        replacing(definition.dynamics, grain: invalidPositive),
+        replacing(definition.components[0].dynamics, size: invalidPositive),
+        replacing(definition.components[0].dynamics, spacing: invalidPositive),
+        replacing(definition.components[0].dynamics, grain: invalidPositive),
     ] {
         #expect(throws: BrushDefinitionValidationError.self) { try definition.replacing(dynamics: dynamics) }
     }
     let tooLarge = BrushMappingDefinition(input: .pressure, response: .linear, scale: 1, offset: 0, lowerClamp: 1, upperClamp: BrushRecipePolicy.maximumMappingMagnitude + 0.01, inverted: false, jitter: 0, missingInputValue: 1)
-    #expect(throws: BrushDefinitionValidationError.self) { try definition.replacing(dynamics: replacing(definition.dynamics, size: tooLarge)) }
+    #expect(throws: BrushDefinitionValidationError.self) { try definition.replacing(dynamics: replacing(definition.components[0].dynamics, size: tooLarge)) }
     let rotation = BrushMappingDefinition(input: .direction, response: .linear, scale: 1, offset: 0, lowerClamp: -2 * .pi, upperClamp: 2 * .pi + 0.01, inverted: false, jitter: 0, missingInputValue: 1)
-    #expect(throws: BrushDefinitionValidationError.self) { try definition.replacing(dynamics: replacing(definition.dynamics, rotation: rotation)) }
+    #expect(throws: BrushDefinitionValidationError.self) { try definition.replacing(dynamics: replacing(definition.components[0].dynamics, rotation: rotation)) }
     let opacityLimits = BrushDefinitionLimits(minimumDiameter: 0.01, maximumDiameter: 10, maximumOpacity: 0.5, maximumSpacingFraction: 4, maximumResourceDimension: 64, maximumResidentBytes: 1)
     let opacityPlacement = BrushPlacementDefinition(baseSpacingFraction: 0.1, maximumSpacingFraction: 0.1, baseFlow: 1, strokeOpacity: 0.5, baseScatterFraction: 0, baseRotation: 0, baseJitterFraction: 0, baseOffset: .zero)
     #expect(throws: BrushDefinitionValidationError.self) {
-        try definition.replacing(dynamics: replacing(definition.dynamics, opacity: nativeConstant(0.6)), placement: opacityPlacement, limits: opacityLimits)
+        try definition.replacing(dynamics: replacing(definition.components[0].dynamics, opacity: nativeConstant(0.6)), placement: opacityPlacement, limits: opacityLimits)
     }
     #expect(throws: BrushDefinitionValidationError.self) {
         try BrushDefinition.fixture(limits: BrushDefinitionLimits(minimumDiameter: 0.01, maximumDiameter: 10, maximumOpacity: 1, maximumSpacingFraction: 0.05, maximumResourceDimension: 64, maximumResidentBytes: 1))
@@ -229,7 +46,7 @@ func reverseAdapterRequiresLegacyCompatibilityAndRejectsNativeTermination()
     let definition = try BrushDefinition.fixture()
     for effects in [BrushTaperEffects(), .size, .flow, [.size, .flow]] {
         let taper = BrushTaperConfiguration(start: .disabled, end: .disabled, minimumSize: 1, minimumFlow: 1, effects: effects)
-        #expect(try definition.replacing(taper: taper).taper.effects == effects)
+        #expect(try definition.replacing(taper: taper).components[0].taper.effects == effects)
     }
     for rawValue: UInt8 in [4, 5, 6, 7] {
         let taper = BrushTaperConfiguration(start: .disabled, end: .disabled, minimumSize: 1, minimumFlow: 1, effects: BrushTaperEffects(rawValue: rawValue))
@@ -243,10 +60,12 @@ func reverseAdapterRequiresLegacyCompatibilityAndRejectsNativeTermination()
     let definition = try BrushDefinition.fixture()
     let data = try JSONEncoder().encode(definition)
     var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-    var taper = try #require(object["taper"] as? [String: Any])
+    var components = try #require(object["components"] as? [[String: Any]])
+    var taper = try #require(components[0]["taper"] as? [String: Any])
     for rawValue in [4, 5, 6, 7] {
         taper["effects"] = rawValue
-        object["taper"] = taper
+        components[0]["taper"] = taper
+        object["components"] = components
         let invalidData = try JSONSerialization.data(withJSONObject: object)
         #expect(throws: Error.self) {
             try JSONDecoder().decode(BrushDefinition.self, from: invalidData)
@@ -254,204 +73,9 @@ func reverseAdapterRequiresLegacyCompatibilityAndRejectsNativeTermination()
     }
 }
 
-@Test func forwardAdapterRejectsRecipeSchemasTheDefinitionCannotRepresent() throws {
-    let recipe = try BrushRecipe(id: BrushRecipeID("test.schema-two"), schemaVersion: 2)
-    #expect(throws: BrushDefinitionValidationError.self) {
-        try LegacyBrushRecipeAdapter.definition(from: recipe, displayName: "Schema Two")
-    }
-}
-
-@Test
-func legacyEndTaperCanOnlyEnterAProgramThroughTheNamedAdapter() throws {
-    let recipe = try BrushRecipe(
-        id: BrushRecipeID("test.legacy-termination"),
-        taper: BrushTaperConfiguration(
-            start: .disabled,
-            end: .worldPixels(12),
-            minimumSize: 0.25,
-            minimumFlow: 0.5,
-            effects: [.size, .flow]
-        ),
-        replayMode: .replayTail,
-        replayLimits: BrushRecipePolicy.replayTailLimits
-    )
-    let adapted = try LegacyBrushRecipeAdapter.definition(
-        from: recipe,
-        displayName: "Legacy"
-    )
-    let legacyProgram = try BrushProgramCompiler.compile(adapted)
-
-    #expect(
-        legacyProgram.termination
-            == .legacySchemaV1EndTaper(
-                taper: recipe.taper,
-                replayLimits: BrushRecipePolicy.replayTailLimits
-            )
-    )
-
-    let rebuilt = try BrushDefinition(
-        id: adapted.id,
-        schemaVersion: adapted.schemaVersion,
-        metadata: adapted.metadata,
-        capabilities: adapted.capabilities,
-        resources: adapted.resources,
-        coverage: adapted.coverage,
-        placement: adapted.placement,
-        dynamics: adapted.dynamics,
-        color: adapted.color,
-        material: adapted.material,
-        stabilization: adapted.stabilization,
-        taper: adapted.taper,
-        replayMode: adapted.replayMode,
-        replayLimits: adapted.replayLimits,
-        termination: .cap,
-        seedPolicy: adapted.seedPolicy,
-        limits: adapted.limits,
-        performanceIntent: adapted.performanceIntent,
-        compatibility: adapted.compatibility
-    )
-
-    #expect(try BrushProgramCompiler.compile(rebuilt).termination == .cap)
-
-    let encoder = JSONEncoder()
-    let decoder = JSONDecoder()
-    let encodedLegacy = try encoder.encode(adapted)
-    let encodedNative = try encoder.encode(rebuilt)
-    let legacyObject = try #require(
-        JSONSerialization.jsonObject(with: encodedLegacy) as? [String: Any]
-    )
-    let nativeObject = try #require(
-        JSONSerialization.jsonObject(with: encodedNative) as? [String: Any]
-    )
-    #expect(legacyObject["termination"] == nil)
-    #expect(nativeObject["termination"] != nil)
-    #expect(
-        try BrushProgramCompiler.compile(
-            decoder.decode(BrushDefinition.self, from: encodedLegacy)
-        ).termination == legacyProgram.termination
-    )
-    #expect(
-        try BrushProgramCompiler.compile(
-            decoder.decode(BrushDefinition.self, from: encodedNative)
-        ).termination == .cap
-    )
-}
-
-@Test
-func legacyEndTaperPreservesItsDeclaredWholeStrokeReplayContract() throws {
-    let recipe = try BrushRecipe(
-        id: BrushRecipeID("test.legacy-whole-stroke-termination"),
-        taper: BrushTaperConfiguration(
-            start: .disabled,
-            end: .worldPixels(12),
-            minimumSize: 0.25,
-            minimumFlow: 0.5,
-            effects: [.size, .flow]
-        ),
-        replayMode: .boundedWholeStroke,
-        replayLimits: BrushRecipePolicy.wholeStrokeLimits
-    )
-    let definition = try LegacyBrushRecipeAdapter.definition(
-        from: recipe,
-        displayName: "Legacy Whole Stroke"
-    )
-
-    #expect(
-        try BrushProgramCompiler.compile(definition).replayContract
-            == BrushReplayContract(
-                mode: .boundedWholeStroke,
-                limits: BrushRecipePolicy.wholeStrokeLimits
-            )
-    )
-}
-
-@Test
-func legacyReplayWithoutEndTaperPreservesItsDeclaredContract() throws {
-    let recipe = try BrushRecipe(
-        id: BrushRecipeID("test.legacy-replay-without-taper"),
-        replayMode: .boundedWholeStroke,
-        replayLimits: BrushRecipePolicy.wholeStrokeLimits
-    )
-    let definition = try LegacyBrushRecipeAdapter.definition(
-        from: recipe,
-        displayName: "Legacy Replay"
-    )
-    let program = try BrushProgramCompiler.compile(definition)
-
-    #expect(
-        program.termination
-            == .legacySchemaV1Replay(
-                mode: .boundedWholeStroke,
-                replayLimits: BrushRecipePolicy.wholeStrokeLimits
-            )
-    )
-    #expect(
-        program.replayContract
-            == BrushReplayContract(
-                mode: .boundedWholeStroke,
-                limits: BrushRecipePolicy.wholeStrokeLimits
-            )
-    )
-}
-
-@Test func legacyBuiltInAssetsRoundTripThroughCanonicalResources() throws {
-    let shapeRecipe = try BrushRecipe(id: BrushRecipeID("test.asset.shape"), shape: .asset("builtin.shape.chisel"))
-    let grainRecipe = try BrushRecipe(id: BrushRecipeID("test.asset.grain"), grain: .asset("builtin.grain.paper"))
-    let combinedRecipe = try BrushRecipe(id: BrushRecipeID("test.asset.combined"), shape: .asset("builtin.shape.chisel"), grain: .asset("builtin.grain.paper"))
-    for recipe in [shapeRecipe, grainRecipe, combinedRecipe] {
-        let definition = try LegacyBrushRecipeAdapter.definition(from: recipe, displayName: "Asset")
-        var expectedResources: [BrushResourceReference] = []
-        if case let .asset(identifier) = recipe.shape {
-            expectedResources.append(BrushResourceReference(identifier: identifier, kind: .shape, required: false, fallback: .builtIn(identifier: identifier)))
-        }
-        if case let .asset(identifier) = recipe.grain {
-            expectedResources.append(BrushResourceReference(identifier: identifier, kind: .grain, required: false, fallback: .builtIn(identifier: identifier)))
-        }
-        expectedResources.sort { $0.identifier < $1.identifier }
-        #expect(definition.resources == expectedResources)
-        #expect(try LegacyBrushRecipeAdapter.recipe(from: definition) == recipe)
-    }
-    let definition = try LegacyBrushRecipeAdapter.definition(from: combinedRecipe, displayName: "Asset")
-    let extraPreview = BrushResourceReference(identifier: "preview", kind: .preview, required: false, fallback: nil)
-    #expect(throws: BrushDefinitionValidationError.self) {
-        try LegacyBrushRecipeAdapter.recipe(from: definition.replacing(resources: definition.resources + [extraPreview]))
-    }
-}
-
 @Test func definitionRejectsWetInteractionWithoutCapability() {
     #expect(throws: BrushDefinitionValidationError.self) {
         try BrushDefinition.fixture(capabilities: [], interaction: .wetMix)
-    }
-}
-
-@Test
-func definitionRejectsInteractionHaloBeyondTheBoundedMaterialPolicy() throws {
-    let base = try BrushDefinition.fixture(capabilities: [
-        BrushCapabilityDeclaration(identifier: "smudge", required: true),
-    ])
-    let interaction = BrushMaterialDefinition(
-        accumulation: .flow,
-        interaction: .smudge,
-        edgeTreatment: .none,
-        strength: 1,
-        wetness: 0.5,
-        bleedRadius: 0,
-        softenPasses: 0,
-        accumulationLimit: 1,
-        interactionParameters: BrushInteractionDefinition(
-            pickup: 0,
-            pull: 0,
-            dilution: 0,
-            charge: 0,
-            persistence: 0,
-            dirtyHaloRadius: BrushRecipePolicy.maximumWashBleedRadius + 1
-        )
-    )
-
-    #expect(throws: BrushDefinitionValidationError.outOfRange(
-        field: "material.dirtyHaloRadius"
-    )) {
-        try base.replacing(material: interaction)
     }
 }
 
@@ -520,13 +144,13 @@ func definitionRejectsInteractionHaloBeyondTheBoundedMaterialPolicy() throws {
     let definition = try BrushDefinition.fixture()
     let invalidShape = BrushCoverageDefinition(shapes: [BrushShapeLayerDefinition(shape: .hardRound, combination: .replace, scale: .infinity, rotation: 0, offset: .zero)], grains: [], baseHardness: 1, aspectRatio: 1, tipThreshold: 0, antialiasing: true)
     #expect(throws: BrushDefinitionValidationError.self) { try definition.replacing(coverage: invalidShape) }
-    let invalidGrain = BrushCoverageDefinition(shapes: definition.coverage.shapes, grains: [BrushGrainLayerDefinition(grain: .paper, coordinateMode: .canonical, transform: BrushGrainTransform(scale: .nan, rotation: 0, offset: .zero), grainMovementFraction: 0, grainFollowsBrushRotation: false, strength: 1)], baseHardness: 1, aspectRatio: 1, tipThreshold: 0, antialiasing: true)
+    let invalidGrain = BrushCoverageDefinition(shapes: definition.components[0].coverage.shapes, grains: [BrushGrainLayerDefinition(grain: .paper, coordinateMode: .canonical, transform: BrushGrainTransform(scale: .nan, rotation: 0, offset: .zero), grainMovementFraction: 0, grainFollowsBrushRotation: false, strength: 1)], baseHardness: 1, aspectRatio: 1, tipThreshold: 0, antialiasing: true)
     #expect(throws: BrushDefinitionValidationError.self) { try definition.replacing(coverage: invalidGrain) }
-    let invalidColor = BrushColorBehaviorDefinition(baseAdjustment: BrushColorAdjustment(redMultiplier: 2, greenMultiplier: 1, blueMultiplier: 1, alphaMultiplier: 1), perStampJitter: definition.color.perStampJitter, perStrokeJitter: definition.color.perStrokeJitter)
+    let invalidColor = BrushColorBehaviorDefinition(baseAdjustment: BrushColorAdjustment(redMultiplier: 2, greenMultiplier: 1, blueMultiplier: 1, alphaMultiplier: 1), perStampJitter: definition.components[0].color.perStampJitter, perStrokeJitter: definition.components[0].color.perStrokeJitter)
     #expect(throws: BrushDefinitionValidationError.self) { try definition.replacing(color: invalidColor) }
 }
 
-@Test func definitionPreservesLegacyDualLayersAndValidatesDeclaredCapabilities() throws {
+@Test func definitionPreservesDualLayersAndValidatesDeclaredCapabilities() throws {
     let base = try BrushDefinition.fixture()
     let twoShapes = BrushCoverageDefinition(
         shapes: [
@@ -536,7 +160,7 @@ func definitionRejectsInteractionHaloBeyondTheBoundedMaterialPolicy() throws {
         grains: [], baseHardness: 1, aspectRatio: 1, tipThreshold: 0, antialiasing: true
     )
     let twoGrains = BrushCoverageDefinition(
-        shapes: base.coverage.shapes,
+        shapes: base.components[0].coverage.shapes,
         grains: [
             BrushGrainLayerDefinition(grain: .paper, coordinateMode: .canonical, transform: .identity, grainMovementFraction: 0, grainFollowsBrushRotation: false, strength: 1),
             BrushGrainLayerDefinition(grain: .noise, coordinateMode: .brushLocal, transform: .identity, grainMovementFraction: 0, grainFollowsBrushRotation: false, strength: 1),
@@ -570,7 +194,7 @@ func definitionRejectsInteractionHaloBeyondTheBoundedMaterialPolicy() throws {
 }
 
 @Test func definitionCodableRoundTripIsStable() throws {
-    let definition = try LegacyBrushRecipeAdapter.definition(from: AnchorRecipeFixtures.all[0].recipe, displayName: "Technical Ink")
+    let definition = AnchorDefinitionFixtures.all[0].definition
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
     let first = try encoder.encode(definition)
@@ -579,7 +203,7 @@ func definitionRejectsInteractionHaloBeyondTheBoundedMaterialPolicy() throws {
 }
 
 @Test func definitionDecodingIgnoresUnknownSafeKeysAndAllowsOmittedReplayLimits() throws {
-    let definition = try LegacyBrushRecipeAdapter.definition(from: AnchorRecipeFixtures.all[0].recipe, displayName: "Technical Ink")
+    let definition = AnchorDefinitionFixtures.all[0].definition
     let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
     let canonical = try encoder.encode(definition)
     var object = try #require(JSONSerialization.jsonObject(with: canonical) as? [String: Any])
@@ -592,24 +216,25 @@ func definitionRejectsInteractionHaloBeyondTheBoundedMaterialPolicy() throws {
     #expect(throws: DecodingError.self) { try JSONDecoder().decode(BrushDefinition.self, from: JSONSerialization.data(withJSONObject: object)) }
 }
 
-@Test func schemaV2DefinitionRoundTripsEveryStageCField() throws {
+@Test func schemaV3DefinitionEncodesOnlyTheComponentWireLayout() throws {
     let definition = try BrushDefinition.stageCV2Fixture()
     let data = try JSONEncoder().encode(definition)
     let decoded = try JSONDecoder().decode(BrushDefinition.self, from: data)
+    let object = try #require(
+        JSONSerialization.jsonObject(with: data) as? [String: Any]
+    )
 
-    #expect(BrushDefinition.legacySchemaVersion == 1)
-    #expect(BrushDefinition.currentSchemaVersion == 2)
-    #expect(definition.schemaVersion == 2)
+    #expect(BrushDefinition.currentSchemaVersion == 3)
+    #expect(definition.schemaVersion == 3)
     #expect(decoded == definition)
-    #expect(decoded.sensorNormalization?.fullScaleWorldVelocity == 2_000)
-    #expect(decoded.sensorProgram?.outputs[.rotation]?.terms.count == 1)
-    #expect(decoded.stabilizationV2 == .weightedWindow(distance: 8))
-    #expect(decoded.direction?.maximumAngularStep == .pi / 6)
-    #expect(decoded.emission == BrushEmissionDefinition(
-        mode: .distanceAndTime,
-        timeInterval: 1.0 / 120
-    ))
-    #expect(decoded.tipSupports == [.analyticEllipse])
+    #expect(object["composition"] != nil)
+    #expect((object["components"] as? [[String: Any]])?.count == 1)
+    for retiredRootKey in [
+        "resources", "coverage", "placement", "dynamics", "color",
+        "material", "taper", "sensorProgram", "emission", "components.0.tipSupports",
+    ] {
+        #expect(object[retiredRootKey] == nil)
+    }
 }
 
 @Test func schemaV2RejectsEveryStageCValidationBoundary() throws {
@@ -640,7 +265,7 @@ func definitionRejectsInteractionHaloBeyondTheBoundedMaterialPolicy() throws {
         )
     }
     #expect(throws: BrushDefinitionValidationError.invalidMapping(
-        field: "sensorProgram.outputs"
+        field: "components.0.sensorProgram.outputs"
     )) {
         _ = try BrushDefinition.stageCV2Fixture(
             sensorProgram: BrushSensorProgramDefinition(outputs: [
@@ -649,7 +274,7 @@ func definitionRejectsInteractionHaloBeyondTheBoundedMaterialPolicy() throws {
         )
     }
     #expect(throws: BrushDefinitionValidationError.invalidMapping(
-        field: "sensorProgram.size.terms"
+        field: "components.0.sensorProgram.size.terms"
     )) {
         let term = BrushResponseTermDefinition.fixture()
         var outputs = program.outputs
@@ -679,19 +304,203 @@ func definitionRejectsInteractionHaloBeyondTheBoundedMaterialPolicy() throws {
         )
     }
     #expect(throws: BrushDefinitionValidationError.outOfRange(
-        field: "emission.timeInterval"
+        field: "components.0.emission.timeInterval"
     )) {
         _ = try BrushDefinition.stageCV2Fixture(
             emission: BrushEmissionDefinition(mode: .time, timeInterval: nil)
         )
     }
-    #expect(base.schemaVersion == 1)
+    #expect(base.schemaVersion == BrushDefinition.currentSchemaVersion)
 }
 
-@Test func definitionEnvelopeRejectsUnsupportedVersionBeforeFieldDecode() {
-    let data = Data(#"{"schemaVersion":99}"#.utf8)
-    #expect(throws: BrushDefinitionValidationError.unsupportedSchemaVersion(99)) {
+@Test(arguments: [UInt16(1), UInt16(2), UInt16(4)])
+func definitionEnvelopeRejectsEveryNoncurrentVersionBeforeFieldDecode(
+    _ schemaVersion: UInt16
+) {
+    let data = Data(#"{"schemaVersion":\#(schemaVersion)}"#.utf8)
+    #expect(
+        throws: BrushDefinitionValidationError.unsupportedSchemaVersion(
+            schemaVersion
+        )
+    ) {
         _ = try JSONDecoder().decode(BrushDefinition.self, from: data)
+    }
+}
+
+@Test func schemaV3AcceptsOneOrTwoOrderedDryComponents() throws {
+    let base = try BrushDefinition.fixture()
+    let primary = base.component(identifier: "primary", ordinal: 0)
+    let texture = base.component(identifier: "texture", ordinal: 1)
+
+    let single = try base.replacing(components: [primary])
+    let composite = try base.replacing(components: [primary, texture])
+
+    #expect(single.components.map(\.identifier.rawValue) == ["primary"])
+    #expect(composite.components.map(\.identifier.rawValue) == [
+        "primary", "texture",
+    ])
+    #expect(composite.components.map(\.ordinal) == [0, 1])
+    let encoded = try JSONEncoder().encode(composite)
+    #expect(try JSONDecoder().decode(BrushDefinition.self, from: encoded) == composite)
+}
+
+@Test func schemaV3RejectsInvalidComponentTopologyAndMaterial() throws {
+    let base = try BrushDefinition.fixture()
+    let primary = base.component(identifier: "primary", ordinal: 0)
+    let texture = base.component(identifier: "texture", ordinal: 1)
+
+    #expect(throws: BrushDefinitionValidationError.invalidComponentCount(
+        actual: 0,
+        maximum: 2
+    )) {
+        _ = try base.replacing(components: [])
+    }
+    #expect(throws: BrushDefinitionValidationError.invalidComponentCount(
+        actual: 3,
+        maximum: 2
+    )) {
+        _ = try base.replacing(components: [
+            primary,
+            texture,
+            base.component(identifier: "third", ordinal: 2),
+        ])
+    }
+    #expect(throws: BrushDefinitionValidationError.duplicateComponentIdentifier(
+        "primary"
+    )) {
+        _ = try base.replacing(components: [
+            primary,
+            base.component(identifier: "primary", ordinal: 1),
+        ])
+    }
+    #expect(throws: BrushDefinitionValidationError.invalidComponentOrdinal(
+        expected: 1,
+        actual: 2
+    )) {
+        _ = try base.replacing(components: [
+            primary,
+            base.component(identifier: "texture", ordinal: 2),
+        ])
+    }
+    for identifier in ["", "../texture", "texture layer"] {
+        #expect(throws: BrushDefinitionValidationError.invalidComponentIdentifier(
+            identifier
+        )) {
+            _ = try base.replacing(components: [
+                base.component(identifier: identifier, ordinal: 0),
+            ])
+        }
+    }
+    let wet = BrushMaterialDefinition(
+        accumulation: .flow,
+        interaction: .smudge,
+        edgeTreatment: .none,
+        strength: 1,
+        wetness: 0,
+        bleedRadius: 0,
+        softenPasses: 0,
+        accumulationLimit: 1,
+        interactionParameters: BrushInteractionDefinition(
+            pickup: 0,
+            pull: 0,
+            dilution: 0,
+            charge: 0,
+            persistence: 0,
+            dirtyHaloRadius: 0
+        )
+    )
+    #expect(throws: BrushDefinitionValidationError.unsupportedComponentInteraction(
+        ordinal: 0,
+        interaction: .smudge
+    )) {
+        _ = try base.replacing(components: [
+            base.component(
+                identifier: "primary",
+                ordinal: 0,
+                material: wet
+            ),
+        ])
+    }
+
+    let invalidMaterial = BrushMaterialDefinition(
+        accumulation: .flow,
+        interaction: .none,
+        edgeTreatment: .none,
+        strength: .nan,
+        wetness: 0,
+        bleedRadius: 0,
+        softenPasses: 0,
+        accumulationLimit: 1,
+        interactionParameters: nil
+    )
+    #expect(throws: BrushDefinitionValidationError.nonfinite(
+        field: "components.1.material.strength"
+    )) {
+        _ = try base.replacing(components: [
+            primary,
+            base.component(
+                identifier: "texture",
+                ordinal: 1,
+                material: invalidMaterial
+            ),
+        ])
+    }
+}
+
+@Test func schemaV3AllowsOnlyIdenticalSharedComponentResourceReferences() throws {
+    let base = try BrushDefinition.fixture()
+    let coverage = BrushCoverageDefinition(
+        shapes: [BrushShapeLayerDefinition(
+            shape: .asset("shared.shape"),
+            combination: .replace,
+            scale: 1,
+            rotation: 0,
+            offset: .zero
+        )],
+        grains: [],
+        baseHardness: 1,
+        aspectRatio: 1,
+        tipThreshold: 0,
+        antialiasing: true
+    )
+    let optional = BrushResourceReference(
+        identifier: "shared.shape",
+        kind: .shape,
+        required: false,
+        fallback: .builtIn(identifier: "builtin.shape.hard-round")
+    )
+    let required = BrushResourceReference(
+        identifier: "shared.shape",
+        kind: .shape,
+        required: true,
+        fallback: nil
+    )
+    let primary = base.component(
+        identifier: "primary",
+        ordinal: 0,
+        resources: [optional],
+        coverage: coverage
+    )
+    let shared = base.component(
+        identifier: "texture",
+        ordinal: 1,
+        resources: [optional],
+        coverage: coverage
+    )
+    #expect(try base.replacing(components: [primary, shared]).components.count == 2)
+
+    #expect(throws: BrushDefinitionValidationError.conflictingComponentResource(
+        "shared.shape"
+    )) {
+        _ = try base.replacing(components: [
+            primary,
+            base.component(
+                identifier: "texture",
+                ordinal: 1,
+                resources: [required],
+                coverage: coverage
+            ),
+        ])
     }
 }
 
@@ -796,7 +605,7 @@ func definitionRejectsInteractionHaloBeyondTheBoundedMaterialPolicy() throws {
         }
     }
     #expect(throws: BrushDefinitionValidationError.invalidCoverage(
-        field: "tipSupports"
+        field: "components.0.tipSupports"
     )) {
         _ = try BrushDefinition.stageCV2Fixture(tipSupports: [])
     }
@@ -904,7 +713,7 @@ func definitionRejectsInteractionHaloBeyondTheBoundedMaterialPolicy() throws {
         return BrushSensorProgramDefinition(outputs: outputs)
     }
 
-    let constantField = "sensorProgram.rotation.response.constant"
+    let constantField = "components.0.sensorProgram.rotation.response.constant"
     for value in [Float.nan, .infinity, -.infinity] {
         #expect(throws: BrushDefinitionValidationError.nonfinite(
             field: constantField
@@ -925,7 +734,7 @@ func definitionRejectsInteractionHaloBeyondTheBoundedMaterialPolicy() throws {
     }
 
     let exponentField =
-        "sensorProgram.rotation.response.boundedPower.exponent"
+        "components.0.sensorProgram.rotation.response.boundedPower.exponent"
     for exponent in [Float.nan, .infinity, -.infinity] {
         #expect(throws: BrushDefinitionValidationError.nonfinite(
             field: exponentField
@@ -951,6 +760,53 @@ func definitionRejectsInteractionHaloBeyondTheBoundedMaterialPolicy() throws {
 }
 
 private extension BrushDefinition {
+    func component(
+        identifier: String,
+        ordinal: UInt8,
+        resources: [BrushResourceReference]? = nil,
+        coverage: BrushCoverageDefinition? = nil,
+        material: BrushMaterialDefinition? = nil
+    ) -> BrushComponentDefinition {
+        let primary = components[0]
+        return BrushComponentDefinition(
+            identifier: BrushComponentIdentifier(identifier),
+            ordinal: ordinal,
+            resources: resources ?? primary.resources,
+            coverage: coverage ?? primary.coverage,
+            placement: primary.placement,
+            dynamics: primary.dynamics,
+            color: primary.color,
+            material: material ?? primary.material,
+            taper: primary.taper,
+            sensorProgram: primary.sensorProgram,
+            emission: primary.emission,
+            tipSupports: primary.tipSupports
+        )
+    }
+
+    func replacing(
+        components: [BrushComponentDefinition]
+    ) throws -> BrushDefinition {
+        try BrushDefinition(
+            id: id,
+            metadata: metadata,
+            capabilities: capabilities,
+            composition: composition,
+            components: components,
+            stabilization: stabilization,
+            replayMode: replayMode,
+            replayLimits: replayLimits,
+            termination: termination,
+            seedPolicy: seedPolicy,
+            limits: limits,
+            performanceIntent: performanceIntent,
+            compatibility: compatibility,
+            sensorNormalization: sensorNormalization,
+            stabilizationV2: stabilizationV2,
+            direction: direction
+        )
+    }
+
     static func stageCV2Fixture(
         normalization: BrushSensorNormalizationDefinition =
             BrushSensorNormalizationDefinition(
@@ -983,17 +839,17 @@ private extension BrushDefinition {
             terms: [.fixture()]
         )
         return try BrushDefinition(
-            v2ID: base.id,
+            id: base.id,
             metadata: base.metadata,
             capabilities: base.capabilities,
-            resources: base.resources,
-            coverage: base.coverage,
-            placement: base.placement,
-            dynamics: base.dynamics,
-            color: base.color,
-            material: base.material,
+            resources: base.components[0].resources,
+            coverage: base.components[0].coverage,
+            placement: base.components[0].placement,
+            dynamics: base.components[0].dynamics,
+            color: base.components[0].color,
+            material: base.components[0].material,
             stabilization: base.stabilization,
-            taper: base.taper,
+            taper: base.components[0].taper,
             replayMode: base.replayMode,
             replayLimits: base.replayLimits,
             termination: base.termination,
@@ -1036,7 +892,7 @@ private extension BrushDefinition {
             dynamics: BrushDynamicsDefinition(size: mapping, flow: one, opacity: one, spacing: one, rotation: zero, scatter: one, hardness: one, grain: one, offsetX: zero, offsetY: zero, hue: zero, saturation: zero, brightness: zero, secondaryColorMix: zero, noPressureNeutral: 1, randomization: .none),
             color: BrushColorBehaviorDefinition(baseAdjustment: .identity, perStampJitter: BrushColorJitter(hue: 0, saturation: 0, brightness: 0, secondaryColorMix: 0), perStrokeJitter: BrushColorJitter(hue: 0, saturation: 0, brightness: 0, secondaryColorMix: 0)),
             material: BrushMaterialDefinition(accumulation: .flow, interaction: interaction, edgeTreatment: .none, strength: 1, wetness: 0, bleedRadius: 0, softenPasses: 0, accumulationLimit: 1, interactionParameters: interaction == .none ? nil : BrushInteractionDefinition(pickup: 0, pull: 0, dilution: 0, charge: 0, persistence: 0, dirtyHaloRadius: 0)),
-            stabilization: 0, taper: .none, replayMode: .appendOnly, replayLimits: nil, seedPolicy: seedPolicy, limits: limits, performanceIntent: .realtime120, compatibility: BrushCompatibilityMetadata(nativeFeatureVersion: 1, sourceSettingKeys: sourceSettingKeys, requiredSemanticKeys: [])
+            stabilization: 0, taper: .none, replayMode: .appendOnly, replayLimits: nil, seedPolicy: seedPolicy, limits: limits, performanceIntent: .realtime120, compatibility: BrushCompatibilityMetadata(sourceSettingKeys: sourceSettingKeys, requiredSemanticKeys: [])
         )
     }
 
@@ -1053,18 +909,38 @@ private extension BrushDefinition {
         compatibility: BrushCompatibilityMetadata? = nil,
         termination: BrushTerminationDefinition? = nil
     ) throws -> BrushDefinition {
-        try BrushDefinition(
-            id: id, schemaVersion: schemaVersion, metadata: metadata,
-            capabilities: capabilities ?? self.capabilities, resources: resources ?? self.resources,
-            coverage: coverage ?? self.coverage, placement: placement ?? self.placement,
-            dynamics: dynamics ?? self.dynamics, color: color ?? self.color,
-            material: material ?? self.material,
-            stabilization: stabilization, taper: taper ?? self.taper,
+        let primary = components[0]
+        let resolvedCoverage = coverage ?? primary.coverage
+        let resolvedTipSupports = coverage == nil
+            ? primary.tipSupports
+            : resolvedCoverage.shapes.map { layer in
+                switch layer.shape {
+                case .chisel: .analyticRectangle
+                case .hardRound, .softRound, .asset: .analyticEllipse
+                }
+            }
+        return try BrushDefinition(
+            id: id, metadata: metadata,
+            capabilities: capabilities ?? self.capabilities,
+            resources: resources ?? primary.resources,
+            coverage: resolvedCoverage,
+            placement: placement ?? primary.placement,
+            dynamics: dynamics ?? primary.dynamics,
+            color: color ?? primary.color,
+            material: material ?? primary.material,
+            stabilization: stabilization,
+            taper: taper ?? primary.taper,
             replayMode: replayMode, replayLimits: replayLimits,
             termination: termination ?? self.termination,
             seedPolicy: seedPolicy, limits: limits ?? self.limits,
             performanceIntent: performanceIntent,
-            compatibility: compatibility ?? self.compatibility
+            compatibility: compatibility ?? self.compatibility,
+            sensorNormalization: sensorNormalization,
+            sensorProgram: primary.sensorProgram,
+            stabilizationV2: stabilizationV2,
+            direction: direction,
+            emission: primary.emission,
+            tipSupports: resolvedTipSupports
         )
     }
 }
@@ -1088,24 +964,6 @@ private extension BrushResponseTermDefinition {
 
 private func nativeConstant(_ value: Float) -> BrushMappingDefinition {
     BrushMappingDefinition(input: .pressure, response: .constant(value), scale: 1, offset: 0, lowerClamp: value, upperClamp: value, inverted: false, jitter: 0, missingInputValue: 1)
-}
-
-private func nativeMapping(_ mapping: BrushMapping, disabled: Float) -> BrushMappingDefinition {
-    switch mapping.response {
-    case .disabled: nativeConstant(disabled)
-    case .linear: BrushMappingDefinition(input: mapping.input, response: .linear, scale: mapping.outputMaximum - mapping.outputMinimum, offset: mapping.outputMinimum, lowerClamp: mapping.outputMinimum, upperClamp: mapping.outputMaximum, inverted: false, jitter: 0, missingInputValue: 1)
-    case .boundedPower: BrushMappingDefinition(input: mapping.input, response: .boundedPower(exponent: mapping.exponent), scale: mapping.outputMaximum - mapping.outputMinimum, offset: mapping.outputMinimum, lowerClamp: mapping.outputMinimum, upperClamp: mapping.outputMaximum, inverted: false, jitter: 0, missingInputValue: 1)
-    }
-}
-
-private func expectedMaterial(_ material: BrushMaterial) -> BrushMaterialDefinition {
-    let semantic: (BrushAccumulationMode, BrushEdgeTreatment) = switch material.family {
-    case .ink: (.flow, .none)
-    case .dry: (.flow, .dryBreakup)
-    case .glaze: (.uniformGlaze, .markerOverlap)
-    case .boundedWash: (.flow, .wetConcentration)
-    }
-    return BrushMaterialDefinition(accumulation: semantic.0, interaction: .none, edgeTreatment: semantic.1, strength: material.strength, wetness: material.wetness, bleedRadius: material.bleedRadius, softenPasses: material.softenPasses, accumulationLimit: material.accumulationLimit, interactionParameters: nil)
 }
 
 private func replacing(

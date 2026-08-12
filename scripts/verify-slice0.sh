@@ -18,7 +18,7 @@ swift test >"$test_log"
 
 xcodebuild \
   -project App/PatternSpike.xcodeproj \
-  -scheme PatternSpikeMac \
+  -scheme PatternSpikeMacHarness \
   -destination 'platform=macOS' \
   -derivedDataPath "$derived_data" \
   build \
@@ -34,7 +34,7 @@ xcodebuild \
   CODE_SIGNING_ALLOWED=NO \
   >"$pad_log"
 
-binary="$derived_data/Build/Products/Debug/PatternSpike.app/Contents/MacOS/PatternSpike"
+binary="$derived_data/Build/Products/Debug/PatternSpikeHarness.app/Contents/MacOS/PatternSpikeHarness"
 git_commit="$(git rev-parse HEAD)"
 
 if "$binary" \

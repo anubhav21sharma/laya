@@ -134,7 +134,9 @@ struct DocumentPaintRenderContextSnapshot:
     let layerIDs: [UUID]
     let tileByteBudget: Int
     let residentTileBytes: Int
+    let residentTileHighWaterBytes: Int
     let backingTileBytes: Int
+    let tileIndexEntryCount: Int
     let activeSnapshotTokenCount: Int
     let aggregateSnapshotReferenceCount: Int
     let activeTileLeaseCount: Int
@@ -694,7 +696,10 @@ final class DocumentPaintRenderContext {
             layerIDs: registrySnapshot.layers.map(\.layerID),
             tileByteBudget: registrySnapshot.tileByteBudget,
             residentTileBytes: registrySnapshot.residentTileBytes,
+            residentTileHighWaterBytes:
+                tileStoreSnapshot.residentByteHighWater,
             backingTileBytes: registrySnapshot.backingTileBytes,
+            tileIndexEntryCount: tileStoreSnapshot.tileIndexEntryCount,
             activeSnapshotTokenCount:
                 tileStoreSnapshot.activeSnapshotTokenCount,
             aggregateSnapshotReferenceCount:

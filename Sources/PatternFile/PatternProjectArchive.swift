@@ -126,7 +126,14 @@ public enum PatternProjectArchiveCodec {
     }
 
     public static func open(at url: URL) throws -> PatternProjectArchive {
-        do { return try open(Data(contentsOf: url, options: [.mappedIfSafe])) }
+        do {
+            return PatternProjectArchive(
+                try SafeArchiveIO.open(at: url, limits: limits)
+            )
+        }
+        catch let error as SafeArchiveError {
+            throw PatternProjectArchiveError(error)
+        }
         catch let error as PatternProjectArchiveError { throw error }
         catch { throw PatternProjectArchiveError.malformedArchive }
     }

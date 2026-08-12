@@ -23,65 +23,6 @@ import Testing
     )
 }
 
-@Test func versionOnePackageRemainsReadableWithoutReport() throws {
-    let base = try BrushFormatTestSupport.package()
-    let package = try BrushPackage(
-        manifest: BrushPackageManifest(
-            schemaVersion: 1,
-            resources: base.manifest.resources
-        ),
-        definition: base.definition,
-        resourceData: base.resourceData
-    )
-
-    let decoded = try BrushPackageCodec.decode(
-        BrushPackageCodec.encode(package)
-    )
-
-    #expect(decoded == package)
-    #expect(decoded.manifest.schemaVersion == 1)
-    #expect(decoded.manifest.conversionReport == nil)
-    #expect(decoded.conversionReport == nil)
-    #expect(throws: BrushPackageError.invalidManifest(
-        "schema v1 conversion report"
-    )) {
-        try BrushPackageManifest(
-            schemaVersion: 1,
-            resources: [],
-            conversionReport: BrushPackageConversionReportDescriptor(
-                report: makeConversionReport()
-            )
-        )
-    }
-}
-
-@Test func frozenStageTwoVersionOneArchiveRemainsReadable() throws {
-    let url = try #require(
-        Bundle.module.url(
-            forResource: "stage2-v1",
-            withExtension: "layabrush",
-            subdirectory: "Fixtures"
-        )
-    )
-    let data = try Data(contentsOf: url)
-    #expect(
-        BrushContentHash.sha256Hex(of: data)
-            == "12ab63f9c5588ccd7b625ebb41633221d7bc494e7f5fd21dd90f840efffbf98e"
-    )
-
-    let package = try BrushPackageCodec.decode(data)
-    #expect(package.manifest.schemaVersion == 1)
-    #expect(package.definition.schemaVersion == 1)
-    #expect(
-        try package.contentHash
-            == "5b9ff4f916d0a20dc1df61ad2b53056fe20b9950ea1e90792b96b5f64e1d0912"
-    )
-    #expect(package.definition.id.rawValue == "fixture.stage2-v1")
-    #expect(package.definition.metadata.displayName == "Stage 2 V1 Fixture")
-    #expect(package.manifest.conversionReport == nil)
-    #expect(package.conversionReport == nil)
-}
-
 @Test func reportDoesNotChangeRendererContentIdentity() throws {
     let reported = try makeReportedPackage()
     let plain = try BrushPackage(
@@ -161,7 +102,7 @@ import Testing
     }
 }
 
-@Test func codecRejectsForgedV1AndNoncanonicalReportPayloads() throws {
+@Test func codecRejectsNoncurrentManifestBeforeReportAndPreservesPayload() throws {
     let package = try makeReportedPackage()
     var entries = try BrushFormatTestSupport.archiveEntries(package)
     entries["manifest.json"] = Data(
@@ -172,9 +113,7 @@ import Testing
             )
             .utf8
     )
-    #expect(throws: BrushPackageError.invalidManifest(
-        "schema v1 conversion report"
-    )) {
+    #expect(throws: BrushPackageError.unsupportedManifestSchema(1)) {
         try BrushPackageCodec.decode(
             BrushFormatTestSupport.encodeArchive(entries)
         )
@@ -290,11 +229,11 @@ import Testing
 @Test func reportRequiresSortedExhaustiveSemanticCoverage() throws {
     let first = try makeExactEntry(
         sourceKey: "synthetic.v1.a",
-        nativeKey: "placement.baseFlow"
+        nativeKey: "components[0].placement.baseFlow"
     )
     let second = try makeExactEntry(
         sourceKey: "synthetic.v1.b",
-        nativeKey: "placement.baseSpacingFraction"
+        nativeKey: "components[0].placement.baseSpacingFraction"
     )
     #expect(throws: BrushConversionReportValidationError.unsorted(
         "report.entries"
@@ -304,7 +243,6 @@ import Testing
 
     let definition = try BrushFormatTestSupport.definition(
         compatibility: BrushCompatibilityMetadata(
-            nativeFeatureVersion: 1,
             sourceSettingKeys: ["synthetic.v1.a"],
             requiredSemanticKeys: []
         )
@@ -326,7 +264,7 @@ import Testing
 @Test func requiredUnsupportedEntriesMustMatchDefinitionGate() throws {
     let unsupported = try BrushConversionEntry(
         sourceSemanticKey: "synthetic.v1.wetMix",
-        nativeSemanticKeys: ["material.interaction"],
+        nativeSemanticKeys: ["components[0].material.interaction"],
         disposition: .unsupported,
         sourceSummary: "enabled",
         targetSummary: nil,
@@ -336,7 +274,6 @@ import Testing
     )
     let matching = try BrushFormatTestSupport.definition(
         compatibility: BrushCompatibilityMetadata(
-            nativeFeatureVersion: 1,
             sourceSettingKeys: ["synthetic.v1.wetMix"],
             requiredSemanticKeys: ["synthetic.v1.wetMix"]
         )
@@ -352,7 +289,6 @@ import Testing
 
     let missingGate = try BrushFormatTestSupport.definition(
         compatibility: BrushCompatibilityMetadata(
-            nativeFeatureVersion: 1,
             sourceSettingKeys: ["synthetic.v1.wetMix"],
             requiredSemanticKeys: []
         )
@@ -374,8 +310,18 @@ import Testing
 @Test func reportIsBoundToTargetDefinitionAndPackageContent() throws {
     let package = try makeReportedPackage()
     let report = try #require(package.conversionReport)
+    let original = package.definition.components[0].placement
     let changedDefinition = try BrushFormatTestSupport.definition(
-        metadata: BrushMetadata(displayName: "Different Brush"),
+        placement: BrushPlacementDefinition(
+            baseSpacingFraction: original.baseSpacingFraction,
+            maximumSpacingFraction: original.maximumSpacingFraction,
+            baseFlow: 0.5,
+            strokeOpacity: original.strokeOpacity,
+            baseScatterFraction: original.baseScatterFraction,
+            baseRotation: original.baseRotation,
+            baseJitterFraction: original.baseJitterFraction,
+            baseOffset: original.baseOffset
+        ),
         compatibility: package.definition.compatibility
     )
 
@@ -403,7 +349,7 @@ import Testing
         )
     let entry = try BrushConversionEntry(
         sourceSemanticKey: "synthetic.v1.shape",
-        nativeSemanticKeys: ["coverage.shapes[0]"],
+        nativeSemanticKeys: ["components[0].coverage.shapes[0]"],
         disposition: .resourceResampled,
         sourceSummary: "TIFF shape",
         targetSummary: "PNG shape",
@@ -413,7 +359,6 @@ import Testing
     )
     let definition = try BrushFormatTestSupport.definition(
         compatibility: BrushCompatibilityMetadata(
-            nativeFeatureVersion: 1,
             sourceSettingKeys: [entry.sourceSemanticKey],
             requiredSemanticKeys: []
         )
@@ -449,7 +394,6 @@ import Testing
         )
         let definition = try BrushFormatTestSupport.definition(
             compatibility: BrushCompatibilityMetadata(
-                nativeFeatureVersion: 1,
                 sourceSettingKeys: [entry.sourceSemanticKey],
                 requiredSemanticKeys: []
             )
@@ -475,7 +419,7 @@ import Testing
     )) {
         try BrushConversionEntry(
             sourceSemanticKey: "synthetic.v1.spacing",
-            nativeSemanticKeys: ["placement.baseSpacingFraction"],
+            nativeSemanticKeys: ["components[0].placement.baseSpacingFraction"],
             disposition: .approximated,
             sourceSummary: "10 percent",
             targetSummary: "0.1",
@@ -501,7 +445,7 @@ import Testing
     )) {
         try makeExactEntry(
             sourceKey: "synthetic.v1.späcing",
-            nativeKey: "placement.baseSpacingFraction"
+            nativeKey: "components[0].placement.baseSpacingFraction"
         )
     }
     #expect(throws: BrushConversionReportValidationError.unsorted(
@@ -592,7 +536,7 @@ private func makeConversionReport(
         entries: entries ?? [
             makeExactEntry(
                 sourceKey: "synthetic.v1.spacing",
-                nativeKey: "placement.baseSpacingFraction"
+                nativeKey: "components[0].placement.baseSpacingFraction"
             ),
         ],
         diagnostics: []
@@ -625,12 +569,11 @@ private func makeReportedPackage(
         ?? [
             makeExactEntry(
                 sourceKey: "synthetic.v1.spacing",
-                nativeKey: "placement.baseSpacingFraction"
+                nativeKey: "components[0].placement.baseSpacingFraction"
             ),
         ]
     let definition = try definition ?? BrushFormatTestSupport.definition(
         compatibility: BrushCompatibilityMetadata(
-            nativeFeatureVersion: 1,
             sourceSettingKeys: entries.map(\.sourceSemanticKey),
             requiredSemanticKeys: entries.compactMap {
                 $0.disposition == .unsupported

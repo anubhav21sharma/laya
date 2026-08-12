@@ -905,12 +905,12 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
                   before.inFlightCount == 0,
                   after.inFlightCount == 0,
                   !before.capturePending,
-                  !after.capturePending,
-                  let layerID = reference.layerID,
-                  let generation = reference.generation
+                  !after.capturePending
             else {
                 throw TiledRasterRevisionStoreError.pairNotReady
             }
+            let layerID = reference.layerID
+            let generation = reference.generation
             if requiresPublishedPair {
                 guard entry.lifetime == .published,
                       pair.isPublished,
@@ -1322,18 +1322,14 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
         guard entry.reference == reference else {
             throw TiledRasterRevisionStoreError.forgedRevision
         }
-        guard let expectedLayer = reference.layerID else {
-            throw TiledRasterRevisionStoreError.forgedRevision
-        }
+        let expectedLayer = reference.layerID
         guard expectedLayer == layerID else {
             throw TiledRasterRevisionStoreError.layerMismatch(
                 expected: expectedLayer,
                 actual: layerID
             )
         }
-        guard let expectedGeneration = reference.generation else {
-            throw TiledRasterRevisionStoreError.forgedRevision
-        }
+        let expectedGeneration = reference.generation
         guard expectedGeneration == generation else {
             throw TiledRasterRevisionStoreError.generationMismatch(
                 expected: expectedGeneration,

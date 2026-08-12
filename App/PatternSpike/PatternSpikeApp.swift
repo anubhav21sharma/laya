@@ -3,7 +3,9 @@ import SwiftUI
 @main
 struct PatternSpikeApp: App {
     init() {
+        #if HARNESS_BUILD
         HarnessLaunch.runIfRequested()
+        #endif
     }
 
     var body: some Scene {

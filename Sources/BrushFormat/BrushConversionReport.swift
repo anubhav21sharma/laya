@@ -891,7 +891,7 @@ private enum BrushConversionReportValidator {
 }
 
 private enum BrushNativeSemanticKeyRegistry {
-    private static let versionOneExact: Set<String> = [
+    private static let schemaThreeExact: Set<String> = [
         "capabilities",
         "resources",
         "coverage.shapes",
@@ -981,6 +981,27 @@ private enum BrushNativeSemanticKeyRegistry {
         "performanceIntent",
     ]
 
+    private static let rootExact: Set<String> = [
+        "capabilities",
+        "composition",
+        "stabilization",
+        "replayMode",
+        "replayLimits.maximumSamples",
+        "replayLimits.maximumDabs",
+        "replayLimits.maximumProjectedInstances",
+        "seedPolicy",
+        "limits.minimumDiameter",
+        "limits.maximumDiameter",
+        "limits.maximumOpacity",
+        "limits.maximumSpacingFraction",
+        "limits.maximumResourceDimension",
+        "limits.maximumResidentBytes",
+        "performanceIntent",
+    ]
+
+    private static let componentExact = schemaThreeExact
+        .subtracting(rootExact)
+
     private static let shapeSuffixes: Set<String> = [
         "",
         ".shape",
@@ -1008,30 +1029,55 @@ private enum BrushNativeSemanticKeyRegistry {
     ]
 
     static func supports(_ key: String, in definition: BrushDefinition) -> Bool {
-        guard definition.compatibility.nativeFeatureVersion == 1 else {
-            return false
-        }
-        if key.hasPrefix("material.interactionParameters"),
-           definition.material.interactionParameters == nil
-        {
-            return false
-        }
         if key.hasPrefix("replayLimits."),
            definition.replayLimits == nil
         {
             return false
         }
-        if versionOneExact.contains(key) { return true }
-        return matchesIndexed(
+        if rootExact.contains(key) { return true }
+        guard let (component, relativeKey) = componentTarget(
             key,
+            in: definition
+        ) else {
+            return false
+        }
+        if relativeKey.hasPrefix("material.interactionParameters"),
+           component.material.interactionParameters == nil
+        {
+            return false
+        }
+        if componentExact.contains(relativeKey) { return true }
+        return matchesIndexed(
+            relativeKey,
             prefix: "coverage.shapes[",
-            elementCount: definition.coverage.shapes.count,
+            elementCount: component.coverage.shapes.count,
             suffixes: shapeSuffixes
         ) || matchesIndexed(
-            key,
+            relativeKey,
             prefix: "coverage.grains[",
-            elementCount: definition.coverage.grains.count,
+            elementCount: component.coverage.grains.count,
             suffixes: grainSuffixes
+        )
+    }
+
+    private static func componentTarget(
+        _ key: String,
+        in definition: BrushDefinition
+    ) -> (BrushComponentDefinition, String)? {
+        let prefix = "components["
+        guard key.hasPrefix(prefix) else { return nil }
+        let remainder = key.dropFirst(prefix.count)
+        guard let closingBracket = remainder.firstIndex(of: "]"),
+              let index = Int(remainder[..<closingBracket]),
+              definition.components.indices.contains(index)
+        else {
+            return nil
+        }
+        let suffix = remainder[remainder.index(after: closingBracket)...]
+        guard suffix.first == "." else { return nil }
+        return (
+            definition.components[index],
+            String(suffix.dropFirst())
         )
     }
 

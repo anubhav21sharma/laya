@@ -2,10 +2,23 @@ import CShaderTypes
 import Metal
 import PatternEngine
 
-struct DepositionEncodingOutcome: Equatable, Sendable {
+package struct DepositionEncodingOutcome: Equatable, Sendable {
     let instanceCount: Int
     let uploadCount: Int
     let textureLevelRange: ClosedRange<Int>?
+    let selectedTipLevelOfDetailRange: ClosedRange<Float>?
+
+    init(
+        instanceCount: Int,
+        uploadCount: Int,
+        textureLevelRange: ClosedRange<Int>?,
+        selectedTipLevelOfDetailRange: ClosedRange<Float>? = nil
+    ) {
+        self.instanceCount = instanceCount
+        self.uploadCount = uploadCount
+        self.textureLevelRange = textureLevelRange
+        self.selectedTipLevelOfDetailRange = selectedTipLevelOfDetailRange
+    }
 }
 
 enum DepositionInstanceValidationError: Error, Equatable, Sendable {
@@ -29,19 +42,39 @@ enum DepositionEncodingError: Error, Equatable, Sendable {
     case targetIsNotRenderTarget
     case targetChangedAfterPreflight
     case missingTexture(DepositionTextureSlot)
+    case invalidComponentBindingOrdinal(expected: UInt8, actual: UInt8)
+    case componentBindingUnavailable(UInt8)
     case invalidMaterialUniform(String)
     case invalidInstance(
         identity: UInt64,
         reason: DepositionInstanceValidationError
     )
     case commandBufferUnavailable
+    case componentCoverageTextureUnavailable
     case renderEncoderUnavailable
     case preparationAlreadyFinalized
     case foreignPreparation
 }
 
 @MainActor
-final class PreparedDepositionEncoding {
+struct DepositionComponentBinding {
+    let ordinal: UInt8
+    let pipeline: DepositionPipelineBinding
+    let material: DepositionMaterialBinding
+
+    init(
+        ordinal: UInt8,
+        pipeline: DepositionPipelineBinding,
+        material: DepositionMaterialBinding
+    ) {
+        self.ordinal = ordinal
+        self.pipeline = pipeline
+        self.material = material
+    }
+}
+
+@MainActor
+package final class PreparedDepositionEncoding {
     struct Chunk {
         let lease: DabInstanceBufferPool.Lease
         let count: Int
@@ -51,10 +84,17 @@ final class PreparedDepositionEncoding {
     let instanceCount: Int
     let uploadCount: Int
     let textureLevelRange: ClosedRange<Int>?
+    let selectedTipLevelOfDetailRange: ClosedRange<Float>?
+    let bindingRunCount: Int
     private(set) var chunks: [Chunk]
 
-    fileprivate let binding: DepositionPipelineBinding
-    fileprivate let material: DepositionMaterialBinding
+    var componentOrdinals: [UInt8] {
+        records.map(\.componentOrdinal)
+    }
+
+    fileprivate let primary: DepositionComponentBinding
+    fileprivate let secondary: DepositionComponentBinding?
+    fileprivate let records: [ProjectedDepositionRecord]
     fileprivate let pool: DabInstanceBufferPool
     fileprivate let poolIdentity: ObjectIdentifier
     fileprivate let targetIdentity: ObjectIdentifier?
@@ -64,8 +104,10 @@ final class PreparedDepositionEncoding {
         instanceCount: Int,
         chunks: [Chunk],
         textureLevelRange: ClosedRange<Int>?,
-        binding: DepositionPipelineBinding,
-        material: DepositionMaterialBinding,
+        selectedTipLevelOfDetailRange: ClosedRange<Float>?,
+        primary: DepositionComponentBinding,
+        secondary: DepositionComponentBinding?,
+        records: [ProjectedDepositionRecord],
         pool: DabInstanceBufferPool,
         targetIdentity: ObjectIdentifier?
     ) {
@@ -73,11 +115,26 @@ final class PreparedDepositionEncoding {
         uploadCount = chunks.count
         self.chunks = chunks
         self.textureLevelRange = textureLevelRange
-        self.binding = binding
-        self.material = material
+        self.selectedTipLevelOfDetailRange = selectedTipLevelOfDetailRange
+        bindingRunCount = Self.bindingRunCount(records)
+        self.primary = primary
+        self.secondary = secondary
+        self.records = records
         self.pool = pool
         poolIdentity = ObjectIdentifier(pool)
         self.targetIdentity = targetIdentity
+    }
+
+    private static func bindingRunCount(
+        _ records: [ProjectedDepositionRecord]
+    ) -> Int {
+        var count = 0
+        var previous: UInt8?
+        for record in records where record.componentOrdinal != previous {
+            count += 1
+            previous = record.componentOrdinal
+        }
+        return count
     }
 
     isolated deinit {
@@ -107,7 +164,7 @@ final class PreparedDepositionEncoding {
 }
 
 @MainActor
-struct DepositionEncoder {
+package struct DepositionEncoder {
     private let instancePool: DabInstanceBufferPool
     private var frameUniforms: PatternGridFrameUniforms
     private let maximumRecordCount: Int
@@ -116,7 +173,7 @@ struct DepositionEncoder {
         (any MTLCommandBuffer, MTLRenderPassDescriptor)
             -> (any MTLRenderCommandEncoder)?
 
-    init(
+    package init(
         instancePool: DabInstanceBufferPool,
         frameUniforms: PatternGridFrameUniforms,
         maximumRecordCount: Int = GridCanvasContract.pendingCapacity,
@@ -148,29 +205,66 @@ struct DepositionEncoder {
         self.frameUniforms = frameUniforms
     }
 
-    mutating func preflight(
+    package mutating func preflight(
         records: [ProjectedDepositionRecord],
         binding: DepositionPipelineBinding,
         material: DepositionMaterialBinding
     ) throws -> PreparedDepositionEncoding {
         try preflight(
             records: records,
-            binding: binding,
-            material: material,
+            primary: DepositionComponentBinding(
+                ordinal: 0,
+                pipeline: binding,
+                material: material
+            ),
+            secondary: nil,
             target: nil
         )
     }
 
-    mutating func preflight(
+    package mutating func preflight(
         records: [ProjectedDepositionRecord],
         binding: DepositionPipelineBinding,
         material: DepositionMaterialBinding,
         target: (any MTLTexture)?
     ) throws -> PreparedDepositionEncoding {
-        try validatePipeline(binding)
-        try validateMaterial(material, for: binding.key.brush)
+        try preflight(
+            records: records,
+            primary: DepositionComponentBinding(
+                ordinal: 0,
+                pipeline: binding,
+                material: material
+            ),
+            secondary: nil,
+            target: target
+        )
+    }
+
+    mutating func preflight(
+        records: [ProjectedDepositionRecord],
+        primary: DepositionComponentBinding,
+        secondary: DepositionComponentBinding?,
+        target: (any MTLTexture)?
+    ) throws -> PreparedDepositionEncoding {
+        guard primary.ordinal == 0 else {
+            throw DepositionEncodingError.invalidComponentBindingOrdinal(
+                expected: 0,
+                actual: primary.ordinal
+            )
+        }
+        if let secondary, secondary.ordinal != 1 {
+            throw DepositionEncodingError.invalidComponentBindingOrdinal(
+                expected: 1,
+                actual: secondary.ordinal
+            )
+        }
+        try validate(primary)
+        if let secondary { try validate(secondary) }
         if let target {
-            try validateTarget(target, for: binding.key)
+            try validateTarget(target, for: primary.pipeline.key)
+            if let secondary {
+                try validateTarget(target, for: secondary.pipeline.key)
+            }
         }
         guard records.count <= maximumRecordCount else {
             throw DepositionEncodingError.recordLimitExceeded(
@@ -180,7 +274,22 @@ struct DepositionEncoder {
         }
         for record in records {
             try validate(record)
+            _ = try componentBinding(
+                ordinal: record.componentOrdinal,
+                primary: primary,
+                secondary: secondary
+            )
         }
+
+        let textureLevels = textureLevelRange(
+            primary: primary,
+            secondary: secondary
+        )
+        let selectedTipLevels = selectedTipLevelOfDetailRange(
+            records: records,
+            primary: primary,
+            secondary: secondary
+        )
 
         let uploadCount = try Self.requiredChunkCount(
             recordCount: records.count,
@@ -223,9 +332,11 @@ struct DepositionEncoder {
         return PreparedDepositionEncoding(
             instanceCount: records.count,
             chunks: chunks,
-            textureLevelRange: textureLevelRange(material),
-            binding: binding,
-            material: material,
+            textureLevelRange: textureLevels,
+            selectedTipLevelOfDetailRange: selectedTipLevels,
+            primary: primary,
+            secondary: secondary,
+            records: records,
             pool: instancePool,
             targetIdentity: target.map {
                 ObjectIdentifier($0 as AnyObject)
@@ -233,7 +344,7 @@ struct DepositionEncoder {
         )
     }
 
-    mutating func encode(
+    package mutating func encode(
         _ prepared: PreparedDepositionEncoding,
         into target: any MTLTexture,
         commandBuffer: any MTLCommandBuffer
@@ -255,7 +366,10 @@ struct DepositionEncoder {
         }
         let chunks = try prepared.takeChunks()
         do {
-            try validateTarget(target, for: prepared.binding.key)
+            try validateTarget(target, for: prepared.primary.pipeline.key)
+            if let secondary = prepared.secondary {
+                try validateTarget(target, for: secondary.pipeline.key)
+            }
             if let expected = prepared.targetIdentity,
                expected != ObjectIdentifier(target as AnyObject)
             {
@@ -272,46 +386,73 @@ struct DepositionEncoder {
             guard let color = pass.colorAttachments[0] else {
                 throw DepositionEncodingError.renderEncoderUnavailable
             }
+            guard let componentCoverage = commandBuffer.commandQueue.device
+                .makeTexture(
+                    descriptor: DepositionComponentCoverage.textureDescriptor(
+                        width: target.width,
+                        height: target.height
+                    )
+                ),
+                let coverageAttachment = pass.colorAttachments[1]
+            else {
+                throw DepositionEncodingError
+                    .componentCoverageTextureUnavailable
+            }
             color.texture = target
             color.loadAction = .load
             color.storeAction = .store
+            coverageAttachment.texture = componentCoverage
+            coverageAttachment.loadAction = .clear
+            coverageAttachment.storeAction = .dontCare
+            coverageAttachment.clearColor = MTLClearColorMake(0, 0, 0, 0)
             guard let encoder = makeRenderEncoder(commandBuffer, pass) else {
                 throw DepositionEncodingError.renderEncoderUnavailable
             }
             encoder.label = "Brush Deposition"
-            encoder.setRenderPipelineState(prepared.binding.state)
             var frame = frameUniforms
             encoder.setVertexBytes(
                 &frame,
                 length: MemoryLayout<PatternGridFrameUniforms>.stride,
                 index: Int(PatternBufferIndexGridFrameUniforms)
             )
-            var materialUniforms = prepared.material.uniforms
-            encoder.setFragmentBytes(
-                &materialUniforms,
-                length: MemoryLayout<
-                    PatternDepositionMaterialUniforms
-                >.stride,
-                index: Int(PatternBufferIndexBrushMaterial)
-            )
-            for slot in DepositionTextureSlot.allCases {
-                encoder.setFragmentTexture(
-                    prepared.material.textures[slot],
-                    index: slot.rawValue
-                )
-            }
+            var boundOrdinal: UInt8?
             for chunk in chunks {
-                encoder.setVertexBuffer(
-                    chunk.lease.buffer,
-                    offset: 0,
-                    index: Int(PatternBufferIndexDabInstances)
-                )
-                encoder.drawPrimitives(
-                    type: .triangle,
-                    vertexStart: 0,
-                    vertexCount: 6,
-                    instanceCount: chunk.count
-                )
+                var runStart = chunk.recordRange.lowerBound
+                while runStart < chunk.recordRange.upperBound {
+                    let ordinal = prepared.records[runStart]
+                        .componentOrdinal
+                    var runEnd = runStart + 1
+                    while runEnd < chunk.recordRange.upperBound,
+                          prepared.records[runEnd].componentOrdinal
+                            == ordinal
+                    {
+                        runEnd += 1
+                    }
+                    let binding = try componentBinding(
+                        ordinal: ordinal,
+                        primary: prepared.primary,
+                        secondary: prepared.secondary
+                    )
+                    if boundOrdinal != ordinal {
+                        bind(binding, to: encoder)
+                        boundOrdinal = ordinal
+                    }
+                    encoder.setVertexBuffer(
+                        chunk.lease.buffer,
+                        offset: (runStart - chunk.recordRange.lowerBound)
+                            * MemoryLayout<
+                                PatternDepositionStampInstance
+                            >.stride,
+                        index: Int(PatternBufferIndexDabInstances)
+                    )
+                    encoder.drawPrimitives(
+                        type: .triangle,
+                        vertexStart: 0,
+                        vertexCount: 6,
+                        instanceCount: runEnd - runStart
+                    )
+                    runStart = runEnd
+                }
             }
             encoder.endEncoding()
 
@@ -368,7 +509,9 @@ struct DepositionEncoder {
         DepositionEncodingOutcome(
             instanceCount: prepared.instanceCount,
             uploadCount: prepared.uploadCount,
-            textureLevelRange: prepared.textureLevelRange
+            textureLevelRange: prepared.textureLevelRange,
+            selectedTipLevelOfDetailRange:
+                prepared.selectedTipLevelOfDetailRange
         )
     }
 
@@ -391,6 +534,50 @@ struct DepositionEncoder {
         else {
             throw DepositionEncodingError.invalidPipelinePixelFormat(
                 key.colorPixelFormatRawValue
+            )
+        }
+    }
+
+    private func validate(
+        _ component: DepositionComponentBinding
+    ) throws {
+        try validatePipeline(component.pipeline)
+        try validateMaterial(
+            component.material,
+            for: component.pipeline.key.brush
+        )
+    }
+
+    private func componentBinding(
+        ordinal: UInt8,
+        primary: DepositionComponentBinding,
+        secondary: DepositionComponentBinding?
+    ) throws -> DepositionComponentBinding {
+        if ordinal == primary.ordinal { return primary }
+        if let secondary, ordinal == secondary.ordinal {
+            return secondary
+        }
+        throw DepositionEncodingError.componentBindingUnavailable(ordinal)
+    }
+
+    private func bind(
+        _ component: DepositionComponentBinding,
+        to encoder: any MTLRenderCommandEncoder
+    ) {
+        encoder.setRenderPipelineState(component.pipeline.state)
+        var materialUniforms = component.material.uniforms
+        materialUniforms.edgeParameters.y = Float(component.ordinal)
+        encoder.setFragmentBytes(
+            &materialUniforms,
+            length: MemoryLayout<
+                PatternDepositionMaterialUniforms
+            >.stride,
+            index: Int(PatternBufferIndexBrushMaterial)
+        )
+        for slot in DepositionTextureSlot.allCases {
+            encoder.setFragmentTexture(
+                component.material.textures[slot],
+                index: slot.rawValue
             )
         }
     }
@@ -426,7 +613,12 @@ struct DepositionEncoder {
                     == PatternDepositionShapeKindTexture,
                 .primaryShape
             ),
-            (key.functionConstants.usesSecondaryShape, .secondaryShape),
+            (
+                key.functionConstants.usesSecondaryShape
+                    && material.uniforms.options.w
+                        == PatternDepositionShapeKindTexture,
+                .secondaryShape
+            ),
             (key.functionConstants.usesGrain, .primaryGrain),
             (key.functionConstants.usesSecondaryGrain, .secondaryGrain),
         ]
@@ -508,13 +700,78 @@ struct DepositionEncoder {
     }
 
     private func textureLevelRange(
-        _ material: DepositionMaterialBinding
+        primary: DepositionComponentBinding,
+        secondary: DepositionComponentBinding?
     ) -> ClosedRange<Int>? {
-        let maximum = material.textures.boundSlots.compactMap {
-            material.textures[$0]?.mipmapLevelCount
-        }.max()
+        var maximum: Int?
+        func absorb(_ material: DepositionMaterialBinding) {
+            for slot in material.textures.boundSlots {
+                guard let levels = material.textures[slot]?.mipmapLevelCount
+                else { continue }
+                maximum = max(maximum ?? 0, levels)
+            }
+        }
+        absorb(primary.material)
+        if let secondary { absorb(secondary.material) }
         guard let maximum, maximum > 0 else { return nil }
         return 0...(maximum - 1)
+    }
+
+    private func selectedTipLevelOfDetailRange(
+        records: [ProjectedDepositionRecord],
+        primary: DepositionComponentBinding,
+        secondary: DepositionComponentBinding?
+    ) -> ClosedRange<Float>? {
+        guard !records.isEmpty else { return nil }
+        var minimum = Float.infinity
+        var maximum = -Float.infinity
+        for record in records {
+            let material: DepositionMaterialBinding
+            if record.componentOrdinal == primary.ordinal {
+                material = primary.material
+            } else if let secondary,
+                      record.componentOrdinal == secondary.ordinal
+            {
+                material = secondary.material
+            } else { continue }
+            let instance = record.instance
+            let primaryXAxis = SIMD2(
+                instance.tipFrame0.x,
+                instance.tipFrame0.y
+            )
+            let primaryYAxis = SIMD2(
+                instance.tipFrame0.z,
+                instance.tipFrame0.w
+            )
+            for (index, support) in material.tipSupports.enumerated() {
+                let xAxis: SIMD2<Float>
+                let yAxis: SIMD2<Float>
+                if index == 0 {
+                    xAxis = primaryXAxis
+                    yAxis = primaryYAxis
+                } else {
+                    let transform = material.uniforms.secondaryShapeTransform
+                    let cosine = cos(transform.y)
+                    let sine = sin(transform.y)
+                    xAxis = transform.x * (
+                        cosine * primaryXAxis + sine * primaryYAxis
+                    )
+                    yAxis = transform.x * (
+                        -sine * primaryXAxis + cosine * primaryYAxis
+                    )
+                }
+                guard let lod = support.levelOfDetail(
+                    projectedWidth: 2 * hypot(xAxis.x, xAxis.y),
+                    projectedHeight: 2 * hypot(yAxis.x, yAxis.y)
+                ) else {
+                    continue
+                }
+                minimum = min(minimum, lod)
+                maximum = max(maximum, lod)
+            }
+        }
+        guard minimum.isFinite, maximum.isFinite else { return nil }
+        return minimum...maximum
     }
 
     private static func isFinite(_ value: SIMD4<Float>) -> Bool {

@@ -745,6 +745,50 @@ func longStrokeSummaryUsesExactWindowsP95AndLeastSquaresSlopes() throws {
 }
 
 @Test
+func runtimeSnapshotDerivesRequiredFourHundredFrameLongStrokeMetrics() throws {
+    let strokeID = UUID()
+    var telemetry = StrokeRuntimeTelemetry(
+        traceProfile: .syntheticTest,
+        windowCapacity: BenchmarkLongStrokeMetrics.segmentCount
+    )
+    _ = try telemetry.beginSegment(strokeID: strokeID)
+    for index in 0..<BenchmarkLongStrokeMetrics.segmentCount {
+        let base = UInt64(index * 1_000)
+        try telemetry.recordFrame(StrokeRuntimeFrameSample(
+            strokeID: strokeID,
+            timestamps: .init(
+                input: base,
+                prepareStarted: base + 1,
+                prepareFinished: base + 101,
+                submitted: base + 102,
+                gpuStarted: base + 103,
+                gpuFinished: base + 203,
+                presented: base + 204
+            ),
+            targetFrameDurationNanoseconds: 1_000,
+            newLogicalDabCount: 1,
+            newProjectedDabCount: 2,
+            authoritativeReplayCount: 0,
+            predictedReplayCount: 0,
+            authoritativeQueueDepth: 0,
+            predictedQueueDepth: 0,
+            cacheHitCount: 1,
+            cacheMissCount: 0,
+            residentMemoryBytes: 1_024,
+            presentationSemantics: .offscreenCommandCompleted
+        ))
+    }
+
+    let metrics = try telemetry.snapshot.requiredLongStrokeMetrics(
+        validatesPerformance: false
+    )
+    #expect(metrics.earlyCPUP95Milliseconds == 0.0001)
+    #expect(metrics.lateCPUP95Milliseconds == 0.0001)
+    #expect(metrics.earlyDabGPUP95Milliseconds == 0.0001)
+    #expect(metrics.lateDabGPUP95Milliseconds == 0.0001)
+}
+
+@Test
 func longStrokeSummaryFailsWhenRequiredWindowsAreUnavailable() {
     #expect(throws: BenchmarkMetricError.insufficientLongStrokeFrames(399)) {
         try BenchmarkLongStrokeMetrics.measure(
@@ -761,10 +805,39 @@ func longStrokeSummaryFailsWhenMeasuredFramesEmitDifferentCounts() {
     counts[80] = 12
 
     #expect(
-        throws: BenchmarkMetricError.nonUniformProjectedInstanceCount(
-            frame: 80,
-            expected: 13,
-            actual: 12
+        throws: BenchmarkMetricError.nonStationaryProjectedInstanceWorkload(
+            early: 1_039,
+            late: 1_040
+        )
+    ) {
+        try BenchmarkLongStrokeMetrics.measure(
+            cpuMilliseconds: [Double](repeating: 0.2, count: 400),
+            dabGPUMilliseconds: [Double](repeating: 0.4, count: 400),
+            projectedInstanceCounts: counts
+        )
+    }
+}
+
+@Test
+func longStrokeSummaryAcceptsPhaseAlignedStationaryInstanceCadence() throws {
+    let counts = (0..<400).map { $0.isMultiple(of: 2) ? 0 : 2 }
+
+    _ = try BenchmarkLongStrokeMetrics.measure(
+        cpuMilliseconds: [Double](repeating: 0.2, count: 400),
+        dabGPUMilliseconds: [Double](repeating: 0.4, count: 400),
+        projectedInstanceCounts: counts
+    )
+}
+
+@Test
+func longStrokeSummaryRejectsAStationaryCadenceWithOneChangedPhase() {
+    var counts = (0..<400).map { $0.isMultiple(of: 2) ? 0 : 2 }
+    counts[80] = 1
+
+    #expect(
+        throws: BenchmarkMetricError.nonStationaryProjectedInstanceWorkload(
+            early: 81,
+            late: 80
         )
     ) {
         try BenchmarkLongStrokeMetrics.measure(
@@ -950,10 +1023,9 @@ func pendingEnvironmentPerformanceStillRejectsMalformedEvidence() {
     counts[80] = 12
 
     #expect(
-        throws: BenchmarkMetricError.nonUniformProjectedInstanceCount(
-            frame: 80,
-            expected: 13,
-            actual: 12
+        throws: BenchmarkMetricError.nonStationaryProjectedInstanceWorkload(
+            early: 1_039,
+            late: 1_040
         )
     ) {
         try BenchmarkLongStrokeMetrics.measure(

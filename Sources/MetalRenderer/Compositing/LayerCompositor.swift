@@ -257,7 +257,7 @@ enum LayerCPUCompositingReference {
     }
 }
 
-enum LayerCompositorError: Error, Equatable, Sendable {
+enum LayerCompositorError: Error, Equatable, LocalizedError, Sendable {
     case invalidLimit
     case invalidPlan
     case invalidTarget
@@ -267,6 +267,29 @@ enum LayerCompositorError: Error, Equatable, Sendable {
     case commandCreationFailed
     case commandFailed(String)
     case cleanupPending
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidLimit:
+            "Layer compositor limits are invalid."
+        case .invalidPlan:
+            "Layer compositor plan is invalid or no longer available."
+        case .invalidTarget:
+            "Layer compositor target is incompatible."
+        case .busy:
+            "Layer compositor is already processing another request."
+        case let .scratchLimitExceeded(required, maximum):
+            "Layer compositor scratch requires \(required) bytes; maximum is \(maximum) bytes."
+        case .scratchAllocationFailed:
+            "Layer compositor scratch allocation failed."
+        case .commandCreationFailed:
+            "Layer compositor could not create a Metal command."
+        case let .commandFailed(message):
+            "Layer compositor Metal command failed: \(message)"
+        case .cleanupPending:
+            "Layer compositor cleanup did not complete within its bounded retry limit."
+        }
+    }
 }
 
 struct LayerCompositorLimits: Equatable, Sendable {
@@ -293,8 +316,8 @@ struct LayerCompositorLimits: Equatable, Sendable {
     }
 
     static let production = try! Self(
-        maximumWidth: 2_048,
-        maximumHeight: 2_048,
+        maximumWidth: 4_096,
+        maximumHeight: 4_096,
         maximumScratchBytes: 96 * 1_024 * 1_024,
         maximumCleanupPasses: 8
     )
@@ -323,16 +346,18 @@ private final class LayerCompositorDisplayTerminalWaiter:
 {
     private let lock = NSLock()
     private var isTerminal = false
-    private var continuation: CheckedContinuation<Void, Never>?
+    private var continuations: [CheckedContinuation<Void, Never>] = []
 
     func recordTerminal() {
         lock.lock()
         precondition(!isTerminal)
         isTerminal = true
-        let continuation = self.continuation
-        self.continuation = nil
+        let continuations = self.continuations
+        self.continuations.removeAll(keepingCapacity: false)
         lock.unlock()
-        continuation?.resume()
+        for continuation in continuations {
+            continuation.resume()
+        }
     }
 
     func wait() async {
@@ -342,8 +367,7 @@ private final class LayerCompositorDisplayTerminalWaiter:
                 lock.unlock()
                 continuation.resume()
             } else {
-                precondition(self.continuation == nil)
-                self.continuation = continuation
+                continuations.append(continuation)
                 lock.unlock()
             }
         }
@@ -845,6 +869,11 @@ actor LayerCompositor {
     }
 
     func retryDisplayCompletion() async throws {
+        // Another actor turn may observe preparation after it claims the
+        // compositor but before it publishes a display submission. That work
+        // owns its inflight command and cleanup; a completion poll must neither
+        // spin through the cleanup budget nor cancel the soon-to-publish frame.
+        guard !isBusy || activeDisplaySubmission != nil else { return }
         reconcileDisplaySubmission()
         guard await performBoundedCleanup() else {
             throw LayerCompositorError.cleanupPending

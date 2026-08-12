@@ -624,7 +624,35 @@ private extension PatternPaintTileCodec {
     static func component(_ payload: Data, offset: Int) -> Float {
         let bits = UInt16(payload[offset])
             | UInt16(payload[offset + 1]) << 8
-        return Float(Float16(bitPattern: bits))
+        let sign = UInt32(bits & 0x8000) << 16
+        let exponent = UInt32((bits >> 10) & 0x1F)
+        var significand = UInt32(bits & 0x03FF)
+
+        if exponent == 0 {
+            guard significand != 0 else {
+                return Float(bitPattern: sign)
+            }
+            var floatExponent: UInt32 = 113
+            while significand & 0x0400 == 0 {
+                significand <<= 1
+                floatExponent -= 1
+            }
+            significand &= 0x03FF
+            return Float(
+                bitPattern: sign
+                    | (floatExponent << 23)
+                    | (significand << 13)
+            )
+        }
+
+        let floatExponent = exponent == 0x1F
+            ? UInt32(0xFF)
+            : exponent + 112
+        return Float(
+            bitPattern: sign
+                | (floatExponent << 23)
+                | (significand << 13)
+        )
     }
 
     static func semanticHash(

@@ -8,6 +8,25 @@ import Testing
 @Suite("BrushAssetDecoder")
 struct BrushAssetDecoderTests {
     @Test
+    func oneCodeQuantizationNoiseDoesNotExpandVisibleTipSupport() throws {
+        let support = try BrushTipAssetSupportCompiler.compile(
+            baseLevel: Data([
+                1, 1, 1, 1,
+                1, 255, 255, 1,
+                1, 255, 255, 1,
+                1, 1, 1, 1,
+            ]),
+            width: 4,
+            height: 4
+        )
+
+        #expect(support.bounds.minX == -0.5)
+        #expect(support.bounds.maxX == 0.5)
+        #expect(support.bounds.minY == -0.5)
+        #expect(support.bounds.maxY == 0.5)
+    }
+
+    @Test
     func exactFixtureBuildsDeterministicR8MipPyramid() throws {
         let data = try Fixture.exact4x4.data()
         let decoded = try decode(data, width: 4, height: 4, ceiling: 4)
@@ -30,6 +49,13 @@ struct BrushAssetDecoderTests {
         #expect(decoded.residentByteCount == 21)
         #expect(!decoded.wasResampled)
         #expect(decoded.diagnostics == [])
+        let tipSupport = try #require(decoded.tipSupport)
+        #expect(tipSupport.bounds.minX == -1)
+        #expect(tipSupport.bounds.maxX == 1)
+        #expect(tipSupport.bounds.minY == -1)
+        #expect(tipSupport.bounds.maxY == 1)
+        #expect(tipSupport.contour.count >= 4)
+        #expect(tipSupport.padding == .zero)
     }
 
     @Test
@@ -54,6 +80,8 @@ struct BrushAssetDecoderTests {
         #expect(small.workingWidth == 2)
         #expect(small.workingHeight == 2)
         #expect(!small.wasResampled)
+        #expect(wide.tipSupport != nil)
+        #expect(small.tipSupport != nil)
     }
 
     @Test

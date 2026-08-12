@@ -1397,6 +1397,9 @@ struct SparseTileSamplingPlanTests {
         #expect(firstHit.content === first.content)
         #expect(secondHit.content === second.content)
         #expect(first.content.key == second.content.key)
+        let cacheEvidence = cache.snapshot()
+        #expect(cacheEvidence.hitCount == 2)
+        #expect(cacheEvidence.missCount == 2)
         for lease in [first, second, firstHit, secondHit] {
             try lease.retire()
         }

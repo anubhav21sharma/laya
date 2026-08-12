@@ -15,12 +15,181 @@ struct StrokeFrameSchedulerTests {
         5_000_000_000
 
     @Test
+    func compositeComponentIdentitySurvivesGenerationAndProjection()
+        async throws
+    {
+        let generation: UInt64 = 0xC0_02
+        let scheduler = try preparationScheduler(
+            authoritativePerFrame: 128,
+            preparationClock: { 0 }
+        )
+        let program = try stageCMetalCompositeProgram(
+            id: "test.scheduler.composite-identity"
+        )
+        let finitePlain = try TilingStrategy(
+            finiteConfiguration: .plain,
+            canvasSize: PixelSize(width: 512, height: 512)
+        )
+
+        let first = try await scheduler.beginPreparedStroke(
+            generation: generation,
+            configuration: try preparationConfiguration(
+                program: program,
+                strategy: finitePlain
+            ),
+            actualSamples: [
+                stageCPreparationSample(
+                    phase: .began,
+                    x: 64,
+                    timestamp: 0
+                ),
+            ]
+        )
+        let pages = try await drainPreparedBatchRecords(
+            first,
+            scheduler: scheduler,
+            generation: generation
+        )
+        let dabs = pages.flatMap(\.logicalDabs)
+
+        #expect(dabs.map(\.ordinal) == [0, 1])
+        #expect(dabs.map(\.componentOrdinal) == [0, 1])
+        #expect(dabs.map(\.componentDabOrdinal) == [0, 0])
+        #expect(pages.contains { $0.authoritativeInstanceCount > 0 })
+        #expect(pages.allSatisfy { $0.authoritativeInstanceCount <= 128 })
+        #expect(pages.flatMap(\.dirtyRegions).count >= dabs.count)
+        await scheduler.cancel(generation: generation)
+    }
+
+    @Test
+    func compositeProjectionSharesExistingPendingAndWorkCeilings()
+        async throws
+    {
+        let generation: UInt64 = 0xC0_03
+        let ceiling = 2
+        let scheduler = StrokeFrameScheduler(
+            budget: try frameBudget(
+                authoritativePerFrame: ceiling,
+                predictedPerFrame: ceiling,
+                authoritativeCapacity: ceiling,
+                predictedCapacity: ceiling
+            ),
+            targetFramesPerSecond: 120,
+            preparationClock: { 0 }
+        )
+        let program = try stageCMetalCompositeProgram(
+            id: "test.scheduler.composite-aggregate-ceilings"
+        )
+        let strategy = try TilingStrategy(
+            finiteConfiguration: .plain,
+            canvasSize: PixelSize(width: 512, height: 512)
+        )
+
+        let first = try await scheduler.beginPreparedStroke(
+            generation: generation,
+            configuration: try preparationConfiguration(
+                program: program,
+                strategy: strategy
+            ),
+            actualSamples: [stageCPreparationSample(
+                phase: .began,
+                x: 128,
+                y: 192,
+                timestamp: 0
+            )]
+        )
+        let pages = try await drainPreparedBatchRecords(
+            first,
+            scheduler: scheduler,
+            generation: generation
+        )
+        let logicalPages = pages.filter { !$0.logicalDabs.isEmpty }
+
+        #expect(logicalPages.flatMap(\.logicalDabs).map(\.componentOrdinal)
+            == [0, 1])
+        #expect(logicalPages.map(\.authoritativeInstanceCount)
+            == [ceiling, ceiling])
+        #expect(logicalPages.allSatisfy {
+            $0.authoritativeInstanceCount <= ceiling
+                && $0.dirtyRegions.count <= ceiling
+        })
+        let snapshot = await scheduler.snapshot
+        #expect(snapshot.maximumPreparationWorkUnitsPerFrame
+            <= LogicalDabBatch.maximumDabCount)
+        await scheduler.cancel(generation: generation)
+    }
+
+    @Test
+    func compositePredictionSharesOneReplayDabCeiling() async throws {
+        let generation: UInt64 = 0xC0_04
+        let limits = BrushReplayLimits(
+            maximumSamples: 4,
+            maximumDabs: 1,
+            maximumProjectedInstances: 8
+        )
+        let scheduler = try preparationScheduler(
+            authoritativePerFrame: 128,
+            preparationClock: { 0 }
+        )
+        let program = try stageCMetalCompositeProgram(
+            id: "test.scheduler.composite-replay-dab-ceiling",
+            replayMode: .replayTail,
+            replayLimits: limits
+        )
+        let configuration = try preparationConfiguration(program: program)
+        let began = try await scheduler.beginPreparedStroke(
+            generation: generation,
+            configuration: configuration,
+            actualSamples: [stageCPreparationSample(
+                phase: .began,
+                x: 64,
+                timestamp: 0
+            )]
+        )
+        try await acknowledgeAll(
+            began,
+            scheduler: scheduler,
+            generation: generation
+        )
+        let beforePrediction = await scheduler
+            .transientPreparationSnapshotForTesting
+
+        let prediction = try await scheduler.replacePreparedPrediction(
+            generation: generation,
+            samples: [stageCPreparationSample(
+                phase: .moved,
+                x: 96,
+                timestamp: 1,
+                kind: .predicted
+            )]
+        )
+        let snapshot = await scheduler
+            .transientPreparationSnapshotForTesting
+
+        #expect(
+            prediction.predictionAdmission?.overload
+                .contains(.logicalDabs) == true
+        )
+        #expect(prediction.logicalDabs.isEmpty)
+        #expect(snapshot.predictedDabs.isEmpty)
+        #expect(snapshot.actualDabs == beforePrediction.actualDabs)
+        #expect(snapshot.actualSamples == beforePrediction.actualSamples)
+        try await acknowledgeAll(
+            prediction,
+            scheduler: scheduler,
+            generation: generation
+        )
+        await scheduler.cancel(generation: generation)
+    }
+
+    @Test
     func stageCCandidatePagesAreCadenceIndependentAtBoundaries()
         async throws
     {
         let candidateCounts = [511, 512, 513, 1_025]
         let displaySchedules = [60, 120, 1_000]
         var baselineByCount: [Int: [LogicalDab]] = [:]
+        var baselinePageCountsByCount: [Int: [Int]] = [:]
 
         for candidateCount in candidateCounts {
             for framesPerSecond in displaySchedules {
@@ -75,7 +244,7 @@ struct StrokeFrameSchedulerTests {
                 let logicalPages = pages.filter { !$0.isEmpty }
                 #expect(
                     logicalPages.allSatisfy {
-                        $0.count <= LogicalDabBatch.maximumDabCount
+                        $0.count <= LogicalDabBatch.maximumDabCount / 2
                     }
                 )
                 let dabs = logicalPages.flatMap { $0 }
@@ -84,28 +253,22 @@ struct StrokeFrameSchedulerTests {
                     dabs.map(\.ordinal)
                         == Array(1...UInt64(candidateCount))
                 )
-                if candidateCount <= LogicalDabBatch.maximumDabCount {
-                    #expect(logicalPages.count == 1)
+                let pageCounts = logicalPages.map(\.count)
+                if let baseline = baselinePageCountsByCount[candidateCount] {
+                    #expect(pageCounts == baseline)
                 } else {
-                    #expect(
-                        logicalPages.map(\.count)
-                            == stride(
-                                from: 0,
-                                to: candidateCount,
-                                by: LogicalDabBatch.maximumDabCount
-                            ).map {
-                                min(
-                                    LogicalDabBatch.maximumDabCount,
-                                    candidateCount - $0
-                                )
-                            }
-                    )
+                    baselinePageCountsByCount[candidateCount] = pageCounts
                 }
                 if let baseline = baselineByCount[candidateCount] {
                     #expect(dabs == baseline)
                 } else {
                     baselineByCount[candidateCount] = dabs
                 }
+                #expect(
+                    (await scheduler.snapshot)
+                        .maximumPreparationWorkUnitsPerFrame
+                        <= LogicalDabBatch.maximumDabCount
+                )
                 await scheduler.cancel(generation: generation)
             }
         }
@@ -158,7 +321,15 @@ struct StrokeFrameSchedulerTests {
             scheduler: scheduler,
             generation: generation
         )
-        #expect(firstPage.logicalDabs.count == 512)
+        #expect(!firstPage.logicalDabs.isEmpty)
+        #expect(
+            firstPage.logicalDabs.count
+                <= LogicalDabBatch.maximumDabCount / 2
+        )
+        #expect(
+            (await scheduler.snapshot).maximumPreparationWorkUnitsPerFrame
+                <= LogicalDabBatch.maximumDabCount
+        )
         let token = try #require(firstPage.frameToken)
 
         let mailbox = StrokePreparationMailbox(
@@ -321,7 +492,9 @@ struct StrokeFrameSchedulerTests {
             generation: generation
         )
         let logicalPages = pages.filter { !$0.isEmpty }
-        #expect(logicalPages.map(\.count) == [512, 1])
+        #expect(logicalPages.allSatisfy {
+            $0.count <= LogicalDabBatch.maximumDabCount / 2
+        })
         #expect(logicalPages.flatMap { $0 }.map(\.ordinal)
             == Array(1...UInt64(513)))
         #expect(
@@ -1054,12 +1227,11 @@ struct StrokeFrameSchedulerTests {
             generation: generation
         )
         #expect(pages.count > 3)
-        let maximumClockReadsPerZeroDabSample = 3
-        let minimumSamplesPerDeadlinePage = max(
-            1,
-            Int(1_500_000 / clockStep)
-                / maximumClockReadsPerZeroDabSample
-        )
+        // Component cursor transitions are now charged work, even when they
+        // emit no dab. The deadline may therefore observe several resumable
+        // cursor steps per sample, but must still batch a meaningful input
+        // prefix instead of degenerating to one acknowledgement per sample.
+        let minimumSamplesPerDeadlinePage = 8
         let maximumDeadlinePages =
             (stationary.count + minimumSamplesPerDeadlinePage - 1)
                 / minimumSamplesPerDeadlinePage
@@ -1580,14 +1752,13 @@ struct StrokeFrameSchedulerTests {
                 current = nil
             }
         }
-        #expect(
-            acceptedPages.map(\.count)
-                == Array(repeating: 512, count: 8)
-        )
-        #expect(
-            acceptedPages.flatMap { $0 }.map(\.ordinal)
-                == Array(1...UInt64(4_096))
-        )
+        #expect(acceptedPages.allSatisfy {
+            $0.count <= LogicalDabBatch.maximumDabCount / 2
+        })
+        let accepted = acceptedPages.flatMap { $0 }
+        #expect(accepted.map(\.ordinal)
+            == Array(1...UInt64(accepted.count)))
+        #expect(accepted.count < 4_096)
         #expect(
             failure == .scheduler(
                 .generatedDabCapacityExceeded(
@@ -4651,8 +4822,7 @@ extension StrokeFrameSchedulerTests {
                 generation: generation
             ),
             maximumRecordCount: 4_096,
-            maximumTileReferenceCount: 16_384,
-            pipeline: setup.tilePipeline
+            maximumTileReferenceCount: 16_384
         )
         let scheduler = StrokeFrameScheduler(
             budget: try frameBudget(
@@ -5163,7 +5333,7 @@ extension StrokeFrameSchedulerTests {
         return (
             device,
             compiled.renderState,
-            compiled.depositionPipeline
+            compiled.primaryComponent.depositionPipeline
         )
     }
 
@@ -5186,8 +5356,7 @@ extension StrokeFrameSchedulerTests {
                 generation: generation
             ),
             maximumRecordCount: 4_096,
-            maximumTileReferenceCount: 16_384,
-            pipeline: pipeline
+            maximumTileReferenceCount: 16_384
         )
     }
 

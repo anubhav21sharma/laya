@@ -17,7 +17,7 @@ public enum BrushPackageError: Error, Equatable, Sendable {
     case invalidManifest(String)
     case invalidDefinition
     case unsupportedManifestSchema(UInt16)
-    case unsupportedDefinitionSchema
+    case unsupportedDefinitionSchema(UInt16)
     case invalidResource(id: String, reason: String)
     case missingResource(String)
     case unexpectedEntry(String)
@@ -247,7 +247,6 @@ public struct BrushPackageResource: Codable, Equatable, Sendable {
 }
 
 public struct BrushPackageManifest: Codable, Equatable, Sendable {
-    public static let minimumSupportedVersion: UInt16 = 1
     public static let currentVersion: UInt16 = 2
 
     public let schemaVersion: UInt16
@@ -257,24 +256,11 @@ public struct BrushPackageManifest: Codable, Equatable, Sendable {
     public let conversionReport: BrushPackageConversionReportDescriptor?
 
     public init(
-        schemaVersion: UInt16? = nil,
         definitionPath: String = "definition.json",
         resources: [BrushPackageResource],
         provenance: BrushPackageProvenance? = nil,
         conversionReport: BrushPackageConversionReportDescriptor? = nil
     ) throws {
-        let schemaVersion = schemaVersion
-            ?? (conversionReport == nil ? Self.minimumSupportedVersion : 2)
-        guard (Self.minimumSupportedVersion...Self.currentVersion)
-            .contains(schemaVersion)
-        else {
-            throw BrushFormatError.unsupportedManifestSchema(schemaVersion)
-        }
-        guard schemaVersion >= 2 || conversionReport == nil else {
-            throw BrushFormatError.invalidManifest(
-                "schema v1 conversion report"
-            )
-        }
         guard definitionPath == "definition.json" else {
             throw BrushFormatError.invalidManifest("definitionPath")
         }
@@ -291,7 +277,7 @@ public struct BrushPackageManifest: Codable, Equatable, Sendable {
         guard sorted.filter({ $0.kind == .preview }).count <= 1 else {
             throw BrushFormatError.invalidManifest("multiple previews")
         }
-        self.schemaVersion = schemaVersion
+        self.schemaVersion = Self.currentVersion
         self.definitionPath = definitionPath
         self.resources = sorted
         self.provenance = provenance
@@ -307,9 +293,14 @@ public struct BrushPackageManifest: Codable, Equatable, Sendable {
     }
 
     public init(from decoder: Decoder) throws {
+        let envelope = try BrushPackageManifestVersionEnvelope(from: decoder)
+        guard envelope.schemaVersion == Self.currentVersion else {
+            throw BrushFormatError.unsupportedManifestSchema(
+                envelope.schemaVersion
+            )
+        }
         let container = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(
-            schemaVersion: container.decode(UInt16.self, forKey: .schemaVersion),
             definitionPath: container.decode(String.self, forKey: .definitionPath),
             resources: container.decode([BrushPackageResource].self, forKey: .resources),
             provenance: container.decodeIfPresent(
@@ -322,4 +313,8 @@ public struct BrushPackageManifest: Codable, Equatable, Sendable {
             )
         )
     }
+}
+
+private struct BrushPackageManifestVersionEnvelope: Decodable {
+    let schemaVersion: UInt16
 }

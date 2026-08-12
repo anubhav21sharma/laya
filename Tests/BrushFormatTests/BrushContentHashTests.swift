@@ -6,98 +6,27 @@ import Testing
 @Suite("BrushContentHashTests")
 struct BrushContentHashTests {
     @Test
-    func frozenSchemaV1FixtureCompilesAndEmitsPinnedLogicalTrace() throws {
-        let url = try #require(Bundle.module.url(
-            forResource: "stage2-v1",
-            withExtension: "layabrush",
-            subdirectory: "Fixtures"
-        ))
-        let package = try BrushPackageCodec.decode(Data(contentsOf: url))
-        let program = try BrushProgramCompiler.compile(package.definition)
-        var generator = BrushStrokeGenerator(
-            program: program,
-            nominalDiameter: 20,
-            color: .black,
-            seed: 41
-        )
-        let viewport = ViewportTransform(
-            drawableSize: PatternSize(width: 64, height: 64),
-            worldCenter: WorldPoint(x: 32, y: 32)
-        )
-        var input = BrushInputDeriver()
-        func sample(
-            x: Float,
-            pressure: Float,
-            timestamp: TimeInterval,
-            phase: StrokePhase
-        ) -> WorldStrokeSample {
-            input.derive(
-                StrokeSample(
-                    position: ScreenPoint(x: x, y: 32),
-                    pressure: pressure,
-                    timestamp: timestamp,
-                    phase: phase,
-                    source: .pencil,
-                    capabilities: [.pressure]
-                ),
-                viewport: viewport
-            )
-        }
-        var dabs: [DabAttributes] = []
-        generator.begin(sample(
-            x: 8, pressure: 0.25, timestamp: 0, phase: .began
-        )) { dabs.append($0) }
-        generator.append(sample(
-            x: 32, pressure: 0.75, timestamp: 0.5, phase: .moved
-        )) { dabs.append($0) }
-        generator.finish(sample(
-            x: 56, pressure: 1, timestamp: 1, phase: .ended
-        )) { dabs.append($0) }
-
-        let trace = dabs.map {
-            [
-                String($0.position.x.bitPattern),
-                String($0.position.y.bitPattern),
-                String($0.diameter.bitPattern),
-                String($0.spacing.bitPattern),
-                String($0.flow.bitPattern),
-                String($0.strokeOpacity.bitPattern),
-                String($0.ordinal),
-            ].joined(separator: ":")
-        }.joined(separator: "|")
-        let digest = BrushContentHash.sha256Hex(of: Data(trace.utf8))
-
-        #expect(dabs.count == 21)
-        #expect(
-            digest
-                == "40c4f8b7acfe363ac984f7a40df9bb7792ce24d497f26d69ec97944fcb1b2f86"
-        )
-        #expect(program.stageC == nil)
-    }
-
-    @Test
-    func schemaV2PackageRoundTripsWithHashSchemaThree() throws {
-        let package = try BrushFormatTestSupport.v2Package()
+    func schemaThreePackageRoundTripsWithHashWriterFour() throws {
+        let package = try BrushFormatTestSupport.currentPackage()
         let archive = try BrushPackageCodec.encode(package)
         let decoded = try BrushPackageCodec.decode(archive)
 
         #expect(decoded == package)
         #expect(decoded.manifest.schemaVersion == 2)
-        #expect(decoded.definition.schemaVersion == 2)
-        #expect(BrushContentHash.legacySchemaVersion == 2)
-        #expect(BrushContentHash.currentSchemaVersion == 3)
+        #expect(decoded.definition.schemaVersion == 3)
+        #expect(BrushContentHash.currentSchemaVersion == 4)
         let digest = try decoded.contentHash
         #expect(
             digest
-                == "1b50b2ccc39c1a4fd01f897331948eae020bef0aecfe20a814102c6198dbf05c"
+                == "16cc347463c824ecb491b2b1d6ff923134e4435a4283dabb5da9b2e4acf4f64f"
         )
     }
 
     @Test
-    func schemaV2DigestTracksEveryStageCSemanticGroup() throws {
-        let baseline = try BrushFormatTestSupport.v2Package().contentHash
+    func schemaThreeDigestTracksEveryStageCSemanticGroup() throws {
+        let baseline = try BrushFormatTestSupport.currentPackage().contentHash
         let changed = try [
-            BrushFormatTestSupport.v2Package(
+            BrushFormatTestSupport.currentPackage(
                 sensorNormalization: BrushSensorNormalizationDefinition(
                     fullScaleWorldVelocity: 2_001,
                     minimumVelocityDeltaTime: 0.001,
@@ -105,32 +34,32 @@ struct BrushContentHashTests {
                     fullScaleStrokeDistanceInDiameters: 32
                 )
             ),
-            BrushFormatTestSupport.v2Package(
-                sensorProgram: BrushFormatTestSupport.v2SensorProgram(
+            BrushFormatTestSupport.currentPackage(
+                sensorProgram: BrushFormatTestSupport.currentSensorProgram(
                     rotationTerms: [
-                        BrushFormatTestSupport.v2Term(
+                        BrushFormatTestSupport.currentTerm(
                             input: .direction,
                             responseOffset: 0.25
                         ),
                     ]
                 )
             ),
-            BrushFormatTestSupport.v2Package(
+            BrushFormatTestSupport.currentPackage(
                 stabilizationV2: .delayed(distance: 8)
             ),
-            BrushFormatTestSupport.v2Package(
+            BrushFormatTestSupport.currentPackage(
                 direction: BrushDirectionDefinition(
                     maximumAngularStep: .pi / 5,
                     stationaryDirection: 0
                 )
             ),
-            BrushFormatTestSupport.v2Package(
+            BrushFormatTestSupport.currentPackage(
                 emission: BrushEmissionDefinition(
                     mode: .distanceAndTime,
                     timeInterval: 1.0 / 100
                 )
             ),
-            BrushFormatTestSupport.v2Package(
+            BrushFormatTestSupport.currentPackage(
                 tipSupports: [.analyticRectangle]
             ),
         ]
@@ -140,36 +69,36 @@ struct BrushContentHashTests {
     }
 
     @Test
-    func schemaV2DigestTracksEveryBehaviorBearingStageCField() throws {
-        let baseline = try BrushFormatTestSupport.v2Package().contentHash
+    func schemaThreeDigestTracksEveryBehaviorBearingStageCField() throws {
+        let baseline = try BrushFormatTestSupport.currentPackage().contentHash
         func hash(term: BrushResponseTermDefinition) throws -> String {
-            try BrushFormatTestSupport.v2Package(
-                sensorProgram: BrushFormatTestSupport.v2SensorProgram(
+            try BrushFormatTestSupport.currentPackage(
+                sensorProgram: BrushFormatTestSupport.currentSensorProgram(
                     rotationTerms: [term]
                 )
             ).contentHash
         }
         let termVariants = [
-            BrushFormatTestSupport.v2Term(input: .pressure),
-            BrushFormatTestSupport.v2Term(
+            BrushFormatTestSupport.currentTerm(input: .pressure),
+            BrushFormatTestSupport.currentTerm(
                 input: .pressure,
                 response: .boundedPower(exponent: 2)
             ),
-            BrushFormatTestSupport.v2Term(inputInverted: true),
-            BrushFormatTestSupport.v2Term(missingInputValue: 0.5),
-            BrushFormatTestSupport.v2Term(responseScale: 2),
-            BrushFormatTestSupport.v2Term(responseOffset: 0.25),
-            BrushFormatTestSupport.v2Term(responseLowerClamp: -2),
-            BrushFormatTestSupport.v2Term(responseUpperClamp: 2),
-            BrushFormatTestSupport.v2Term(jitter: 0.1),
-            BrushFormatTestSupport.v2Term(operation: .replace),
+            BrushFormatTestSupport.currentTerm(inputInverted: true),
+            BrushFormatTestSupport.currentTerm(missingInputValue: 0.5),
+            BrushFormatTestSupport.currentTerm(responseScale: 2),
+            BrushFormatTestSupport.currentTerm(responseOffset: 0.25),
+            BrushFormatTestSupport.currentTerm(responseLowerClamp: -2),
+            BrushFormatTestSupport.currentTerm(responseUpperClamp: 2),
+            BrushFormatTestSupport.currentTerm(jitter: 0.1),
+            BrushFormatTestSupport.currentTerm(operation: .replace),
         ]
         for term in termVariants {
             #expect(try hash(term: term) != baseline)
         }
 
         for output in BrushDynamicOutput.allCases {
-            var outputs = BrushFormatTestSupport.v2SensorProgram().outputs
+            var outputs = BrushFormatTestSupport.currentSensorProgram().outputs
             let original = try #require(outputs[output])
             let changedBase: Float = output == .opacity
                 ? original.baseValue - 0.125
@@ -178,7 +107,7 @@ struct BrushContentHashTests {
                 baseValue: changedBase,
                 terms: original.terms
             )
-            let changed = try BrushFormatTestSupport.v2Package(
+            let changed = try BrushFormatTestSupport.currentPackage(
                 sensorProgram: BrushSensorProgramDefinition(outputs: outputs)
             )
             #expect(try changed.contentHash != baseline)
@@ -211,29 +140,29 @@ struct BrushContentHashTests {
             ),
         ]
         for normalization in normalizationVariants {
-            let changed = try BrushFormatTestSupport.v2Package(
+            let changed = try BrushFormatTestSupport.currentPackage(
                 sensorNormalization: normalization
             )
             #expect(try changed.contentHash != baseline)
         }
 
         let remaining = try [
-            BrushFormatTestSupport.v2Package(
+            BrushFormatTestSupport.currentPackage(
                 stabilizationV2: .weightedWindow(distance: 9)
             ),
-            BrushFormatTestSupport.v2Package(
+            BrushFormatTestSupport.currentPackage(
                 direction: BrushDirectionDefinition(
                     maximumAngularStep: .pi / 6,
                     stationaryDirection: 0.25
                 )
             ),
-            BrushFormatTestSupport.v2Package(
+            BrushFormatTestSupport.currentPackage(
                 emission: BrushEmissionDefinition(
                     mode: .time,
                     timeInterval: 1.0 / 120
                 )
             ),
-            BrushFormatTestSupport.v2Package(
+            BrushFormatTestSupport.currentPackage(
                 tipSupports: [try .normalizedBounds(
                     minX: -0.75, maxX: 0.75, minY: -0.5, maxY: 0.5
                 )]
@@ -246,20 +175,20 @@ struct BrushContentHashTests {
 
     @Test
     func orderedTermsChangeIdentityButDictionaryInsertionOrderDoesNot() throws {
-        let a = BrushFormatTestSupport.v2Term(input: .pressure)
-        let b = BrushFormatTestSupport.v2Term(input: .speed)
-        let ordered = try BrushFormatTestSupport.v2Package(
-            sensorProgram: BrushFormatTestSupport.v2SensorProgram(
+        let a = BrushFormatTestSupport.currentTerm(input: .pressure)
+        let b = BrushFormatTestSupport.currentTerm(input: .speed)
+        let ordered = try BrushFormatTestSupport.currentPackage(
+            sensorProgram: BrushFormatTestSupport.currentSensorProgram(
                 rotationTerms: [a, b]
             )
         )
-        let reordered = try BrushFormatTestSupport.v2Package(
-            sensorProgram: BrushFormatTestSupport.v2SensorProgram(
+        let reordered = try BrushFormatTestSupport.currentPackage(
+            sensorProgram: BrushFormatTestSupport.currentSensorProgram(
                 rotationTerms: [b, a]
             )
         )
-        let reverseDictionary = try BrushFormatTestSupport.v2Package(
-            sensorProgram: BrushFormatTestSupport.v2SensorProgram(
+        let reverseDictionary = try BrushFormatTestSupport.currentPackage(
+            sensorProgram: BrushFormatTestSupport.currentSensorProgram(
                 reversedInsertion: true,
                 rotationTerms: [a, b]
             )
@@ -270,28 +199,9 @@ struct BrushContentHashTests {
     }
 
     @Test
-    func manifestVersionAndProvenanceCannotSelectCanonicalWriter() throws {
-        let base = try BrushFormatTestSupport.package()
-        let legacyManifest = try BrushPackageManifest(
-            schemaVersion: 1,
-            resources: base.manifest.resources
-        )
-        let legacyManifestPackage = try BrushPackage(
-            manifest: legacyManifest,
-            definition: base.definition,
-            resourceData: base.resourceData
-        )
-
-        #expect(try legacyManifestPackage.contentHash == base.contentHash)
-        #expect(base.definition.schemaVersion == 1)
-        #expect(try base.contentHash ==
-            "ed1f9b8e914d9dc597b45ba9b03baccf57194eb2179776f743bdd2d9d0a872fb")
-    }
-
-    @Test
-    func schemaV2DisplayAndProvenanceMetadataAreNonsemantic() throws {
-        let base = try BrushFormatTestSupport.v2Package()
-        let changed = try BrushFormatTestSupport.v2Package(
+    func schemaThreeDisplayAndProvenanceMetadataAreNonsemantic() throws {
+        let base = try BrushFormatTestSupport.currentPackage()
+        let changed = try BrushFormatTestSupport.currentPackage(
             metadata: BrushMetadata(
                 displayName: "Renamed",
                 author: "Different Author",
@@ -303,31 +213,17 @@ struct BrushContentHashTests {
     }
 
     @Test
-    func schemaV2SourceSettingKeysAreProvenanceOnly() throws {
-        let base = try BrushFormatTestSupport.v2Package()
-        let changed = try BrushFormatTestSupport.v2Package(
+    func schemaThreeSourceSettingKeysAreProvenanceOnly() throws {
+        let base = try BrushFormatTestSupport.currentPackage()
+        let changed = try BrushFormatTestSupport.currentPackage(
             compatibility: BrushCompatibilityMetadata(
-                nativeFeatureVersion: base.definition.compatibility
-                    .nativeFeatureVersion,
                 sourceSettingKeys: ["converter.only", "source.setting"],
                 requiredSemanticKeys: base.definition.compatibility
                     .requiredSemanticKeys
             )
         )
-        let changedFeatureVersion = try BrushFormatTestSupport.v2Package(
+        let changedRequiredSemantics = try BrushFormatTestSupport.currentPackage(
             compatibility: BrushCompatibilityMetadata(
-                nativeFeatureVersion: base.definition.compatibility
-                    .nativeFeatureVersion + 1,
-                sourceSettingKeys: base.definition.compatibility
-                    .sourceSettingKeys,
-                requiredSemanticKeys: base.definition.compatibility
-                    .requiredSemanticKeys
-            )
-        )
-        let changedRequiredSemantics = try BrushFormatTestSupport.v2Package(
-            compatibility: BrushCompatibilityMetadata(
-                nativeFeatureVersion: base.definition.compatibility
-                    .nativeFeatureVersion,
                 sourceSettingKeys: base.definition.compatibility
                     .sourceSettingKeys,
                 requiredSemanticKeys: ["required.runtime.semantic"]
@@ -335,7 +231,131 @@ struct BrushContentHashTests {
         )
 
         #expect(try changed.contentHash == base.contentHash)
-        #expect(try changedFeatureVersion.contentHash != base.contentHash)
         #expect(try changedRequiredSemantics.contentHash != base.contentHash)
     }
+
+    @Test
+    func schemaThreeSingleAndCompositeHashesArePinnedToWriterFour() throws {
+        let single = try BrushFormatTestSupport.package()
+        let composite = try compositeHashPackage(reversed: false)
+
+        #expect(BrushContentHash.currentSchemaVersion == 4)
+        #expect(single.manifest.schemaVersion == 2)
+        #expect(single.definition.schemaVersion == 3)
+        let singleHash = try single.contentHash
+        let compositeHash = try composite.contentHash
+        #expect(
+            singleHash
+                == "16cc347463c824ecb491b2b1d6ff923134e4435a4283dabb5da9b2e4acf4f64f"
+        )
+        #expect(
+            compositeHash
+                == "78bb1ac8727e7b573b44be9a725766c84d61d296349193041a450f66f4343849"
+        )
+    }
+
+    @Test
+    func componentOrderIsSemanticAndSharedResourceBytesAreHashedOnce()
+        throws
+    {
+        let ordered = try compositeHashPackage(reversed: false)
+        let reversed = try compositeHashPackage(reversed: true)
+        #expect(ordered.manifest.resources.count == 1)
+        #expect(ordered.definition.components.count == 2)
+        #expect(
+            ordered.definition.components[0].resources
+                == ordered.definition.components[1].resources
+        )
+        #expect(try ordered.contentHash != reversed.contentHash)
+        #expect(
+            try BrushPackageCodec.decode(BrushPackageCodec.encode(ordered))
+                == ordered
+        )
+    }
+}
+
+private func compositeHashPackage(reversed: Bool) throws -> BrushPackage {
+    let package = try BrushFormatTestSupport.package()
+    let base = package.definition
+    let inherited = base.components[0]
+    func component(
+        identifier: String,
+        ordinal: UInt8,
+        offset: SIMD2<Float>,
+        scale: Float
+    ) -> BrushComponentDefinition {
+        BrushComponentDefinition(
+            identifier: BrushComponentIdentifier(identifier),
+            ordinal: ordinal,
+            resources: inherited.resources,
+            coverage: BrushCoverageDefinition(
+                shapes: [BrushShapeLayerDefinition(
+                    shape: inherited.coverage.shapes[0].shape,
+                    combination: .replace,
+                    scale: scale,
+                    rotation: 0,
+                    offset: .zero
+                )],
+                grains: inherited.coverage.grains,
+                baseHardness: inherited.coverage.baseHardness,
+                aspectRatio: inherited.coverage.aspectRatio,
+                tipThreshold: inherited.coverage.tipThreshold,
+                antialiasing: inherited.coverage.antialiasing
+            ),
+            placement: BrushPlacementDefinition(
+                baseSpacingFraction: inherited.placement.baseSpacingFraction,
+                maximumSpacingFraction:
+                    inherited.placement.maximumSpacingFraction,
+                baseFlow: inherited.placement.baseFlow,
+                strokeOpacity: inherited.placement.strokeOpacity,
+                baseScatterFraction:
+                    inherited.placement.baseScatterFraction,
+                baseRotation: inherited.placement.baseRotation,
+                baseJitterFraction: inherited.placement.baseJitterFraction,
+                baseOffset: offset
+            ),
+            dynamics: inherited.dynamics,
+            color: inherited.color,
+            material: inherited.material,
+            taper: inherited.taper,
+            sensorProgram: inherited.sensorProgram,
+            emission: inherited.emission,
+            tipSupports: inherited.tipSupports
+        )
+    }
+    let first = component(
+        identifier: reversed ? "texture" : "primary",
+        ordinal: 0,
+        offset: reversed ? SIMD2(8, 0) : .zero,
+        scale: reversed ? 0.5 : 1
+    )
+    let second = component(
+        identifier: reversed ? "primary" : "texture",
+        ordinal: 1,
+        offset: reversed ? .zero : SIMD2(8, 0),
+        scale: reversed ? 1 : 0.5
+    )
+    let definition = try BrushDefinition(
+        id: base.id,
+        metadata: base.metadata,
+        capabilities: base.capabilities,
+        composition: .orderedSourceOver,
+        components: [first, second],
+        stabilization: base.stabilization,
+        replayMode: base.replayMode,
+        replayLimits: base.replayLimits,
+        termination: base.termination,
+        seedPolicy: base.seedPolicy,
+        limits: base.limits,
+        performanceIntent: .realtime60,
+        compatibility: base.compatibility,
+        sensorNormalization: base.sensorNormalization,
+        stabilizationV2: base.stabilizationV2,
+        direction: base.direction
+    )
+    return try BrushPackage(
+        manifest: package.manifest,
+        definition: definition,
+        resourceData: package.resourceData
+    )
 }

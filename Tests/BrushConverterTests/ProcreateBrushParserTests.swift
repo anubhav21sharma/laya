@@ -46,9 +46,9 @@ struct ProcreateBrushParserTests {
         #expect(
             document.ir.resources.map(\.id)
                 == [
-                    "grain.procreate",
-                    "preview.procreate",
-                    "shape.procreate",
+                    "root.grain.procreate",
+                    "root.preview.procreate",
+                    "root.shape.procreate",
                 ]
         )
         #expect(document.resourceData.count == 3)
@@ -56,14 +56,14 @@ struct ProcreateBrushParserTests {
             document.ir.settings.contains {
                 $0.semanticKey == ProcreateBrushSemanticKeys.shape
                     && $0.value
-                    == .resourceReference("shape.procreate")
+                    == .resourceReference("root.shape.procreate")
             }
         )
         #expect(
             document.ir.settings.contains {
                 $0.semanticKey == ProcreateBrushSemanticKeys.grain
                     && $0.value
-                    == .resourceReference("grain.procreate")
+                    == .resourceReference("root.grain.procreate")
             }
         )
         let raw = document.ir.settings.filter {
@@ -72,7 +72,7 @@ struct ProcreateBrushParserTests {
             )
         }
         #expect(raw.count == 1)
-        #expect(raw[0].value == .token("present"))
+        #expect(raw[0].value == .scalar(0.375))
         #expect(
             document.ir.diagnostics.contains {
                 $0.code == "procreate.unverified-setting"
@@ -80,7 +80,7 @@ struct ProcreateBrushParserTests {
         )
         let encodedIR = try ForeignBrushCoding.encode(document.ir)
         #expect(
-            !String(decoding: encodedIR, as: UTF8.self)
+            String(decoding: encodedIR, as: UTF8.self)
                 .contains("0.375")
         )
     }
@@ -129,8 +129,86 @@ struct ProcreateBrushParserTests {
             $0.ir.provenance.parserIdentifier
                 == ProcreateLegacyBrushSetParser.parserIdentifier
         })
-        #expect(documents[0].ir.resources.map(\.id) == ["shape.procreate"])
-        #expect(documents[1].ir.resources.map(\.id) == ["grain.procreate"])
+        #expect(documents[0].ir.resources.map(\.id) == ["root.shape.procreate"])
+        #expect(documents[1].ir.resources.map(\.id) == ["root.grain.procreate"])
+    }
+
+    @Test
+    func parsesRootAndActiveSub01AsIndependentTypedComponents() throws {
+        let source = try ProcreateTestFixtureFactory.zip([
+            .init(
+                path: "brushset.plist",
+                data: ProcreateTestFixtureFactory.brushSetManifest(["member"])
+            ),
+            .init(
+                path: "member/Brush.archive",
+                data: ProcreateTestFixtureFactory.brushArchive(
+                    name: "Composite",
+                    unverifiedFields: ["paintSize": 0.25]
+                )
+            ),
+            .init(
+                path: "member/Sub01/Brush.archive",
+                data: ProcreateTestFixtureFactory.brushArchive(
+                    name: "Child",
+                    unverifiedFields: ["paintSize": 0.75]
+                )
+            ),
+            .init(
+                path: "member/Reset/Sub01/Brush.archive",
+                data: ProcreateTestFixtureFactory.brushArchive(
+                    name: "Reset Copy",
+                    unverifiedFields: ["paintSize": 0.99]
+                )
+            ),
+        ])
+
+        let document = try #require(ProcreateBrushParser().parse(source).first)
+        #expect(document.ir.components.map(\.identifier) == ["root", "sub01"])
+        #expect(document.ir.components.map(\.sourcePath) == [
+            "member/Brush.archive",
+            "member/Sub01/Brush.archive",
+        ])
+        #expect(document.ir.components.map { component in
+            component.settings.first {
+                $0.semanticKey == ProcreateBrushSemanticKeys.paintSize
+            }?.value
+        } == [.scalar(0.25), .scalar(0.75)])
+        #expect(!document.ir.diagnostics.contains {
+            $0.code == "procreate.unsupported-sub-brush"
+        })
+    }
+
+    @Test
+    func rejectsNonContiguousAndNestedActiveSubBrushes() throws {
+        let root = try ProcreateTestFixtureFactory.brushArchive(name: "Root")
+        let child = try ProcreateTestFixtureFactory.brushArchive(name: "Child")
+        let manifest = ProcreateTestFixtureFactory.brushSetManifest(["member"])
+        let nonContiguous = ProcreateTestFixtureFactory.zip([
+            .init(path: "brushset.plist", data: manifest),
+            .init(path: "member/Brush.archive", data: root),
+            .init(path: "member/Sub02/Brush.archive", data: child),
+        ])
+        #expect(
+            throws: ProcreateBrushParserError.nonContiguousActiveComponents(
+                "member"
+            )
+        ) {
+            _ = try ProcreateBrushParser().parse(nonContiguous)
+        }
+
+        let nested = ProcreateTestFixtureFactory.zip([
+            .init(path: "brushset.plist", data: manifest),
+            .init(path: "member/Brush.archive", data: root),
+            .init(path: "member/Sub01/Sub01/Brush.archive", data: child),
+        ])
+        #expect(
+            throws: ProcreateBrushParserError.invalidActiveComponentPath(
+                "member/Sub01/Sub01/Brush.archive"
+            )
+        ) {
+            _ = try ProcreateBrushParser().parse(nested)
+        }
     }
 
     @Test

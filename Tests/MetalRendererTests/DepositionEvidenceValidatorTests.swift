@@ -1,5 +1,6 @@
 import Foundation
 @testable import MetalRenderer
+@testable import MetalRendererDiagnostics
 import Testing
 
 @Suite("Native deposition evidence validator")

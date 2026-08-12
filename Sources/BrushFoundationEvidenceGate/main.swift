@@ -1,6 +1,6 @@
 import Darwin
 import Foundation
-import MetalRenderer
+import MetalRendererDiagnostics
 
 @main
 enum BrushFoundationEvidenceGate {

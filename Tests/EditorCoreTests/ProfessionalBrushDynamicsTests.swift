@@ -4,6 +4,19 @@ import PatternEngine
 import Testing
 
 @Test
+func everyNativeAnchorAndProfessionalCandidateUsesCurrentDefinitionSchema() {
+    let definitions = AnchorBrushCatalog.all.map(\.definition)
+        + ProfessionalBrushCatalog.all.map(\.definition)
+
+    #expect(definitions.count == 10)
+    #expect(
+        definitions.allSatisfy {
+            $0.schemaVersion == BrushDefinition.currentSchemaVersion
+        }
+    )
+}
+
+@Test
 func technicalInkPressureChangesCompiledLogicalDabSizeAndFlow() {
     let light = technicalInkDab(pressure: 0.2, capabilities: [.pressure])
     let heavy = technicalInkDab(pressure: 1, capabilities: [.pressure])
@@ -62,7 +75,7 @@ func technicalInkReplayIsDeterministicAndDoesNotRequestInteraction() throws {
 }
 
 @Test
-func technicalInkCapLeavesCompletedStrokeBodyUnchanged() throws {
+func technicalInkReplayTailLeavesCompletedStrokeBodyUnchanged() throws {
     let program = ProfessionalBrushCatalog.technicalInk.program
     var input = BrushInputDeriver()
     var generator = BrushStrokeGenerator(
@@ -83,23 +96,18 @@ func technicalInkCapLeavesCompletedStrokeBodyUnchanged() throws {
         technicalInkStrokeSample(x: 20, timestamp: 1, phase: .ended),
         viewport: viewport
     )
-    let leading = try generator.beginBatch(began)
-    let authoritativeTail = try generator.finishBatch(ended)
-    let emitted = leading.dabs + authoritativeTail.dabs
+    let leading = try generator.currentSampleDabs(began)
+    let authoritativeTail = try generator.currentSampleDabs(ended)
+    let emitted = leading + authoritativeTail
     let totalDistance = try #require(emitted.last?.sourceDistance)
-    let retapered: [LogicalDab] = emitted.map { dab in
-        BrushDynamicsEngine().applyingLegacySchemaV1EndTaper(
-            dab,
-            totalDistance: totalDistance,
-            nominalDiameter: 40,
-            program: program
-        )
-    }
-    #expect(program.termination == .cap)
-    #expect(program.replayContract.mode == .appendOnly)
-    #expect(program.replayContract.limits == nil)
-    #expect(authoritativeTail.dabs.last?.sourceDistance == totalDistance)
-    #expect(retapered == emitted)
+    #expect(program.termination == .boundedCorrection(
+        maximumSamples: BrushRecipePolicy.replayTailLimits.maximumSamples,
+        maximumWorldLength: 4_096,
+        maximumDabs: BrushRecipePolicy.replayTailLimits.maximumDabs
+    ))
+    #expect(program.replayContract.mode == .replayTail)
+    #expect(program.replayContract.limits == BrushRecipePolicy.replayTailLimits)
+    #expect(authoritativeTail.last?.sourceDistance == totalDistance)
 }
 
 @Test
@@ -125,8 +133,8 @@ func graphiteCompiledDabsMapLowMidAndHighSpeedSpacingAndDirection() {
     #expect(abs(middle.spacing - 2.2) < 0.000_01)
     #expect(abs(fast.spacing - 2.53) < 0.000_01)
     #expect(abs(slow.rotation - 0) < 0.000_01)
-    #expect(abs(middle.rotation - .pi) < 0.000_01)
-    #expect(abs(fast.rotation - 1.5 * .pi) < 0.000_01)
+    #expect(angularDistance(middle.rotation, .pi) < 0.000_01)
+    #expect(angularDistance(fast.rotation, 1.5 * .pi) < 0.000_01)
 }
 
 @Test
@@ -145,9 +153,9 @@ func graphiteTiltUsesDualGrainsInTheirAuthoredOrderAndCoordinates() throws {
     let secondary = try #require(tilted.secondaryGrainToWorld)
 
     #expect(program.requiredCapabilities == [.dualGrain])
-    #expect(program.definition.coverage.grains.map(\.grain) == [
+    #expect(program.primaryComponent.definition.coverage.grains.map(\.grain) == [
         .asset("builtin.grain.graphite"),
-        .asset("builtin.grain.paper"),
+        .asset("builtin.grain.graphite-paper"),
     ])
     #expect(abs(upright.hardness - 0.648) < 0.000_01)
     #expect(abs(tilted.hardness - 0.252) < 0.000_01)
@@ -185,8 +193,18 @@ func graphiteSeededVariationIsDeterministicBoundedAndDryWithoutInteraction() {
     #expect(!first.isEmpty)
     #expect(first == repeated)
     #expect(first != otherSeed)
-    #expect(abs(low.spacing - 2.112) < 0.000_01)
-    #expect(abs(high.spacing - 2.288) < 0.000_01)
+    #expect(abs(low.spacing - expectedFootprintSpacing(
+        for: low,
+        program: graphitePencilProgram(),
+        direction: 0,
+        dynamicSpacing: 0.96
+    )) < 0.000_01)
+    #expect(abs(high.spacing - expectedFootprintSpacing(
+        for: high,
+        program: graphitePencilProgram(),
+        direction: 0,
+        dynamicSpacing: 1.04
+    )) < 0.000_01)
     #expect(abs(low.scatter.x + 0.048) < 0.000_01)
     #expect(abs(low.scatter.y + 0.048) < 0.000_01)
     #expect(abs(high.scatter.x - 0.048) < 0.000_01)
@@ -203,7 +221,7 @@ func graphiteSeededVariationIsDeterministicBoundedAndDryWithoutInteraction() {
 }
 
 @Test
-func graphiteMouseFallbackAndCausalCapRemainFiniteAndUseful() throws {
+func graphiteMouseFallbackAndReplayTailRemainFiniteAndUseful() throws {
     let mouse = graphitePencilDab(pressure: 0, capabilities: [])
     var input = BrushInputDeriver()
     var generator = BrushStrokeGenerator(
@@ -213,20 +231,12 @@ func graphiteMouseFallbackAndCausalCapRemainFiniteAndUseful() throws {
         drawableSize: PatternSize(width: 2, height: 2),
         worldCenter: WorldPoint(x: 0, y: 0)
     )
-    let leading = try generator.beginBatch(input.derive(
+    _ = try generator.currentSampleDabs(input.derive(
         graphiteStrokeSample(x: 0, timestamp: 0, phase: .began), viewport: viewport
     ))
-    let tail = try generator.finishBatch(input.derive(
+    _ = try generator.currentSampleDabs(input.derive(
         graphiteStrokeSample(x: 20, timestamp: 1, phase: .ended), viewport: viewport
     ))
-    let emitted = leading.dabs + tail.dabs
-    let totalDistance = try #require(emitted.last?.sourceDistance)
-    let retapered = emitted.map {
-        BrushDynamicsEngine().applyingLegacySchemaV1EndTaper(
-            $0, totalDistance: totalDistance, nominalDiameter: 40,
-            program: graphitePencilProgram()
-        )
-    }
 
     #expect(mouse.diameter == 40)
     #expect(mouse.flow == 0.28)
@@ -235,9 +245,16 @@ func graphiteMouseFallbackAndCausalCapRemainFiniteAndUseful() throws {
     #expect(abs(mouse.grainScale - 1.4) < 0.000_01)
     #expect([mouse.diameter, mouse.flow, mouse.spacing, mouse.hardness,
              mouse.grainScale].allSatisfy { $0.isFinite })
-    #expect(graphitePencilProgram().termination == .cap)
-    #expect(graphitePencilProgram().replayContract.mode == .appendOnly)
-    #expect(retapered == emitted)
+    #expect(graphitePencilProgram().termination == .boundedCorrection(
+        maximumSamples: BrushRecipePolicy.replayTailLimits.maximumSamples,
+        maximumWorldLength: 4_096,
+        maximumDabs: BrushRecipePolicy.replayTailLimits.maximumDabs
+    ))
+    #expect(graphitePencilProgram().replayContract.mode == .replayTail)
+    #expect(
+        graphitePencilProgram().replayContract.limits
+            == BrushRecipePolicy.replayTailLimits
+    )
 }
 
 @Test
@@ -261,9 +278,9 @@ func naturalCharcoalPressureAndTiltProduceBroaderSofterDabsThanGraphite() {
         capabilities: [.pressure, .altitude]
     )
 
-    #expect(abs(lightPressure.flow - 0.0672) < 0.000_01)
+    #expect(abs(lightPressure.flow - 0.2296) < 0.000_01)
     #expect(abs(lightPressure.strokeOpacity - 0.368) < 0.000_01)
-    #expect(heavyPressure.flow == 0.24)
+    #expect(heavyPressure.flow == 0.82)
     #expect(heavyPressure.strokeOpacity == 0.92)
     #expect(abs(lightPressure.grainScale - 1.28) < 0.000_01)
     #expect(abs(heavyPressure.grainScale - 0.8) < 0.000_01)
@@ -304,8 +321,8 @@ func naturalCharcoalCompiledDabsMapSpeedScatterAndDirectionEndpoints() {
     #expect(abs(fastScatter.scatter.x - 0.864) < 0.000_01)
     #expect(abs(fastScatter.scatter.y - 0.864) < 0.000_01)
     #expect(abs(slow.rotation - 0) < 0.000_01)
-    #expect(abs(middle.rotation - .pi) < 0.000_01)
-    #expect(abs(fast.rotation - 1.5 * .pi) < 0.000_01)
+    #expect(angularDistance(middle.rotation, .pi) < 0.000_01)
+    #expect(angularDistance(fast.rotation, 1.5 * .pi) < 0.000_01)
 }
 
 @Test
@@ -349,14 +366,24 @@ func naturalCharcoalSeededVariationIsBoundedBroaderThanGraphiteAndDry() {
     #expect(!first.isEmpty)
     #expect(first == repeated)
     #expect(first != otherSeed)
-    #expect(abs(low.spacing - 1.4904) < 0.000_01)
-    #expect(abs(high.spacing - 1.7496) < 0.000_01)
+    #expect(abs(low.spacing - expectedFootprintSpacing(
+        for: low,
+        program: naturalCharcoalProgram(),
+        direction: 0,
+        dynamicSpacing: 0.92
+    )) < 0.000_01)
+    #expect(abs(high.spacing - expectedFootprintSpacing(
+        for: high,
+        program: naturalCharcoalProgram(),
+        direction: 0,
+        dynamicSpacing: 1.08
+    )) < 0.000_01)
     #expect(abs(low.scatter.x + 0.6336) < 0.000_01)
     #expect(abs(low.scatter.y + 0.6336) < 0.000_01)
     #expect(abs(high.scatter.x - 0.6336) < 0.000_01)
     #expect(abs(high.scatter.y - 0.6336) < 0.000_01)
-    #expect(abs(low.rotation - (.pi - 0.18)) < 0.000_01)
-    #expect(abs(high.rotation - (.pi + 0.18)) < 0.000_01)
+    #expect(angularDistance(low.rotation, .pi - 0.18) < 0.000_01)
+    #expect(angularDistance(high.rotation, .pi + 0.18) < 0.000_01)
     #expect(low.grainOffset == SIMD2(-0.16, -0.16))
     #expect(abs(high.grainOffset.x - 0.16) < 0.000_01)
     #expect(abs(high.grainOffset.y - 0.16) < 0.000_01)
@@ -369,7 +396,7 @@ func naturalCharcoalSeededVariationIsBoundedBroaderThanGraphiteAndDry() {
 }
 
 @Test
-func naturalCharcoalMouseFallbackAndCausalCapRemainFiniteAndUseful() throws {
+func naturalCharcoalMouseFallbackAndReplayTailRemainFiniteAndUseful() throws {
     let mouse = naturalCharcoalDab(pressure: 0, capabilities: [])
     var input = BrushInputDeriver()
     var generator = BrushStrokeGenerator(
@@ -379,32 +406,30 @@ func naturalCharcoalMouseFallbackAndCausalCapRemainFiniteAndUseful() throws {
         drawableSize: PatternSize(width: 2, height: 2),
         worldCenter: WorldPoint(x: 0, y: 0)
     )
-    let leading = try generator.beginBatch(input.derive(
+    _ = try generator.currentSampleDabs(input.derive(
         naturalCharcoalStrokeSample(x: 0, timestamp: 0, phase: .began), viewport: viewport
     ))
-    let tail = try generator.finishBatch(input.derive(
+    _ = try generator.currentSampleDabs(input.derive(
         naturalCharcoalStrokeSample(x: 20, timestamp: 1, phase: .ended), viewport: viewport
     ))
-    let emitted = leading.dabs + tail.dabs
-    let totalDistance = try #require(emitted.last?.sourceDistance)
-    let retapered = emitted.map {
-        BrushDynamicsEngine().applyingLegacySchemaV1EndTaper(
-            $0, totalDistance: totalDistance, nominalDiameter: 40,
-            program: naturalCharcoalProgram()
-        )
-    }
 
     #expect(mouse.diameter == 68)
-    #expect(mouse.flow == 0.24)
+    #expect(mouse.flow == 0.82)
     #expect(mouse.strokeOpacity == 0.92)
     #expect(abs(mouse.hardness - 0.1276) < 0.000_01)
     #expect(abs(mouse.grainScale - 0.8) < 0.000_01)
     #expect([mouse.diameter, mouse.flow, mouse.spacing, mouse.hardness,
              mouse.grainScale].allSatisfy { $0.isFinite })
-    #expect(naturalCharcoalProgram().termination == .cap)
-    #expect(naturalCharcoalProgram().replayContract.mode == .appendOnly)
-    #expect(naturalCharcoalProgram().replayContract.limits == nil)
-    #expect(retapered == emitted)
+    #expect(naturalCharcoalProgram().termination == .boundedCorrection(
+        maximumSamples: BrushRecipePolicy.replayTailLimits.maximumSamples,
+        maximumWorldLength: 4_096,
+        maximumDabs: BrushRecipePolicy.replayTailLimits.maximumDabs
+    ))
+    #expect(naturalCharcoalProgram().replayContract.mode == .replayTail)
+    #expect(
+        naturalCharcoalProgram().replayContract.limits
+            == BrushRecipePolicy.replayTailLimits
+    )
 }
 
 @Test
@@ -452,12 +477,12 @@ func chiselMarkerCompiledDabsFollowDirectionWithoutScatterAndKeepConstantSpacing
         random: maximumRandom
     )
 
-    #expect(abs(horizontal.rotation - Float.pi) < 0.000_01)
-    #expect(abs(vertical.rotation - 1.5 * Float.pi) < 0.000_01)
-    #expect(abs(reverse.rotation - 2 * Float.pi) < 0.000_01)
-    #expect(abs(randomizedHorizontal.rotation - Float.pi) < 0.000_01)
-    #expect(abs(randomizedVertical.rotation - 1.5 * Float.pi) < 0.000_01)
-    #expect(abs(randomizedReverse.rotation - 2 * Float.pi) < 0.000_01)
+    #expect(angularDistance(horizontal.rotation, .pi) < 0.000_01)
+    #expect(angularDistance(vertical.rotation, 1.5 * .pi) < 0.000_01)
+    #expect(angularDistance(reverse.rotation, 2 * .pi) < 0.000_01)
+    #expect(angularDistance(randomizedHorizontal.rotation, .pi) < 0.000_01)
+    #expect(angularDistance(randomizedVertical.rotation, 1.5 * .pi) < 0.000_01)
+    #expect(angularDistance(randomizedReverse.rotation, 2 * .pi) < 0.000_01)
     #expect([horizontal, vertical, reverse, randomizedHorizontal,
              randomizedVertical, randomizedReverse].allSatisfy { $0.scatter == .zero })
     #expect(horizontal.position == WorldPoint(x: 10, y: 20))
@@ -485,7 +510,7 @@ func chiselMarkerCompiledDabsFollowDirectionWithoutScatterAndKeepConstantSpacing
 }
 
 @Test
-func chiselMarkerCapIsDeterministicAndHasFiniteMouseFallback() throws {
+func chiselMarkerReplayTailIsDeterministicAndHasFiniteMouseFallback() throws {
     let program = chiselMarkerProgram()
     let viewport = ViewportTransform(
         drawableSize: PatternSize(width: 128, height: 128),
@@ -502,28 +527,23 @@ func chiselMarkerCapIsDeterministicAndHasFiniteMouseFallback() throws {
         drawableSize: PatternSize(width: 2, height: 2),
         worldCenter: WorldPoint(x: 0, y: 0)
     )
-    let leading = try generator.beginBatch(input.derive(
+    _ = try generator.currentSampleDabs(input.derive(
         chiselMarkerStrokeSample(x: 0, timestamp: 0, phase: .began),
         viewport: shortViewport
     ))
-    let tail = try generator.finishBatch(input.derive(
+    _ = try generator.currentSampleDabs(input.derive(
         chiselMarkerStrokeSample(x: 20, timestamp: 1, phase: .ended),
         viewport: shortViewport
     ))
-    let emitted = leading.dabs + tail.dabs
-    let totalDistance = try #require(emitted.last?.sourceDistance)
-    let retapered = emitted.map {
-        BrushDynamicsEngine().applyingLegacySchemaV1EndTaper(
-            $0, totalDistance: totalDistance, nominalDiameter: 40,
-            program: program
-        )
-    }
     #expect(!first.isEmpty)
     #expect(first == repeated)
-    #expect(program.termination == .cap)
-    #expect(program.replayContract.mode == .appendOnly)
-    #expect(program.replayContract.limits == nil)
-    #expect(retapered == emitted)
+    #expect(program.termination == .boundedCorrection(
+        maximumSamples: BrushRecipePolicy.replayTailLimits.maximumSamples,
+        maximumWorldLength: 4_096,
+        maximumDabs: BrushRecipePolicy.replayTailLimits.maximumDabs
+    ))
+    #expect(program.replayContract.mode == .replayTail)
+    #expect(program.replayContract.limits == BrushRecipePolicy.replayTailLimits)
     #expect(mouse.diameter == 40)
     #expect(mouse.flow == 0.56)
     #expect([mouse.diameter, mouse.flow, mouse.spacing, mouse.rotation].allSatisfy {
@@ -700,11 +720,11 @@ private func graphiteLogicalDabs(
         let world = input.derive(sample, viewport: viewport)
         switch world.phase {
         case .began:
-            dabs += generator.beginBatches(world).flatMap(\.dabs)
+            dabs += generator.currentSampleDabsUnchecked(world)
         case .moved:
-            dabs += generator.appendBatches(world).flatMap(\.dabs)
+            dabs += generator.currentSampleDabsUnchecked(world)
         case .ended:
-            dabs += generator.finishBatches(world).flatMap(\.dabs)
+            dabs += generator.currentSampleDabsUnchecked(world)
         case .cancelled:
             generator.cancel()
         }
@@ -725,11 +745,11 @@ private func naturalCharcoalLogicalDabs(
         let world = input.derive(sample, viewport: viewport)
         switch world.phase {
         case .began:
-            dabs += generator.beginBatches(world).flatMap(\.dabs)
+            dabs += generator.currentSampleDabsUnchecked(world)
         case .moved:
-            dabs += generator.appendBatches(world).flatMap(\.dabs)
+            dabs += generator.currentSampleDabsUnchecked(world)
         case .ended:
-            dabs += generator.finishBatches(world).flatMap(\.dabs)
+            dabs += generator.currentSampleDabsUnchecked(world)
         case .cancelled:
             generator.cancel()
         }
@@ -750,11 +770,11 @@ private func chiselMarkerLogicalDabs(
         let world = input.derive(sample, viewport: viewport)
         switch world.phase {
         case .began:
-            dabs += generator.beginBatches(world).flatMap(\.dabs)
+            dabs += generator.currentSampleDabsUnchecked(world)
         case .moved:
-            dabs += generator.appendBatches(world).flatMap(\.dabs)
+            dabs += generator.currentSampleDabsUnchecked(world)
         case .ended:
-            dabs += generator.finishBatches(world).flatMap(\.dabs)
+            dabs += generator.currentSampleDabsUnchecked(world)
         case .cancelled:
             generator.cancel()
         }
@@ -808,4 +828,70 @@ private func technicalInkStrokeSample(
         source: .pencil,
         capabilities: [.pressure]
     )
+}
+
+private func angularDistance(_ lhs: Float, _ rhs: Float) -> Float {
+    abs(atan2(sin(lhs - rhs), cos(lhs - rhs)))
+}
+
+private func expectedFootprintSpacing(
+    for dab: LogicalDab,
+    program: BrushProgram,
+    direction: Float,
+    dynamicSpacing: Float
+) -> Float {
+    do {
+        let component: BrushComponentProgram
+        if dab.componentOrdinal == program.primaryComponent.definition.ordinal {
+            component = program.primaryComponent
+        } else if let secondary = program.secondaryComponent,
+                  dab.componentOrdinal == secondary.definition.ordinal
+        {
+            component = secondary
+        } else {
+            preconditionFailure("Unknown component ordinal")
+        }
+        let definition = component.definition
+        let cosine = cos(dab.rotation)
+        let sine = sin(dab.rotation)
+        let tipToWorld = Affine2D(
+            xAxis: SIMD2(cosine, sine) * dab.radius,
+            yAxis: SIMD2(-sine, cosine)
+                * dab.radius
+                * definition.coverage.aspectRatio,
+            translation: dab.position.simd
+        )
+        let layers = try zip(
+            definition.coverage.shapes,
+            component.stageC.tipSupports
+        ).map { shape, support in
+            let shapeCosine = cos(shape.rotation) * shape.scale
+            let shapeSine = sin(shape.rotation) * shape.scale
+            let frame = Affine2D(
+                xAxis: SIMD2(shapeCosine, shapeSine),
+                yAxis: SIMD2(-shapeSine, shapeCosine),
+                translation: shape.offset
+            ).concatenating(tipToWorld)
+            return try BrushTipSupportLayer(
+                definition: support,
+                xAxis: frame.xAxis,
+                yAxis: frame.yAxis,
+                offset: frame.translation
+            )
+        }
+        let interval = try BrushTipSupport.projectionInterval(
+            layers: layers,
+            tangent: SIMD2(cos(direction), sin(direction))
+        )
+        return Float(try BrushFootprintSpacing.nextCarry(
+            supportWidth: interval.width,
+            baseSpacingFraction:
+                definition.placement.baseSpacingFraction,
+            dynamicSpacing: dynamicSpacing,
+            maximumSpacingFraction:
+                definition.placement.maximumSpacingFraction
+        ))
+    } catch {
+        preconditionFailure("Invalid professional spacing fixture: \(error)")
+    }
 }

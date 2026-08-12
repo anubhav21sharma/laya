@@ -643,6 +643,8 @@ struct DocumentPaintVisiblePlanControllerSnapshot: Equatable, @unchecked Sendabl
     let preparedSubmissionCount: Int
     let submittedSubmissionCount: Int
     let submissions: [Submission]
+    let cpuPlanCache: SparseTileSamplingPlanCacheSnapshot
+    let gpuPlanCache: SparseTileSamplingGPUCacheSnapshot
     let uploadRing: SparseTileSamplingUploadRingSnapshot?
     let pendingPlanCompletionCount: Int
     let pendingConsumerCompletionCount: Int
@@ -1176,6 +1178,7 @@ actor DocumentPaintVisiblePlanController {
 
     func snapshot() async -> DocumentPaintVisiblePlanControllerSnapshot {
         reconcileTerminalEvents()
+        let cpu = planCache.snapshot()
         let gpu = await gpuPlanCache.allocationSnapshot
         let completion = await gpuPlanCache.completionSnapshot
         let mailbox = submissionMailbox.snapshot
@@ -1198,6 +1201,8 @@ actor DocumentPaintVisiblePlanController {
                     resources: $0.resources
                 )
             },
+            cpuPlanCache: cpu,
+            gpuPlanCache: gpu,
             uploadRing: gpu.uploadRing,
             pendingPlanCompletionCount: completion.pendingPlanCompletionCount,
             pendingConsumerCompletionCount: completion.pendingConsumerCompletionCount,

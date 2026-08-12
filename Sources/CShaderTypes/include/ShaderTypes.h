@@ -459,6 +459,8 @@ PATTERN_WIRE_CONSTANT PatternUInt32
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionShapeKindHardRound = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionShapeKindTexture = 1;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionShapeKindSoftRound = 2;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionShapeKindRectangle = 3;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionAccumulationOpaque = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionAccumulationFlow = 1;

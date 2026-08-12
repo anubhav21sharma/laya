@@ -657,6 +657,21 @@ public enum BrushAssetDecoder {
             resourceID: resource.id,
             levelByteCounts: mipLevels.map(\.count)
         )
+        let tipSupport: BrushTipAssetSupport?
+        switch resource.kind {
+        case .shape:
+            do {
+                tipSupport = try BrushTipAssetSupportCompiler.compile(
+                    baseLevel: baseLevel,
+                    width: working.width,
+                    height: working.height
+                )
+            } catch {
+                throw BrushAssetDecodeError.invalidImage(id: resource.id)
+            }
+        case .grain, .preview:
+            tipSupport = nil
+        }
         return DecodedBrushTexture(
             resourceID: resource.id,
             kind: resource.kind,
@@ -666,7 +681,8 @@ public enum BrushAssetDecoder {
             workingHeight: working.height,
             mipLevels: mipLevels,
             residentByteCount: residentByteCount,
-            wasResampled: resampling
+            wasResampled: resampling,
+            tipSupport: tipSupport
         )
     }
 
@@ -959,5 +975,162 @@ public enum BrushAssetDecoder {
             currentHeight = nextHeight
         }
         return levels
+    }
+}
+
+enum BrushTipAssetSupportCompilationError: Error, Equatable, Sendable {
+    case invalidDimensions(width: Int, height: Int)
+    case byteCountOverflow
+    case byteCountMismatch(expected: Int, actual: Int)
+    case emptySupport
+}
+
+enum BrushTipAssetSupportCompiler {
+    static func compile(
+        baseLevel: Data,
+        width: Int,
+        height: Int
+    ) throws -> BrushTipAssetSupport {
+        guard width > 0, height > 0 else {
+            throw BrushTipAssetSupportCompilationError.invalidDimensions(
+                width: width,
+                height: height
+            )
+        }
+        let (expectedCount, overflow) = width.multipliedReportingOverflow(
+            by: height
+        )
+        guard !overflow else {
+            throw BrushTipAssetSupportCompilationError.byteCountOverflow
+        }
+        guard baseLevel.count == expectedCount else {
+            throw BrushTipAssetSupportCompilationError.byteCountMismatch(
+                expected: expectedCount,
+                actual: baseLevel.count
+            )
+        }
+
+        var boundaryPoints: [SIMD2<Float>] = []
+        let rowBoundaryCapacity = height.multipliedReportingOverflow(by: 4)
+        let texelBoundaryCapacity = expectedCount.multipliedReportingOverflow(by: 4)
+        let safeRowCapacity = rowBoundaryCapacity.overflow
+            ? Int.max
+            : rowBoundaryCapacity.partialValue
+        let safeTexelCapacity = texelBoundaryCapacity.overflow
+            ? Int.max
+            : texelBoundaryCapacity.partialValue
+        boundaryPoints.reserveCapacity(min(safeRowCapacity, safeTexelCapacity))
+        var minimumX = width
+        var maximumX = -1
+        var minimumY = height
+        var maximumY = -1
+
+        baseLevel.withUnsafeBytes { rawBuffer in
+            let bytes = rawBuffer.bindMemory(to: UInt8.self)
+            for y in 0..<height {
+                var rowMinimum = width
+                var rowMaximum = -1
+                // A one-code R8 value is below the deposition shader's
+                // anti-aliased tip threshold and can be introduced by lossless
+                // normalization at otherwise empty texels. Treating it as
+                // visible would expand cached cursor/support bounds to the
+                // whole texture even though it cannot contribute a pixel.
+                for x in 0..<width where bytes[y * width + x] > 1 {
+                    rowMinimum = min(rowMinimum, x)
+                    rowMaximum = max(rowMaximum, x)
+                }
+                guard rowMaximum >= rowMinimum else { continue }
+                minimumX = min(minimumX, rowMinimum)
+                maximumX = max(maximumX, rowMaximum)
+                minimumY = min(minimumY, y)
+                maximumY = max(maximumY, y)
+
+                let left = normalizedEdge(rowMinimum, dimension: width)
+                let right = normalizedEdge(rowMaximum + 1, dimension: width)
+                let top = normalizedEdge(y, dimension: height)
+                let bottom = normalizedEdge(y + 1, dimension: height)
+                boundaryPoints.append(SIMD2(left, top))
+                boundaryPoints.append(SIMD2(right, top))
+                boundaryPoints.append(SIMD2(right, bottom))
+                boundaryPoints.append(SIMD2(left, bottom))
+            }
+        }
+        guard maximumX >= minimumX, maximumY >= minimumY else {
+            throw BrushTipAssetSupportCompilationError.emptySupport
+        }
+
+        let bounds = try BrushTipNormalizedBounds(
+            minX: normalizedEdge(minimumX, dimension: width),
+            maxX: normalizedEdge(maximumX + 1, dimension: width),
+            minY: normalizedEdge(minimumY, dimension: height),
+            maxY: normalizedEdge(maximumY + 1, dimension: height)
+        )
+        return try BrushTipAssetSupport(
+            bounds: bounds,
+            contour: boundedConservativeConvexHull(boundaryPoints),
+            padding: .zero
+        )
+    }
+
+    private static func normalizedEdge(
+        _ coordinate: Int,
+        dimension: Int
+    ) -> Float {
+        Float(coordinate) / Float(dimension) * 2 - 1
+    }
+
+    private static func boundedConservativeConvexHull(
+        _ points: [SIMD2<Float>]
+    ) -> [SIMD2<Float>] {
+        let sorted = Array(Set(points)).sorted {
+            $0.x == $1.x ? $0.y < $1.y : $0.x < $1.x
+        }
+        guard sorted.count > 2 else { return sorted }
+
+        var lower: [SIMD2<Float>] = []
+        for point in sorted {
+            while lower.count >= 2,
+                  cross(lower[lower.count - 2], lower[lower.count - 1], point)
+                    <= 0
+            {
+                lower.removeLast()
+            }
+            lower.append(point)
+        }
+        var upper: [SIMD2<Float>] = []
+        for point in sorted.reversed() {
+            while upper.count >= 2,
+                  cross(upper[upper.count - 2], upper[upper.count - 1], point)
+                    <= 0
+            {
+                upper.removeLast()
+            }
+            upper.append(point)
+        }
+        lower.removeLast()
+        upper.removeLast()
+        let hull = lower + upper
+        let maximumContourPointCount = 128
+        guard hull.count > maximumContourPointCount else { return hull }
+        let minimumX = points.map(\.x).min()!
+        let maximumX = points.map(\.x).max()!
+        let minimumY = points.map(\.y).min()!
+        let maximumY = points.map(\.y).max()!
+        return [
+            SIMD2(minimumX, minimumY),
+            SIMD2(maximumX, minimumY),
+            SIMD2(maximumX, maximumY),
+            SIMD2(minimumX, maximumY),
+        ]
+    }
+
+    private static func cross(
+        _ origin: SIMD2<Float>,
+        _ a: SIMD2<Float>,
+        _ b: SIMD2<Float>
+    ) -> Float {
+        let first = a - origin
+        let second = b - origin
+        return first.x * second.y - first.y * second.x
     }
 }

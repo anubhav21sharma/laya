@@ -74,11 +74,55 @@ targets:
             UTTypeTagSpecification:
               public.filename-extension:
                 - brushlabevidence
+          - UTTypeIdentifier: com.anubhav.brush-lab-professional-review-matrix
+            UTTypeDescription: Brush Lab Professional Review Matrix
+            UTTypeConformsTo:
+              - public.json
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - json
+              public.mime-type:
+                - application/json
         CFBundleDocumentTypes:
           - CFBundleTypeName: Pattern Project
             LSItemContentTypes:
               - com.anubhav.pattern-project
             CFBundleTypeRole: Editor
+
+  PatternSpikeMacHarness:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: PatternSpike
+        excludes:
+          - PatternSpikeMac-Info.plist
+          - PatternSpikePad-Info.plist
+      - path: ../Sources/MetalRenderer/Shaders.metal
+        buildPhase: sources
+    dependencies:
+      - package: PatternModules
+        product: PatternEngine
+      - package: PatternModules
+        product: EditorCore
+      - package: PatternModules
+        product: BrushFormat
+      - package: PatternModules
+        product: MetalRenderer
+      - package: PatternModules
+        product: MetalRendererDiagnostics
+      - package: PatternModules
+        product: PatternFile
+    settings:
+      base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        PRODUCT_NAME: PatternSpikeHarness
+        PRODUCT_BUNDLE_IDENTIFIER: com.anubhav.patternspike.harness
+        INFOPLIST_KEY_CFBundleDisplayName: Pattern Harness
+        GENERATE_INFOPLIST_FILE: true
+        CURRENT_PROJECT_VERSION: 1
+        MARKETING_VERSION: 0.1.0
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) HARNESS_BUILD"
 
   PatternSpikePad:
     type: application
@@ -145,6 +189,15 @@ targets:
             UTTypeTagSpecification:
               public.filename-extension:
                 - brushlabevidence
+          - UTTypeIdentifier: com.anubhav.brush-lab-professional-review-matrix
+            UTTypeDescription: Brush Lab Professional Review Matrix
+            UTTypeConformsTo:
+              - public.json
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - json
+              public.mime-type:
+                - application/json
         CFBundleDocumentTypes:
           - CFBundleTypeName: Pattern Project
             LSItemContentTypes:
@@ -175,6 +228,13 @@ schemes:
       config: Debug
       targets:
         - PatternSpikeMacUITests
+
+  PatternSpikeMacHarness:
+    build:
+      targets:
+        PatternSpikeMacHarness: all
+    run:
+      config: Debug
 
   PatternSpikePad:
     build:

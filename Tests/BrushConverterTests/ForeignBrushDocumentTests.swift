@@ -230,23 +230,35 @@ struct ForeignBrushCodingTests {
                 as? [String: Any]
         )
         var tampered = object
-        tampered["settings"] = Array(
-            ((object["settings"] as? [Any]) ?? []).reversed()
+        var components = try #require(
+            object["components"] as? [[String: Any]]
         )
+        components[0]["settings"] = Array(
+            (try #require(components[0]["settings"] as? [Any])).reversed()
+        )
+        tampered["components"] = components
         let tamperedData = try JSONSerialization.data(withJSONObject: tampered)
 
-        #expect(throws: ForeignBrushValidationError.unsorted("ir.settings")) {
+        #expect(throws: ForeignBrushValidationError.unsorted("component.settings")) {
             _ = try ForeignBrushCoding.decodeIR(tamperedData)
         }
 
-        let nonFinite = Data(
-            String(
-                data: encoded,
-                encoding: .utf8
-            )!.replacingOccurrences(
-                of: "\"value\":1",
-                with: "\"value\":\"NaN\""
-            ).utf8
+        var nonFiniteObject = object
+        var nonFiniteComponents = try #require(
+            object["components"] as? [[String: Any]]
+        )
+        var nonFiniteSettings = try #require(
+            nonFiniteComponents[0]["settings"] as? [[String: Any]]
+        )
+        var value = try #require(
+            nonFiniteSettings[0]["value"] as? [String: Any]
+        )
+        value["value"] = "NaN"
+        nonFiniteSettings[0]["value"] = value
+        nonFiniteComponents[0]["settings"] = nonFiniteSettings
+        nonFiniteObject["components"] = nonFiniteComponents
+        let nonFinite = try JSONSerialization.data(
+            withJSONObject: nonFiniteObject
         )
         #expect(throws: (any Error).self) {
             _ = try ForeignBrushCoding.decodeIR(nonFinite)
@@ -283,12 +295,19 @@ struct ForeignBrushCodingTests {
             try JSONSerialization.jsonObject(with: encoded)
                 as? [String: Any]
         )
-        let settings = try #require(object["settings"] as? [[String: Any]])
+        let components = try #require(
+            object["components"] as? [[String: Any]]
+        )
+        let settings = try #require(
+            components[0]["settings"] as? [[String: Any]]
+        )
 
         var duplicate = object
-        duplicate["settings"] = [settings[0], settings[0]]
+        var duplicateComponents = components
+        duplicateComponents[0]["settings"] = [settings[0], settings[0]]
+        duplicate["components"] = duplicateComponents
         #expect(throws: ForeignBrushValidationError.duplicate(
-            field: "ir.settings",
+            field: "component.settings",
             value: "synthetic.v1.scalar"
         )) {
             _ = try ForeignBrushCoding.decodeIR(
@@ -297,10 +316,17 @@ struct ForeignBrushCodingTests {
         }
 
         var oversized = object
-        oversized["settings"] = Array(
-            repeating: settings[0],
-            count: ForeignBrushLimits.maximumSettingsPerBrush + 1
-        )
+        var oversizedComponents = components
+        oversizedComponents[0]["settings"] =
+            (0...ForeignBrushLimits.maximumSettingsPerBrush).map { index in
+                var setting = settings[0]
+                setting["semanticKey"] = String(
+                    format: "synthetic.v1.scalar.%04d",
+                    index
+                )
+                return setting
+            }
+        oversized["components"] = oversizedComponents
         #expect(throws: ForeignBrushValidationError.countOutOfRange(
             field: "ir.settings",
             actual: ForeignBrushLimits.maximumSettingsPerBrush + 1,
@@ -312,7 +338,9 @@ struct ForeignBrushCodingTests {
         }
 
         var dangling = object
-        dangling["resources"] = []
+        var danglingComponents = components
+        danglingComponents[0]["resources"] = []
+        dangling["components"] = danglingComponents
         #expect(throws: ForeignBrushValidationError.danglingResourceReference(
             settingKey: "synthetic.v1.shape",
             resourceID: resource.id
@@ -323,9 +351,11 @@ struct ForeignBrushCodingTests {
         }
 
         var wrongDomain = object
+        var wrongDomainComponents = components
         var wrongDomainSettings = settings
         wrongDomainSettings[0]["domain"] = "boolean"
-        wrongDomain["settings"] = wrongDomainSettings
+        wrongDomainComponents[0]["settings"] = wrongDomainSettings
+        wrongDomain["components"] = wrongDomainComponents
         #expect(throws: ForeignBrushValidationError.domainMismatch(
             expected: .scalar,
             actual: .boolean
@@ -336,9 +366,11 @@ struct ForeignBrushCodingTests {
         }
 
         var wrongUnit = object
+        var wrongUnitComponents = components
         var wrongUnitSettings = settings
         wrongUnitSettings[1]["unit"] = "pixels"
-        wrongUnit["settings"] = wrongUnitSettings
+        wrongUnitComponents[0]["settings"] = wrongUnitSettings
+        wrongUnit["components"] = wrongUnitComponents
         #expect(throws: ForeignBrushValidationError.unitMismatch(
             domain: .resource,
             unit: .pixels

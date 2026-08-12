@@ -1,4 +1,5 @@
 import Metal
+import PatternEngine
 
 enum BrushResourceCacheError: Error, Equatable, Sendable {
     case missingCandidate(String)
@@ -10,16 +11,17 @@ enum BrushResourceCacheError: Error, Equatable, Sendable {
 }
 
 enum BrushResourceCacheKey {
-    static let schemaVersion = 1
+    static let schemaVersion = 2
     static let mipPolicyVersion = "floor-area-v1"
 
     static func make(
         contentHash: String,
         sourceValidationHash: String,
+        kind: BrushResourceKind,
         width: Int,
         height: Int
     ) -> String {
-        "brush-r8-v\(schemaVersion):\(contentHash):source=\(sourceValidationHash):\(width)x\(height):r8Unorm:\(mipPolicyVersion)"
+        "brush-r8-v\(schemaVersion):\(kind.rawValue):\(contentHash):source=\(sourceValidationHash):\(width)x\(height):r8Unorm:\(mipPolicyVersion)"
     }
 }
 
@@ -28,11 +30,23 @@ struct BrushResourceCache {
     struct Entry {
         let texture: any MTLTexture
         let byteCount: Int
+        let tipSupport: BrushTipAssetSupport?
     }
 
     struct Candidate {
         let texture: any MTLTexture
         let byteCount: Int
+        let tipSupport: BrushTipAssetSupport?
+
+        init(
+            texture: any MTLTexture,
+            byteCount: Int,
+            tipSupport: BrushTipAssetSupport? = nil
+        ) {
+            self.texture = texture
+            self.byteCount = byteCount
+            self.tipSupport = tipSupport
+        }
     }
 
     private(set) var entries: [String: Entry]
@@ -97,7 +111,8 @@ struct BrushResourceCache {
                 }
                 entry = Entry(
                     texture: candidate.texture,
-                    byteCount: candidate.byteCount
+                    byteCount: candidate.byteCount,
+                    tipSupport: candidate.tipSupport
                 )
             }
 

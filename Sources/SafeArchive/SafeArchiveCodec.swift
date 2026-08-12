@@ -206,7 +206,10 @@ public enum SafeArchiveCodec {
                 throw SafeArchiveError.checksumMismatch(path)
             }
             localRanges.append(completeLocalRange)
-            records[path] = SafeArchiveEntryRecord(dataRange: dataRange)
+            records[path] = SafeArchiveEntryRecord(
+                dataRange: dataRange,
+                checksum: checksum
+            )
             cursor = headerEnd
         }
         guard cursor == centralEnd else { throw SafeArchiveError.malformedArchive }
@@ -347,22 +350,22 @@ struct CentralWriteRecord {
     let localOffset: UInt32
 }
 
-private enum ZipSignature {
+enum ZipSignature {
     static let localFile: UInt32 = 0x0403_4B50
     static let centralDirectory: UInt32 = 0x0201_4B50
     static let endOfCentralDirectory: UInt32 = 0x0605_4B50
     static let zip64EndOfCentralDirectory: UInt32 = 0x0606_4B50
     static let zip64EndOfCentralDirectoryLocator: UInt32 = 0x0706_4B50
 }
-private enum ZipCompression { static let stored: UInt16 = 0 }
+enum ZipCompression { static let stored: UInt16 = 0 }
 private enum ZipFlag { static let utf8: UInt16 = 1 << 11 }
 private enum ZipDate { static let firstJanuary1980: UInt16 = 0x0021 }
 private enum ZipVersion { static let unix20: UInt16 = 0x0314; static let unixHost: UInt16 = 3 }
-private enum ZipHost {
+enum ZipHost {
     static let unix: UInt16 = 3
     static let macOS: UInt16 = 19
 }
-private enum ZipExternalAttribute {
+enum ZipExternalAttribute {
     static let regularFile0644: UInt32 = 0x81A4_0000
     static let symbolicLink: UInt32 = 0xA000
     static let directory: UInt32 = 0x4000
@@ -399,7 +402,7 @@ package func hasStructurallyPlacedZIP64EndRecords(
     return recordEnd == locatorOffset
 }
 
-private func validateArchivePath(_ path: String, limits: SafeArchiveLimits) throws {
+func validateArchivePath(_ path: String, limits: SafeArchiveLimits) throws {
     let bytes = Array(path.utf8)
     let isDriveQualified = bytes.count >= 2
         && ((0x41...0x5A).contains(bytes[0]) || (0x61...0x7A).contains(bytes[0]))
@@ -413,7 +416,7 @@ private func validateArchivePath(_ path: String, limits: SafeArchiveLimits) thro
     else { throw SafeArchiveError.unsafePath(path) }
 }
 
-private func usesPOSIXExternalAttributes(host: UInt16) -> Bool {
+func usesPOSIXExternalAttributes(host: UInt16) -> Bool {
     host == ZipHost.unix || host == ZipHost.macOS
 }
 
@@ -445,7 +448,7 @@ private enum ZipExtraField {
     static let zip64: UInt16 = 0x0001
 }
 
-private func validateFlags(_ flags: UInt16, path: String) throws {
+func validateFlags(_ flags: UInt16, path: String) throws {
     guard flags & ~ZipFlag.utf8 == 0 else {
         throw SafeArchiveError.unsupportedArchiveFlags(path: path, flags: flags)
     }
@@ -464,7 +467,7 @@ private func findEndOfCentralDirectory(in data: Data) throws -> Int {
     throw SafeArchiveError.malformedArchive
 }
 
-private func checkedEnd(start: Int, lengths: [Int], limit: Int) throws -> Int {
+func checkedEnd(start: Int, lengths: [Int], limit: Int) throws -> Int {
     var value = start
     for length in lengths {
         guard length >= 0 else { throw SafeArchiveError.malformedArchive }

@@ -8,8 +8,48 @@ import Foundation
 public enum ProcreateBrushSemanticKeys {
     public static let shape = "procreate.classic.v1.shape"
     public static let grain = "procreate.classic.v1.grain"
+    public static let paintSize = "procreate.classic.v1.placement.paint-size"
+    public static let plotSpacing = "procreate.classic.v1.placement.plot-spacing"
+    public static let paintOpacity = "procreate.classic.v1.paint.opacity"
+    public static let paintFlow = "procreate.classic.v1.paint.flow"
+    public static let pressureSize = "procreate.classic.v1.dynamics.pressure-size"
+    public static let pressureOpacity = "procreate.classic.v1.dynamics.pressure-opacity"
+    public static let tiltSize = "procreate.classic.v1.dynamics.tilt-size"
+    public static let tiltShapeRoundness = "procreate.classic.v1.dynamics.tilt-shape-roundness"
+    public static let textureScale = "procreate.classic.v1.grain.texture-scale"
+    public static let textureMovement = "procreate.classic.v1.grain.texture-movement"
+    public static let bundledShapePath = "procreate.classic.v1.resource.bundled-shape-path"
+    public static let bundledGrainPath = "procreate.classic.v1.resource.bundled-grain-path"
+    public static let dualBlendMode = "procreate.classic.v1.composition.dual-blend-mode"
+    public static let shapeScatter = "procreate.classic.v1.placement.shape-scatter"
+    public static let shapeRotation = "procreate.classic.v1.placement.shape-rotation"
+    public static let grainDepth = "procreate.classic.v1.grain.depth"
+    public static let grainDepthMinimum = "procreate.classic.v1.grain.depth-minimum"
 
     static let rawPrefix = "procreate.classic.v1.raw."
+
+    static func verified(_ sourceKey: String) -> String? {
+        switch sourceKey {
+        case "paintSize": paintSize
+        case "plotSpacing": plotSpacing
+        case "paintOpacity": paintOpacity
+        case "paintFlow": paintFlow
+        case "dynamicsPressureSize": pressureSize
+        case "dynamicsPressureOpacity": pressureOpacity
+        case "dynamicsTiltSize": tiltSize
+        case "dynamicsTiltShapeRoundness": tiltShapeRoundness
+        case "textureScale": textureScale
+        case "textureMovement": textureMovement
+        case "bundledShapePath": bundledShapePath
+        case "bundledGrainPath": bundledGrainPath
+        case "dualBlendMode": dualBlendMode
+        case "shapeScatter": shapeScatter
+        case "shapeRotation": shapeRotation
+        case "grainDepth": grainDepth
+        case "grainDepthMinimum": grainDepthMinimum
+        default: nil
+        }
+    }
 
     static func raw(_ sourceKey: String) -> String {
         var slug = sourceKey.lowercased().utf8.map { byte -> UInt8 in

@@ -1,3 +1,4 @@
+import BrushFormat
 import Foundation
 import Metal
 import PatternEngine
@@ -21,7 +22,9 @@ public enum BrushTextureIdentity:
     case charcoalTipShape = "builtin.shape.charcoal-tip"
     case markerChiselShape = "builtin.shape.marker-chisel"
     case graphiteGrain = "builtin.grain.graphite"
+    case graphitePaperGrain = "builtin.grain.graphite-paper"
     case charcoalGrain = "builtin.grain.charcoal"
+    case charcoalFineGrain = "builtin.grain.charcoal-fine-paper"
 
     public var kind: BrushTextureKind {
         switch self {
@@ -30,7 +33,7 @@ public enum BrushTextureIdentity:
              .markerChiselShape:
             .shape
         case .opaqueGrain, .paperGrain, .noiseGrain, .graphiteGrain,
-             .charcoalGrain:
+             .graphitePaperGrain, .charcoalGrain, .charcoalFineGrain:
             .grain
         }
     }
@@ -43,7 +46,8 @@ public enum BrushTextureIdentity:
         case .technicalNibShape, .graphiteTipShape, .charcoalTipShape,
              .markerChiselShape:
             128
-        case .graphiteGrain, .charcoalGrain:
+        case .graphiteGrain, .graphitePaperGrain, .charcoalGrain,
+             .charcoalFineGrain:
             256
         }
     }
@@ -75,7 +79,7 @@ public struct BrushTextureFactory {
         identity: BrushTextureIdentity,
         resourceID: String? = nil,
         maximumDimension: Int = .max
-    ) -> DecodedBrushTexture {
+    ) throws -> DecodedBrushTexture {
         precondition(maximumDimension > 0)
         let sourceDimension = identity.sourceDimension
         let workingDimension = min(sourceDimension, maximumDimension)
@@ -99,6 +103,13 @@ public struct BrushTextureFactory {
             width = max(1, width / 2)
             height = max(1, height / 2)
         }
+        let tipSupport = identity.kind == .shape
+            ? try BrushTipAssetSupportCompiler.compile(
+                baseLevel: mipLevels[0],
+                width: workingDimension,
+                height: workingDimension
+            )
+            : nil
         return DecodedBrushTexture(
             resourceID: resourceID ?? identity.rawValue,
             kind: identity.kind == .shape ? .shape : .grain,
@@ -108,7 +119,8 @@ public struct BrushTextureFactory {
             workingHeight: workingDimension,
             mipLevels: mipLevels,
             residentByteCount: mipLevels.reduce(0) { $0 + $1.count },
-            wasResampled: workingDimension != sourceDimension
+            wasResampled: workingDimension != sourceDimension,
+            tipSupport: tipSupport
         )
     }
 
@@ -157,6 +169,20 @@ public struct BrushTextureFactory {
     private static func baseLevel(
         identity: BrushTextureIdentity
     ) -> [UInt8] {
+        if let resourceID = ProfessionalBrushResourceID(
+            rawValue: identity.rawValue
+        ) {
+            do {
+                return [UInt8](try ProfessionalBrushResources.data(
+                    for: resourceID
+                ))
+            } catch {
+                preconditionFailure(
+                    "Invalid bundled professional brush resource "
+                        + "\(identity.rawValue): \(error)"
+                )
+            }
+        }
         var bytes = [UInt8](
             repeating: 0,
             count: identity.sourceDimension * identity.sourceDimension
@@ -214,50 +240,18 @@ public struct BrushTextureFactory {
             let value = texelHash(x: x, y: y, salt: 0)
             return UInt8(96 + value % 160)
 
-        case .technicalNibShape:
-            return ellipseCoverage(
-                x: x, y: y, dimension: 128,
-                horizontalRadius: 91, verticalRadius: 102, softness: 16
-            )
-
-        case .graphiteTipShape:
-            let coverage = ellipseCoverage(
-                x: x, y: y, dimension: 128,
-                horizontalRadius: 43, verticalRadius: 102, softness: 16
-            )
-            let tooth = Int(texelHash(x: x, y: y, salt: 0x41) % 37)
-            return UInt8(max(0, Int(coverage) - tooth))
-
-        case .charcoalTipShape:
-            let coverage = ellipseCoverage(
-                x: x, y: y, dimension: 128,
-                horizontalRadius: 88, verticalRadius: 94, softness: 9
-            )
-            let pore = Int(texelHash(x: x / 3, y: y / 3, salt: 0x77) % 78)
-            let fleck = (x * 17 + y * 29) % 23 == 0 ? 48 : 0
-            return UInt8(max(0, Int(coverage) - pore - fleck))
-
-        case .markerChiselShape:
-            let dx = 2 * x + 1 - 128
-            let dy = 2 * y + 1 - 128
-            let along = abs(dx + dy)
-            let across = abs(dy - dx)
-            let edge = min(186 - along, 62 - across)
-            return UInt8(min(255, max(0, edge * 20)))
-
         case .graphiteGrain:
             let fine = Int(texelHash(x: x, y: y, salt: 0x51) % 54)
             let fiber = (x * 5 + y * 19 + x / 7) % 29 < 4 ? 24 : 0
             let ridge = (y + x / 11) % 17 == 0 ? 18 : 0
             return UInt8(max(96, 248 - fine - fiber - ridge))
 
-        case .charcoalGrain:
-            let cluster = Int(
-                texelHash(x: x / 9, y: y / 9, salt: 0xA3) % 104
+        case .technicalNibShape, .graphiteTipShape, .charcoalTipShape,
+             .markerChiselShape,
+             .graphitePaperGrain, .charcoalGrain, .charcoalFineGrain:
+            preconditionFailure(
+                "Authored professional resource bypassed its bundle loader"
             )
-            let tooth = Int(texelHash(x: x, y: y, salt: 0xC7) % 38)
-            let crack = (x * 7 + y * 13 + x * y) % 47 < 3 ? 56 : 0
-            return UInt8(max(48, 240 - cluster - tooth - crack))
         }
     }
 
@@ -283,28 +277,6 @@ public struct BrushTextureFactory {
         value &*= 0x846C_A68B
         value ^= value >> 16
         return value
-    }
-
-    private static func ellipseCoverage(
-        x: Int,
-        y: Int,
-        dimension: Int,
-        horizontalRadius: Int,
-        verticalRadius: Int,
-        softness: Int
-    ) -> UInt8 {
-        let dx = Int64(2 * x + 1 - dimension)
-        let dy = Int64(2 * y + 1 - dimension)
-        let horizontal = Int64(horizontalRadius)
-        let vertical = Int64(verticalRadius)
-        let limit = horizontal * horizontal * vertical * vertical
-        let metric = dx * dx * vertical * vertical
-            + dy * dy * horizontal * horizontal
-        let delta = limit - metric
-        guard delta > 0 else { return 0 }
-        let edge = max(Int64(1), limit / Int64(softness))
-        guard delta < edge else { return 255 }
-        return UInt8(delta * 255 / edge)
     }
 
     private static func quantize(_ value: Float) -> UInt8 {

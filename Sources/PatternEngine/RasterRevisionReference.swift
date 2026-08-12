@@ -60,8 +60,6 @@ public struct RasterRevisionTileCoordinate:
 }
 
 public enum RasterRevisionStorage: Equatable, Sendable {
-    /// Compatibility storage used by the pre-Stage-D full-surface renderer.
-    case fullSurfaceBGRA8
     /// Sparse canonical paint storage. Coordinates must be unique and sorted.
     case tiledRGBA16Float(
         layerID: UUID,
@@ -69,25 +67,22 @@ public enum RasterRevisionStorage: Equatable, Sendable {
         tileCoordinates: [RasterRevisionTileCoordinate]
     )
 
-    public var layerID: UUID? {
-        guard case let .tiledRGBA16Float(layerID, _, _) = self else {
-            return nil
+    public var layerID: UUID {
+        switch self {
+        case let .tiledRGBA16Float(layerID, _, _): layerID
         }
-        return layerID
     }
 
-    public var generation: UInt64? {
-        guard case let .tiledRGBA16Float(_, generation, _) = self else {
-            return nil
+    public var generation: UInt64 {
+        switch self {
+        case let .tiledRGBA16Float(_, generation, _): generation
         }
-        return generation
     }
 
     public var tileCoordinates: [RasterRevisionTileCoordinate] {
-        guard case let .tiledRGBA16Float(_, _, coordinates) = self else {
-            return []
+        switch self {
+        case let .tiledRGBA16Float(_, _, coordinates): coordinates
         }
-        return coordinates
     }
 }
 
@@ -104,27 +99,10 @@ public struct RasterRevisionReference: Equatable, Sendable {
     public let retainedBytes: Int
     public let storage: RasterRevisionStorage
 
-    public var layerID: UUID? { storage.layerID }
-    public var generation: UInt64? { storage.generation }
+    public var layerID: UUID { storage.layerID }
+    public var generation: UInt64 { storage.generation }
     public var tileCoordinates: [RasterRevisionTileCoordinate] {
         storage.tileCoordinates
-    }
-
-    public init(
-        id: StoredRasterRevisionID,
-        pixelSize: PixelSize,
-        regions: PixelRegionSet,
-        retainedBytes: Int
-    ) {
-        self.init(
-            id: id,
-            pixelSize: pixelSize,
-            documentPixelSize: pixelSize,
-            radialLayout: nil,
-            regions: regions,
-            retainedBytes: retainedBytes,
-            storage: .fullSurfaceBGRA8
-        )
     }
 
     public init(
@@ -134,7 +112,7 @@ public struct RasterRevisionReference: Equatable, Sendable {
         radialLayout: RadialSectorLayout? = nil,
         regions: PixelRegionSet,
         retainedBytes: Int,
-        storage: RasterRevisionStorage = .fullSurfaceBGRA8
+        storage: RasterRevisionStorage
     ) {
         precondition(retainedBytes >= 0)
         if case let .tiledRGBA16Float(_, _, coordinates) = storage {
@@ -149,21 +127,4 @@ public struct RasterRevisionReference: Equatable, Sendable {
         self.storage = storage
     }
 
-    public init(
-        id: StoredRasterRevisionID,
-        pixelSize: PixelSize,
-        documentPixelSize: PixelSize?,
-        regions: PixelRegionSet,
-        retainedBytes: Int
-    ) {
-        self.init(
-            id: id,
-            pixelSize: pixelSize,
-            documentPixelSize: documentPixelSize ?? pixelSize,
-            radialLayout: nil,
-            regions: regions,
-            retainedBytes: retainedBytes,
-            storage: .fullSurfaceBGRA8
-        )
-    }
 }

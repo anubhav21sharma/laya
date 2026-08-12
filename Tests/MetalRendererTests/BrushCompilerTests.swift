@@ -251,39 +251,58 @@ struct BrushCompilerTests {
 
         #expect(setup.compiler.activeBrush === compiled)
         #expect(compiled.program == (try BrushProgramCompiler.compile(package.definition)))
-        #expect(compiled.pipelineKey.backend == .deposition)
-        #expect(compiled.pipelineKey.accumulation == package.definition.material.accumulation)
-        #expect(compiled.pipelineKey.edgeTreatment == package.definition.material.edgeTreatment)
-        #expect(!compiled.pipelineKey.functionConstants.usesSecondaryShape)
-        #expect(!compiled.pipelineKey.functionConstants.usesGrain)
-        #expect(!compiled.pipelineKey.functionConstants.usesDestinationSampling)
-        #expect(compiled.depositionPipeline.key.brush == compiled.pipelineKey)
+        #expect(compiled.primaryComponent.pipelineKey.backend == .deposition)
+        guard case let .deposition(backendContract) = compiled.backendContract
+        else {
+            Issue.record("Compiled dry brush did not retain deposition contract")
+            return
+        }
+        #expect(backendContract.schemaVersion == 3)
+        #expect(backendContract.compilerFamily == .deposition)
+        #expect(backendContract.encoderFamily == .instancedDeposition)
+        #expect(compiled.primaryComponent.pipelineKey.accumulation == package.definition.components[0].material.accumulation)
+        #expect(compiled.primaryComponent.pipelineKey.edgeTreatment == package.definition.components[0].material.edgeTreatment)
+        #expect(!compiled.primaryComponent.pipelineKey.functionConstants.usesSecondaryShape)
+        #expect(!compiled.primaryComponent.pipelineKey.functionConstants.usesGrain)
+        #expect(compiled.primaryComponent.depositionPipeline.key.brush == compiled.primaryComponent.pipelineKey)
         #expect(
-            compiled.depositionPipeline.key.abiVersion
+            compiled.primaryComponent.depositionPipeline.key.abiVersion
                 == DepositionABI.version
         )
         #expect(
-            compiled.depositionPipeline.key.colorPixelFormatRawValue
+            compiled.primaryComponent.depositionPipeline.key.colorPixelFormatRawValue
                 == DocumentColorPipeline.workingPixelFormat.rawValue
         )
         #expect(
-            compiled.depositionMaterial.textures[.primaryShape]
-                === compiled.textures["shape.main"]
+            compiled.primaryComponent.depositionMaterial.textures[.primaryShape]
+                === compiled.primaryComponent.textures["shape.main"]
         )
         let rebuiltMaterial = try DepositionMaterialBinding(
-            compiledBrush: compiled
+            uniformTemplate: compiled.primaryComponent.uniformTemplate,
+            textures: compiled.primaryComponent.textures,
+            tipSupports: compiled.primaryComponent.tipSupports
         )
         #expect(
             rebuiltMaterial.uniforms.coverageParameters
-                == compiled.depositionMaterial.uniforms.coverageParameters
+                == compiled.primaryComponent.depositionMaterial.uniforms.coverageParameters
         )
-        #expect(compiled.uniformTemplate.placement == package.definition.placement)
-        #expect(compiled.uniformTemplate.coverage == package.definition.coverage)
-        #expect(compiled.uniformTemplate.color == package.definition.color)
-        #expect(compiled.uniformTemplate.material == package.definition.material)
-        #expect(compiled.textures["shape.main"]?.storageMode == .private)
-        #expect(compiled.textures["shape.main"]?.pixelFormat == .r8Unorm)
-        #expect(compiled.textures["shape.main"]?.mipmapLevelCount == 3)
+        #expect(compiled.primaryComponent.uniformTemplate.placement == package.definition.components[0].placement)
+        #expect(compiled.primaryComponent.uniformTemplate.coverage == package.definition.components[0].coverage)
+        #expect(compiled.primaryComponent.uniformTemplate.color == package.definition.components[0].color)
+        #expect(compiled.primaryComponent.uniformTemplate.material == package.definition.components[0].material)
+        #expect(compiled.primaryComponent.textures["shape.main"]?.storageMode == .private)
+        #expect(compiled.primaryComponent.textures["shape.main"]?.pixelFormat == .r8Unorm)
+        #expect(compiled.primaryComponent.textures["shape.main"]?.mipmapLevelCount == 3)
+        #expect(compiled.primaryComponent.tipSupports.count == 1)
+        let compiledTip = try #require(compiled.primaryComponent.tipSupports.first)
+        #expect(compiledTip.source == .texture(resourceID: "shape.main"))
+        let assetSupport = try #require(compiledTip.assetSupport)
+        #expect(!assetSupport.contour.isEmpty)
+        #expect(assetSupport.padding == .zero)
+        #expect(compiledTip.levelOfDetail(
+            projectedWidth: 2,
+            projectedHeight: 2
+        ) == 1)
         #expect(compiled.residentByteCount == 21)
         #expect(compiled.report.backend == .deposition)
         #expect(compiled.report.performance.tier == .realtime120)
@@ -303,7 +322,207 @@ struct BrushCompilerTests {
                 )
         )
         #expect(setup.compiler.cachedKeys.count == 1)
-        #expect(setup.compiler.cachedKeys[0].hasPrefix("brush-r8-v1:"))
+        #expect(setup.compiler.cachedKeys[0].hasPrefix("brush-r8-v2:shape:"))
+    }
+
+    @Test
+    func compositeComponentsCompileInDefinitionOrderWithIndependentState()
+        async throws
+    {
+        guard let setup = try compilerSetup() else { return }
+        let package = try compilerCompositePackage(
+            definitionID: "brush.composite.independent"
+        )
+
+        let compiled = try await setup.compiler.compileAndActivate(
+            package: package
+        )
+        let secondary = try #require(compiled.secondaryComponent)
+
+        #expect(compiled.primaryComponent.identifier.rawValue == "primary")
+        #expect(compiled.primaryComponent.ordinal == 0)
+        #expect(secondary.identifier.rawValue == "secondary")
+        #expect(secondary.ordinal == 1)
+        #expect(compiled.primaryComponent.pipelineKey.accumulation == .flow)
+        #expect(secondary.pipelineKey.accumulation == .uniformGlaze)
+        #expect(!compiled.primaryComponent.pipelineKey.functionConstants.usesGrain)
+        #expect(secondary.pipelineKey.functionConstants.usesGrain)
+        #expect(
+            compiled.primaryComponent.uniformTemplate.placement
+                == package.definition.components[0].placement
+        )
+        #expect(
+            secondary.uniformTemplate.placement
+                == package.definition.components[1].placement
+        )
+        #expect(
+            compiled.primaryComponent.depositionPipeline.key.brush
+                == compiled.primaryComponent.pipelineKey
+        )
+        #expect(
+            secondary.depositionPipeline.key.brush
+                == secondary.pipelineKey
+        )
+        #expect(
+            compiled.primaryComponent.cursorTipProfile.primary
+                == .analyticEllipse
+        )
+        #expect(secondary.cursorTipProfile.primary == .analyticRectangle)
+        #expect(compiled.primaryComponent.textures.isEmpty)
+        #expect(
+            secondary.textures[BrushTextureIdentity.paperGrain.rawValue]
+                != nil
+        )
+        #expect(
+            secondary.depositionMaterial.uniforms.coverageParameters.x
+                == 0.6
+        )
+        #expect(
+            secondary.depositionMaterial.uniforms.coverageParameters.w
+                == 0.8
+        )
+        #expect(
+            secondary.depositionMaterial.textures[.primaryGrain]
+                === secondary.textures[
+                    BrushTextureIdentity.paperGrain.rawValue
+                ]
+        )
+        #expect(compiled.report.performance.tier == .realtime60)
+
+        let renderState = compiled.renderState
+        #expect(renderState.primaryComponent.ordinal == 0)
+        #expect(renderState.secondaryComponent?.ordinal == 1)
+        #expect(
+            renderState.secondaryComponent?.pipelineKey
+                == secondary.pipelineKey
+        )
+    }
+
+    @Test
+    func equalCrossComponentResourcesShareUploadCacheAndResidency()
+        async throws
+    {
+        guard let setup = try compilerSetup() else { return }
+        let package = try compilerSharedResourceCompositePackage()
+
+        let compiled = try await setup.compiler.compileAndActivate(
+            package: package
+        )
+        let secondary = try #require(compiled.secondaryComponent)
+
+        #expect(
+            compiled.primaryComponent.textures["shape.main"]
+                === secondary.textures["shape.main"]
+        )
+        #expect(compiled.residentByteCount == 21)
+        #expect(compiled.report.residentResourceBytes == 21)
+        #expect(setup.compiler.cachedKeys.count == 1)
+        #expect(setup.compiler.debugCounters.imageDecodeCount == 1)
+        #expect(setup.compiler.debugCounters.textureUploadCount == 1)
+        #expect(setup.pipelines.stateCreationCount == 1)
+    }
+
+    @Test
+    func conflictingCrossComponentResourceIDsFailBeforeCompilerMutation()
+        throws
+    {
+        guard let setup = try compilerSetup() else { return }
+        let package = try compilerPackage(
+            definitionID: "brush.composite.conflict"
+        )
+        let definition = package.definition
+        let primary = definition.components[0]
+        let conflicting = BrushResourceReference(
+            identifier: "shape.main",
+            kind: .grain,
+            required: true,
+            fallback: nil
+        )
+        let secondary = BrushComponentDefinition(
+            identifier: BrushComponentIdentifier("secondary"),
+            ordinal: 1,
+            resources: [conflicting],
+            coverage: primary.coverage,
+            placement: primary.placement,
+            dynamics: primary.dynamics,
+            color: primary.color,
+            material: primary.material,
+            taper: primary.taper,
+            sensorProgram: primary.sensorProgram,
+            emission: primary.emission,
+            tipSupports: primary.tipSupports
+        )
+
+        #expect(throws: BrushDefinitionValidationError
+            .conflictingComponentResource("shape.main")) {
+            _ = try compilerCompositeDefinition(
+                definition,
+                components: [primary, secondary]
+            )
+        }
+        #expect(setup.compiler.debugCounters == .zero)
+        #expect(setup.compiler.cachedKeys.isEmpty)
+        #expect(setup.compiler.activeBrush == nil)
+        #expect(setup.pipelines.prepareCallCount == 0)
+    }
+
+    @Test
+    func aggregateCrossComponentResidencyRejectsBeforeDecodeOrUpload()
+        async throws
+    {
+        guard let setup = try compilerSetup() else { return }
+        let package = try compilerDistinctResourceCompositePackage(
+            maximumResidentBytes: 30
+        )
+
+        let failure = try await compilationFailure {
+            _ = try await setup.compiler.compileAndActivate(package: package)
+        }
+
+        #expect(failure.stage == .residency)
+        #expect(failure.requestedBytes == 42)
+        #expect(failure.reason == "unsupportedResourceCost")
+        #expect(setup.compiler.debugCounters.imageDecodeCount == 0)
+        #expect(setup.compiler.debugCounters.textureUploadCount == 0)
+        #expect(setup.compiler.cachedKeys.isEmpty)
+        #expect(setup.compiler.activeBrush == nil)
+    }
+
+    @Test
+    func secondaryPipelineFailurePreservesAllCompilerState() async throws {
+        guard let setup = try compilerSetup() else { return }
+        let active = try await setup.compiler.compileAndActivate(
+            package: try compilerPackage(
+                definitionID: "brush.composite.active",
+                resourceID: nil
+            )
+        )
+        let package = try compilerCompositePackage(
+            definitionID: "brush.composite.pipeline-failure",
+            includeSecondaryGrain: false
+        )
+        let secondaryDefinition = package.definition.components[1]
+        setup.pipelines.failureBrushKey = compilerPipelineKey(
+            definition: secondaryDefinition,
+            backend: .deposition
+        )
+        setup.pipelines.failure = .pipelineCreationFailed("injected")
+        let beforeCounters = setup.compiler.debugCounters
+        let beforeKeys = setup.compiler.cachedKeys
+        let beforePinnedKeys = setup.compiler.pinnedKeys
+        let beforeResidentBytes = setup.compiler.residentByteCount
+
+        let failure = try await compilationFailure {
+            _ = try await setup.compiler.compileAndActivate(package: package)
+        }
+
+        #expect(failure.stage == .pipelineSelection)
+        #expect(failure.reason == "pipelinePreparationFailed")
+        #expect(setup.compiler.activeBrush === active)
+        #expect(setup.compiler.debugCounters == beforeCounters)
+        #expect(setup.compiler.cachedKeys == beforeKeys)
+        #expect(setup.compiler.pinnedKeys == beforePinnedKeys)
+        #expect(setup.compiler.residentByteCount == beforeResidentBytes)
     }
 
     @Test
@@ -356,7 +575,7 @@ struct BrushCompilerTests {
             package: package
         )
 
-        #expect(first.depositionPipeline === second.depositionPipeline)
+        #expect(first.primaryComponent.depositionPipeline === second.primaryComponent.depositionPipeline)
         #expect(setup.pipelines.stateCreationCount == 1)
         #expect(
             setup.compiler.debugCounters.imageDecodeCount
@@ -387,7 +606,7 @@ struct BrushCompilerTests {
         )
 
         #expect(direct.renderIdentity == packaged.renderIdentity)
-        #expect(direct.depositionPipeline === packaged.depositionPipeline)
+        #expect(direct.primaryComponent.depositionPipeline === packaged.primaryComponent.depositionPipeline)
     }
 
     @Test
@@ -465,19 +684,18 @@ struct BrushCompilerTests {
     @Test
     func wetDefinitionFailsBeforeDecodeUploadOrActivation() async throws {
         guard let setup = try compilerSetup() else { return }
-        let wet = try compilerPackage(
-            definitionID: "brush.wet",
-            interaction: .wetMix
-        )
-
         let before = setup.compiler.debugCounters
-        let failure = try await compilationFailure {
-            _ = try await setup.compiler.compileAndActivate(package: wet)
+        #expect(throws: BrushDefinitionValidationError
+            .unsupportedComponentInteraction(
+                ordinal: 0,
+                interaction: .wetMix
+            )) {
+            _ = try compilerPackage(
+                definitionID: "brush.wet",
+                interaction: .wetMix
+            )
         }
 
-        #expect(failure.stage == .pipelineSelection)
-        #expect(failure.backend == .canvasInteraction)
-        #expect(failure.reason == "unsupportedInteraction")
         #expect(
             setup.compiler.debugCounters.packageDecodeCount
                 == before.packageDecodeCount
@@ -535,6 +753,95 @@ struct BrushCompilerTests {
     }
 
     @Test
+    func backendRegistryFailuresPreservePriorActivationAndCompilerState() async throws {
+        guard let setup = try compilerSetup() else { return }
+        let active = try await setup.compiler.compileAndActivate(
+            package: try compilerPackage(
+                definitionID: "brush.registry-active",
+                resourceID: nil
+            )
+        )
+        let counters = setup.compiler.debugCounters
+        let keys = setup.compiler.cachedKeys
+        let residentBytes = setup.compiler.residentByteCount
+        let failures: [(BrushPackage, String)] = [
+            (
+                try compilerPackage(
+                    definitionID: "builtin.bounded-wash",
+                    resourceID: nil
+                ),
+                "retiredNativeIdentifier"
+            ),
+            (
+                try compilerPackage(
+                    definitionID: "brush.registry-semantic",
+                    resourceID: nil,
+                    requiredSemanticKeys: ["foreign.secret"]
+                ),
+                "unsupportedRequiredSemantic"
+            ),
+            (
+                try compilerPackage(
+                    definitionID: "brush.registry-secondary-color",
+                    resourceID: nil,
+                    secondaryColorMix: 0.25
+                ),
+                "unimplementedSecondaryColorSource"
+            ),
+        ]
+
+        for (package, expectedReason) in failures {
+            let failure = try await compilationFailure {
+                _ = try await setup.compiler.compileAndActivate(
+                    package: package
+                )
+            }
+            #expect(failure.stage == .pipelineSelection)
+            #expect(failure.reason == expectedReason)
+            #expect(setup.compiler.activeBrush === active)
+            #expect(setup.compiler.debugCounters == counters)
+            #expect(setup.compiler.cachedKeys == keys)
+            #expect(setup.compiler.residentByteCount == residentBytes)
+        }
+    }
+
+    @Test
+    func injectedRegistryReportsExactUnsupportedSchemaBeforeResourceWork() async throws {
+        let schemaTwoOnly = try BrushBackendRegistry(registrations: [
+            BrushBackendRegistration(
+                key: BrushBackendRegistryKey(
+                    kind: .deposition,
+                    schemaVersion: 2
+                ),
+                compilerFamily: .deposition,
+                encoderFamily: .instancedDeposition,
+                declaredCapabilities: [],
+                implementedCapabilities: [],
+                activation: .available
+            ),
+        ])
+        guard let setup = try compilerSetup(
+            backendRegistry: schemaTwoOnly
+        ) else { return }
+
+        let failure = try await compilationFailure {
+            _ = try await setup.compiler.compileAndActivate(
+                package: try compilerPackage(
+                    definitionID: "brush.registry-schema-three",
+                    resourceID: nil
+                )
+            )
+        }
+
+        #expect(failure.stage == .pipelineSelection)
+        #expect(failure.reason == "unsupportedBackendSchema")
+        #expect(setup.compiler.debugCounters == .zero)
+        #expect(setup.compiler.cachedKeys.isEmpty)
+        #expect(setup.compiler.activeBrush == nil)
+        #expect(setup.pipelines.prepareCallCount == 0)
+    }
+
+    @Test
     func failedReplacementLeavesPriorCompiledBrushPinned() async throws {
         guard let setup = try compilerSetup() else { return }
         let active = try await setup.compiler.compileAndActivate(
@@ -544,14 +851,14 @@ struct BrushCompilerTests {
         let pinned = setup.compiler.pinnedKeys
         let bytes = setup.compiler.residentByteCount
         let counters = setup.compiler.debugCounters
-        let replacement = try compilerPackage(
-            definitionID: "brush.failed-replacement",
-            interaction: .smudge
-        )
-
-        _ = try await compilationFailure {
-            _ = try await setup.compiler.compileAndActivate(
-                package: replacement
+        #expect(throws: BrushDefinitionValidationError
+            .unsupportedComponentInteraction(
+                ordinal: 0,
+                interaction: .smudge
+            )) {
+            _ = try compilerPackage(
+                definitionID: "brush.failed-replacement",
+                interaction: .smudge
             )
         }
 
@@ -621,8 +928,8 @@ struct BrushCompilerTests {
             package: package
         )
 
-        #expect(compiled.textures["shape.main"]?.width == 2)
-        #expect(compiled.textures["shape.main"]?.height == 2)
+        #expect(compiled.primaryComponent.textures["shape.main"]?.width == 2)
+        #expect(compiled.primaryComponent.textures["shape.main"]?.height == 2)
         #expect(compiled.residentByteCount == 5)
         #expect(compiled.diagnostics == [
             .resourceResampled(
@@ -644,18 +951,10 @@ struct BrushCompilerTests {
                 maximumResourceDimension: 8
             )
         )
-        #expect(builtIn.textures["builtin.shape.soft-round"]?.width == 4)
-        #expect(builtIn.textures["builtin.shape.soft-round"]?.height == 4)
-        #expect(builtIn.residentByteCount == 21)
-        #expect(builtIn.diagnostics == [
-            .resourceResampled(
-                id: "builtin.shape.soft-round",
-                sourceWidth: 64,
-                sourceHeight: 64,
-                workingWidth: 4,
-                workingHeight: 4
-            ),
-        ])
+        #expect(builtIn.primaryComponent.textures.isEmpty)
+        #expect(builtIn.primaryComponent.tipSupports.map(\.source) == [.analyticEllipse])
+        #expect(builtIn.residentByteCount == 0)
+        #expect(builtIn.diagnostics == [])
     }
 
     @Test
@@ -666,7 +965,7 @@ struct BrushCompilerTests {
             package: try compilerPackage(includeExtraShapeResource: true)
         )
 
-        #expect(compiled.textures.keys.sorted() == ["shape.extra", "shape.main"])
+        #expect(compiled.primaryComponent.textures.keys.sorted() == ["shape.extra", "shape.main"])
         #expect(compiled.report.performance.tier == .realtime60)
         #expect(compiled.report.performance.basis == .estimated)
     }
@@ -684,7 +983,7 @@ struct BrushCompilerTests {
             package: decorated
         )
 
-        #expect(second.textures.keys.sorted() == ["shape.main"])
+        #expect(second.primaryComponent.textures.keys.sorted() == ["shape.main"])
         #expect(setup.compiler.debugCounters.packageDecodeCount == before.packageDecodeCount + 1)
         #expect(setup.compiler.debugCounters.imageDecodeCount == before.imageDecodeCount)
         #expect(setup.compiler.debugCounters.textureUploadCount == before.textureUploadCount)
@@ -709,12 +1008,38 @@ struct BrushCompilerTests {
             package: second
         )
 
-        #expect(compiled.textures.keys.sorted() == ["shape.second"])
+        #expect(compiled.primaryComponent.textures.keys.sorted() == ["shape.second"])
         #expect(setup.compiler.cachedKeys.count == 1)
         #expect(setup.compiler.residentByteCount == 21)
         #expect(setup.compiler.debugCounters.imageDecodeCount == 1)
         #expect(setup.compiler.debugCounters.textureUploadCount == 1)
         #expect(setup.compiler.debugCounters.cacheHitCount == 1)
+    }
+
+    @Test
+    func grainCacheEntryCannotSatisfyShapeSupportForIdenticalImageBytes()
+        async throws
+    {
+        guard let setup = try compilerSetup() else { return }
+        let grain = try compilerPackage(
+            definitionID: "brush.cache-kind.grain",
+            resourceID: "grain.shared-bytes",
+            resourceKind: .grain
+        )
+        let shape = try compilerPackage(
+            definitionID: "brush.cache-kind.shape",
+            resourceID: "shape.shared-bytes"
+        )
+
+        _ = try await setup.compiler.compileAndActivate(package: grain)
+        let compiledShape = try await setup.compiler.compileAndActivate(
+            package: shape
+        )
+
+        #expect(compiledShape.primaryComponent.tipSupports.first?.assetSupport != nil)
+        #expect(setup.compiler.cachedKeys.count == 2)
+        #expect(setup.compiler.debugCounters.imageDecodeCount == 2)
+        #expect(setup.compiler.debugCounters.textureUploadCount == 2)
     }
 
     @Test
@@ -759,7 +1084,9 @@ struct BrushCompilerTests {
     }
 
     @Test
-    func builtInAndDeclaredFallbackUsePrivatePyramidsWithHonestReport() async throws {
+    func analyticTipBypassesTexturesAndDeclaredFallbackUsesPrivatePyramid()
+        async throws
+    {
         guard let setup = try compilerSetup() else { return }
         let builtIn = try compilerPackage(
             definitionID: "brush.builtin",
@@ -777,9 +1104,10 @@ struct BrushCompilerTests {
         let first = try await setup.compiler.compileAndActivate(package: builtIn)
         let second = try await setup.compiler.compileAndActivate(package: fallback)
 
-        #expect(first.textures["builtin.shape.soft-round"]?.storageMode == .private)
-        #expect(first.residentByteCount == BrushTextureFactory.mipmappedTextureByteCount)
-        #expect(second.textures["shape.missing"]?.storageMode == .private)
+        #expect(first.primaryComponent.textures.isEmpty)
+        #expect(first.primaryComponent.tipSupports.map(\.source) == [.analyticEllipse])
+        #expect(first.residentByteCount == 0)
+        #expect(second.primaryComponent.textures["shape.missing"]?.storageMode == .private)
         #expect(second.report.compatibility == [
             BrushCompatibilityEntry(
                 semanticKey: "resource.shape.missing",
@@ -804,8 +1132,8 @@ struct BrushCompilerTests {
             package: package
         )
 
-        #expect(compiled.textures["shape.professional"]?.width == 128)
-        #expect(compiled.textures["shape.professional"]?.mipmapLevelCount == 8)
+        #expect(compiled.primaryComponent.textures["shape.professional"]?.width == 128)
+        #expect(compiled.primaryComponent.textures["shape.professional"]?.mipmapLevelCount == 8)
         #expect(compiled.residentByteCount == 21_845)
     }
 
@@ -833,21 +1161,6 @@ struct BrushCompilerTests {
         #expect(unknownFailure.resourceID == "shape.missing")
         #expect(unknownFailure.reason == "unknownBuiltinResource")
 
-        let colliding = try compilerPackage(
-            definitionID: "brush.colliding-resource",
-            resourceID: BrushTextureIdentity.hardRoundShape.rawValue,
-            additionalDirectShape: .hardRound
-        )
-        let collisionFailure = try await compilationFailure {
-            _ = try await setup.compiler.compileAndActivate(package: colliding)
-        }
-        #expect(collisionFailure.stage == .imageDecode)
-        #expect(
-            collisionFailure.resourceID
-                == BrushTextureIdentity.hardRoundShape.rawValue
-        )
-        #expect(collisionFailure.reason == "resourceIdentifierCollision")
-
         let semantic = try compilerPackage(
             definitionID: "brush.semantic",
             requiredSemanticKeys: ["foreign.secret"]
@@ -859,33 +1172,16 @@ struct BrushCompilerTests {
         #expect(semanticFailure.resourceID == nil)
         #expect(semanticFailure.reason == "unsupportedRequiredSemantic")
 
-        let interaction = try compilerPackage(
-            definitionID: "brush.interaction",
-            interaction: .pickup
-        )
-        let interactionFailure = try await compilationFailure {
-            _ = try await setup.compiler.compileAndActivate(package: interaction)
-        }
-        #expect(interactionFailure.stage == .pipelineSelection)
-        #expect(interactionFailure.reason == "unsupportedInteraction")
-
-        let invalidInteractionProgram = try compilerPackage(
-            definitionID: "brush.invalid-interaction-program",
-            interaction: .pickup,
-            extraCapabilities: [
-                BrushCapabilityDeclaration(
-                    identifier: "future.required",
-                    required: true
-                ),
-            ]
-        )
-        let invalidProgramFailure = try await compilationFailure {
-            _ = try await setup.compiler.compileAndActivate(
-                package: invalidInteractionProgram
+        #expect(throws: BrushDefinitionValidationError
+            .unsupportedComponentInteraction(
+                ordinal: 0,
+                interaction: .pickup
+            )) {
+            _ = try compilerPackage(
+                definitionID: "brush.interaction",
+                interaction: .pickup
             )
         }
-        #expect(invalidProgramFailure.stage == .definition)
-        #expect(invalidProgramFailure.backend == .canvasInteraction)
         #expect(setup.compiler.activeBrush === active)
     }
 
@@ -970,6 +1266,7 @@ struct BrushCompilerTests {
         )
         let uploadKeys = uploadCompiler.cachedKeys
         let uploadBytes = uploadCompiler.residentByteCount
+        let uploadCounters = uploadCompiler.debugCounters
         let twoResources = try compilerTwoResourcePackage()
         let uploadFailure = try await compilationFailure {
             _ = try await uploadCompiler.compileAndActivate(
@@ -981,7 +1278,7 @@ struct BrushCompilerTests {
         #expect(uploadCompiler.activeBrush === uploadActive)
         #expect(uploadCompiler.cachedKeys == uploadKeys)
         #expect(uploadCompiler.residentByteCount == uploadBytes)
-        #expect(uploadCompiler.debugCounters.textureUploadCount >= 2)
+        #expect(uploadCompiler.debugCounters == uploadCounters)
 
         let admissionCompiler = BrushCompiler(
             device: device,
@@ -1786,14 +2083,151 @@ struct BrushCompilerTests {
                 color: .black,
                 seed: UInt64(index + 1)
             )
-            let batches = generator.beginBatches(
+            emitted += try generator.currentSampleDabs(
                 compilerWorldSample(phase: .began)
-            )
-            emitted += batches.reduce(0) { $0 + $1.dabs.count }
+            ).count
         }
 
         #expect(emitted == 1_000)
         #expect(setup.compiler.debugCounters == before)
+    }
+
+    @Test(arguments: [
+        (BrushShapeDescriptor.hardRound, CompiledBrushTipSource.analyticEllipse),
+        (BrushShapeDescriptor.softRound, CompiledBrushTipSource.analyticEllipse),
+        (BrushShapeDescriptor.chisel, CompiledBrushTipSource.analyticRectangle),
+    ])
+    func proceduralTipsCompileWithoutPrebakedShapeTextures(
+        shape: BrushShapeDescriptor,
+        source: CompiledBrushTipSource
+    ) async throws {
+        guard let setup = try compilerSetup() else { return }
+        let compiled = try await setup.compiler.compileAndActivate(
+            package: try compilerPackage(resourceID: nil, directShape: shape)
+        )
+
+        #expect(compiled.primaryComponent.tipSupports.map(\.source) == [source])
+        #expect(compiled.primaryComponent.textures.isEmpty)
+        #expect(compiled.residentByteCount == 0)
+        #expect(setup.compiler.debugCounters.imageDecodeCount == 0)
+        #expect(setup.compiler.debugCounters.textureUploadCount == 0)
+    }
+
+    @Test
+    func compiledCursorProfileReusesTipMetadataWithoutCompilerWork()
+        async throws
+    {
+        guard let setup = try compilerSetup() else { return }
+        let chisel = try await setup.compiler.compileAndActivate(
+            package: try compilerPackage(
+                definitionID: "brush.cursor.chisel",
+                resourceID: nil,
+                directShape: .chisel
+            )
+        )
+        let asset = try await setup.compiler.compileAndActivate(
+            package: try compilerPackage(
+                definitionID: "brush.cursor.asset"
+            )
+        )
+        let dual = try await setup.compiler.compileAndActivate(
+            package: try compilerPackage(
+                definitionID: "brush.cursor.dual",
+                resourceID: nil,
+                directShape: .hardRound,
+                additionalDirectShape: .chisel
+            )
+        )
+
+        #expect(chisel.primaryComponent.cursorTipProfile.primary == .analyticRectangle)
+        guard case let .contour(cursorContour) = asset.primaryComponent.cursorTipProfile.primary
+        else {
+            Issue.record("asset cursor did not retain its compiled contour")
+            return
+        }
+        #expect(cursorContour == asset.primaryComponent.tipSupports[0].assetSupport?.contour)
+        #expect(dual.primaryComponent.cursorTipProfile.primary == .analyticEllipse)
+        #expect(dual.primaryComponent.cursorTipProfile.secondary == .analyticRectangle)
+        #expect(dual.primaryComponent.cursorTipProfile.secondaryCombination == .multiply)
+
+        let before = setup.compiler.debugCounters
+        let input = try BrushCursorInput(
+            nominalDiameter: 40,
+            pressure: nil,
+            altitude: nil,
+            azimuth: nil,
+            roll: nil,
+            tangentialPressure: nil,
+            direction: 0,
+            deformation: .identity,
+            viewportScale: 1,
+            backingScale: 1
+        )
+        for _ in 0..<1_000 {
+            _ = try asset.cursorDescriptor(input: input)
+        }
+
+        #expect(setup.compiler.debugCounters == before)
+    }
+
+    @Test
+    func equivalentTipsShareSemanticTipHashAcrossBrushDefinitions()
+        async throws
+    {
+        guard let setup = try compilerSetup() else { return }
+        let first = try await setup.compiler.compileAndActivate(
+            package: try compilerPackage(
+                definitionID: "brush.tip-identity.first",
+                resourceID: nil,
+                directShape: .softRound
+            )
+        )
+        let second = try await setup.compiler.compileAndActivate(
+            package: try compilerPackage(
+                definitionID: "brush.tip-identity.second",
+                resourceID: nil,
+                directShape: .softRound
+            )
+        )
+
+        #expect(
+            first.primaryComponent.tipSupports.map(\.semanticTipHash)
+                == second.primaryComponent.tipSupports.map(\.semanticTipHash)
+        )
+    }
+
+    @Test
+    func differentAnalyticCoverageFunctionsHaveDistinctSemanticTipHashes()
+        async throws
+    {
+        guard let setup = try compilerSetup() else { return }
+        let hardRound = try await setup.compiler.compileAndActivate(
+            package: try compilerPackage(
+                definitionID: "brush.tip-identity.hard-round",
+                resourceID: nil,
+                directShape: .hardRound
+            )
+        )
+        let softRound = try await setup.compiler.compileAndActivate(
+            package: try compilerPackage(
+                definitionID: "brush.tip-identity.soft-round",
+                resourceID: nil,
+                directShape: .softRound
+            )
+        )
+        let chisel = try await setup.compiler.compileAndActivate(
+            package: try compilerPackage(
+                definitionID: "brush.tip-identity.chisel",
+                resourceID: nil,
+                directShape: .chisel
+            )
+        )
+        let identities = Set(
+            [hardRound, softRound, chisel]
+                .compactMap(\.primaryComponent.tipSupports.first?.semanticTipHash)
+        )
+
+        #expect(identities.count == 3)
     }
 }
 
@@ -1818,7 +2252,8 @@ private func compilerSetup(
     brushCacheBudgetBytes: Int = 128 * 1_024 * 1_024,
     targetFramesPerSecond: Int = 120,
     initialRequestGeneration: UInt64 = 0,
-    initialStateRevision: UInt64 = 0
+    initialStateRevision: UInt64 = 0,
+    backendRegistry: BrushBackendRegistry = .nativeSchema3
 ) throws -> (
     compiler: BrushCompiler,
     device: any MTLDevice,
@@ -1842,7 +2277,8 @@ private func compilerSetup(
             pipelinePreparing: pipelines,
             testHooks: .none,
             initialRequestGeneration: initialRequestGeneration,
-            initialStateRevision: initialStateRevision
+            initialStateRevision: initialStateRevision,
+            backendRegistry: backendRegistry
         ),
         device,
         queue,
@@ -1867,6 +2303,7 @@ private func compilerProfile(
 private func compilerPackage(
     definitionID: String = "brush.exact",
     resourceID: String? = "shape.main",
+    resourceKind: BrushResourceKind = .shape,
     resourceBytes: Data = compilerFixturePNG,
     mediaType: String = "image/png",
     width: Int = 4,
@@ -1884,15 +2321,15 @@ private func compilerPackage(
     includePreview: Bool = false,
     includeExtraShapeResource: Bool = false,
     additionalDirectShape: BrushShapeDescriptor? = nil,
-    extraCapabilities: [BrushCapabilityDeclaration] = []
+    extraCapabilities: [BrushCapabilityDeclaration] = [],
+    secondaryColorMix: Float = 0
 ) throws -> BrushPackage {
-    let base = try LegacyBrushRecipeAdapter.definition(
-        from: BrushRecipe(id: BrushRecipeID(definitionID)),
-        displayName: definitionID
-    )
-    let shape: BrushShapeDescriptor = resourceID.map {
-        .asset($0)
-    } ?? directShape
+    let base = try stageCMetalBaseDefinition(id: definitionID)
+    let shape: BrushShapeDescriptor = if resourceKind == .shape {
+        resourceID.map { .asset($0) } ?? directShape
+    } else {
+        directShape
+    }
     var references: [BrushResourceReference] = []
     var manifestResources: [BrushPackageResource] = []
     var data: [String: Data] = [:]
@@ -1900,7 +2337,7 @@ private func compilerPackage(
         references.append(
             BrushResourceReference(
                 identifier: resourceID,
-                kind: .shape,
+                kind: resourceKind,
                 required: resourceRequired,
                 fallback: fallback.map {
                     .builtIn(identifier: $0)
@@ -1911,7 +2348,7 @@ private func compilerPackage(
             manifestResources.append(
                 try BrushPackageResource(
                     id: resourceID,
-                    kind: .shape,
+                    kind: resourceKind,
                     mediaType: mediaType,
                     data: resourceBytes,
                     pixelWidth: width,
@@ -1961,7 +2398,7 @@ private func compilerPackage(
     let material: BrushMaterialDefinition
     if interaction == .none, edgeTreatment == nil {
         capabilities = base.capabilities
-        material = base.material
+        material = base.components[0].material
     } else {
         let interactionCapability: BrushCapability? = switch interaction {
         case .none:
@@ -1982,14 +2419,14 @@ private func compilerPackage(
             ]
         } ?? base.capabilities
         material = BrushMaterialDefinition(
-            accumulation: base.material.accumulation,
+            accumulation: base.components[0].material.accumulation,
             interaction: interaction,
-            edgeTreatment: edgeTreatment ?? base.material.edgeTreatment,
-            strength: base.material.strength,
-            wetness: base.material.wetness,
-            bleedRadius: base.material.bleedRadius,
-            softenPasses: base.material.softenPasses,
-            accumulationLimit: base.material.accumulationLimit,
+            edgeTreatment: edgeTreatment ?? base.components[0].material.edgeTreatment,
+            strength: base.components[0].material.strength,
+            wetness: base.components[0].material.wetness,
+            bleedRadius: base.components[0].material.bleedRadius,
+            softenPasses: base.components[0].material.softenPasses,
+            accumulationLimit: base.components[0].material.accumulationLimit,
             interactionParameters: interaction == .none
                 ? nil
                 : BrushInteractionDefinition(
@@ -2029,26 +2466,70 @@ private func compilerPackage(
             )
         )
     }
+    let grains: [BrushGrainLayerDefinition] = if resourceKind == .grain,
+                                                  let resourceID
+    {
+        [
+            BrushGrainLayerDefinition(
+                grain: .asset(resourceID),
+                coordinateMode: .canonical,
+                transform: .identity,
+                grainMovementFraction: 0,
+                grainFollowsBrushRotation: false,
+                strength: 1
+            ),
+        ]
+    } else {
+        []
+    }
+    let secondaryColorMapping = BrushMappingDefinition(
+        input: .pressure,
+        response: .constant(secondaryColorMix),
+        scale: 1,
+        offset: 0,
+        lowerClamp: secondaryColorMix,
+        upperClamp: secondaryColorMix,
+        inverted: false,
+        jitter: 0,
+        missingInputValue: 1
+    )
+    let dynamics = BrushDynamicsDefinition(
+        size: base.components[0].dynamics.size,
+        flow: base.components[0].dynamics.flow,
+        opacity: base.components[0].dynamics.opacity,
+        spacing: base.components[0].dynamics.spacing,
+        rotation: base.components[0].dynamics.rotation,
+        scatter: base.components[0].dynamics.scatter,
+        hardness: base.components[0].dynamics.hardness,
+        grain: base.components[0].dynamics.grain,
+        offsetX: base.components[0].dynamics.offsetX,
+        offsetY: base.components[0].dynamics.offsetY,
+        hue: base.components[0].dynamics.hue,
+        saturation: base.components[0].dynamics.saturation,
+        brightness: base.components[0].dynamics.brightness,
+        secondaryColorMix: secondaryColorMapping,
+        noPressureNeutral: base.components[0].dynamics.noPressureNeutral,
+        randomization: base.components[0].dynamics.randomization
+    )
     let definition = try BrushDefinition(
         id: BrushRecipeID(definitionID),
-        schemaVersion: base.schemaVersion,
         metadata: base.metadata,
         capabilities: capabilities,
         resources: references.sorted { $0.identifier < $1.identifier },
         coverage: BrushCoverageDefinition(
             shapes: shapes,
-            grains: [],
-            baseHardness: base.coverage.baseHardness,
-            aspectRatio: base.coverage.aspectRatio,
-            tipThreshold: base.coverage.tipThreshold,
-            antialiasing: base.coverage.antialiasing
+            grains: grains,
+            baseHardness: base.components[0].coverage.baseHardness,
+            aspectRatio: base.components[0].coverage.aspectRatio,
+            tipThreshold: base.components[0].coverage.tipThreshold,
+            antialiasing: base.components[0].coverage.antialiasing
         ),
-        placement: base.placement,
-        dynamics: base.dynamics,
-        color: base.color,
+        placement: base.components[0].placement,
+        dynamics: dynamics,
+        color: base.components[0].color,
         material: material,
         stabilization: base.stabilization,
-        taper: base.taper,
+        taper: base.components[0].taper,
         replayMode: base.replayMode,
         replayLimits: base.replayLimits,
         seedPolicy: base.seedPolicy,
@@ -2062,7 +2543,6 @@ private func compilerPackage(
         ),
         performanceIntent: performanceIntent,
         compatibility: BrushCompatibilityMetadata(
-            nativeFeatureVersion: base.compatibility.nativeFeatureVersion,
             sourceSettingKeys: base.compatibility.sourceSettingKeys,
             requiredSemanticKeys: requiredSemanticKeys
         )
@@ -2075,10 +2555,7 @@ private func compilerPackage(
 }
 
 private func compilerTwoResourcePackage() throws -> BrushPackage {
-    let base = try LegacyBrushRecipeAdapter.definition(
-        from: BrushRecipe(id: BrushRecipeID("brush.two")),
-        displayName: "brush.two"
-    )
+    let base = try stageCMetalBaseDefinition(id: "brush.two")
     let secondBytes = Data(compilerFixturePNG + [0])
     let resources = try [
         BrushPackageResource(
@@ -2134,17 +2611,17 @@ private func compilerTwoResourcePackage() throws -> BrushPackage {
                 ),
             ],
             grains: [],
-            baseHardness: base.coverage.baseHardness,
-            aspectRatio: base.coverage.aspectRatio,
-            tipThreshold: base.coverage.tipThreshold,
-            antialiasing: base.coverage.antialiasing
+            baseHardness: base.components[0].coverage.baseHardness,
+            aspectRatio: base.components[0].coverage.aspectRatio,
+            tipThreshold: base.components[0].coverage.tipThreshold,
+            antialiasing: base.components[0].coverage.antialiasing
         ),
-        placement: base.placement,
-        dynamics: base.dynamics,
-        color: base.color,
-        material: base.material,
+        placement: base.components[0].placement,
+        dynamics: base.components[0].dynamics,
+        color: base.components[0].color,
+        material: base.components[0].material,
         stabilization: base.stabilization,
-        taper: base.taper,
+        taper: base.components[0].taper,
         replayMode: base.replayMode,
         replayLimits: base.replayLimits,
         seedPolicy: base.seedPolicy,
@@ -2166,6 +2643,216 @@ private func compilerTwoResourcePackage() throws -> BrushPackage {
             "shape.a": compilerFixturePNG,
             "shape.b": secondBytes,
         ]
+    )
+}
+
+private func compilerCompositePackage(
+    definitionID: String,
+    includeSecondaryGrain: Bool = true
+) throws -> BrushPackage {
+    let package = try compilerPackage(
+        definitionID: definitionID,
+        resourceID: nil,
+        directShape: .hardRound
+    )
+    let definition = package.definition
+    let primary = definition.components[0]
+    let secondaryCoverage = BrushCoverageDefinition(
+        shapes: [BrushShapeLayerDefinition(
+            shape: .chisel,
+            combination: .replace,
+            scale: 0.75,
+            rotation: 0.25,
+            offset: SIMD2<Float>(0.1, -0.2)
+        )],
+        grains: includeSecondaryGrain
+            ? [BrushGrainLayerDefinition(
+                grain: .paper,
+                coordinateMode: .canonical,
+                transform: .identity,
+                grainMovementFraction: 0,
+                grainFollowsBrushRotation: false,
+                strength: 0.6
+            )]
+            : [],
+        baseHardness: 0.6,
+        aspectRatio: 0.75,
+        tipThreshold: primary.coverage.tipThreshold,
+        antialiasing: primary.coverage.antialiasing
+    )
+    let secondaryPlacement = BrushPlacementDefinition(
+        baseSpacingFraction: 0.25,
+        maximumSpacingFraction: 0.5,
+        baseFlow: 0.75,
+        strokeOpacity: 0.8,
+        baseScatterFraction: 0,
+        baseRotation: 0,
+        baseJitterFraction: 0,
+        baseOffset: .zero
+    )
+    let secondaryMaterial = BrushMaterialDefinition(
+        accumulation: .uniformGlaze,
+        interaction: .none,
+        edgeTreatment: .dryBreakup,
+        strength: 0.75,
+        wetness: 0,
+        bleedRadius: 0,
+        softenPasses: 0,
+        accumulationLimit: 0.8,
+        interactionParameters: nil
+    )
+    let secondary = BrushComponentDefinition(
+        identifier: BrushComponentIdentifier("secondary"),
+        ordinal: 1,
+        resources: [],
+        coverage: secondaryCoverage,
+        placement: secondaryPlacement,
+        dynamics: primary.dynamics,
+        color: primary.color,
+        material: secondaryMaterial,
+        taper: primary.taper,
+        sensorProgram: primary.sensorProgram,
+        emission: primary.emission,
+        tipSupports: [.analyticRectangle]
+    )
+    let composite = try compilerCompositeDefinition(
+        definition,
+        components: [primary, secondary]
+    )
+    return try BrushPackage(
+        manifest: package.manifest,
+        definition: composite,
+        resourceData: package.resourceData
+    )
+}
+
+private func compilerSharedResourceCompositePackage() throws -> BrushPackage {
+    let package = try compilerPackage(
+        definitionID: "brush.composite.shared"
+    )
+    let definition = package.definition
+    let primary = definition.components[0]
+    let secondary = BrushComponentDefinition(
+        identifier: BrushComponentIdentifier("secondary"),
+        ordinal: 1,
+        resources: primary.resources,
+        coverage: primary.coverage,
+        placement: primary.placement,
+        dynamics: primary.dynamics,
+        color: primary.color,
+        material: primary.material,
+        taper: primary.taper,
+        sensorProgram: primary.sensorProgram,
+        emission: primary.emission,
+        tipSupports: primary.tipSupports
+    )
+    return try BrushPackage(
+        manifest: package.manifest,
+        definition: try compilerCompositeDefinition(
+            definition,
+            components: [primary, secondary]
+        ),
+        resourceData: package.resourceData
+    )
+}
+
+private func compilerDistinctResourceCompositePackage(
+    maximumResidentBytes: Int
+) throws -> BrushPackage {
+    let firstBytes = compilerFixturePNG
+    let secondBytes = Data(compilerFixturePNG + [0])
+    let resources = try [
+        BrushPackageResource(
+            id: "shape.primary",
+            kind: .shape,
+            mediaType: "image/png",
+            data: firstBytes,
+            pixelWidth: 4,
+            pixelHeight: 4
+        ),
+        BrushPackageResource(
+            id: "shape.secondary",
+            kind: .shape,
+            mediaType: "image/png",
+            data: secondBytes,
+            pixelWidth: 4,
+            pixelHeight: 4
+        ),
+    ]
+    let package = try compilerPackage(
+        definitionID: "brush.composite.aggregate",
+        resourceID: "shape.primary",
+        maximumResidentBytes: maximumResidentBytes
+    )
+    let definition = package.definition
+    let primary = definition.components[0]
+    let secondaryReference = BrushResourceReference(
+        identifier: "shape.secondary",
+        kind: .shape,
+        required: true,
+        fallback: nil
+    )
+    let secondary = BrushComponentDefinition(
+        identifier: BrushComponentIdentifier("secondary"),
+        ordinal: 1,
+        resources: [secondaryReference],
+        coverage: BrushCoverageDefinition(
+            shapes: [BrushShapeLayerDefinition(
+                shape: .asset("shape.secondary"),
+                combination: .replace,
+                scale: 1,
+                rotation: 0,
+                offset: .zero
+            )],
+            grains: [],
+            baseHardness: primary.coverage.baseHardness,
+            aspectRatio: primary.coverage.aspectRatio,
+            tipThreshold: primary.coverage.tipThreshold,
+            antialiasing: primary.coverage.antialiasing
+        ),
+        placement: primary.placement,
+        dynamics: primary.dynamics,
+        color: primary.color,
+        material: primary.material,
+        taper: primary.taper,
+        sensorProgram: primary.sensorProgram,
+        emission: primary.emission,
+        tipSupports: primary.tipSupports
+    )
+    return try BrushPackage(
+        manifest: BrushPackageManifest(resources: resources),
+        definition: try compilerCompositeDefinition(
+            definition,
+            components: [primary, secondary]
+        ),
+        resourceData: [
+            "shape.primary": firstBytes,
+            "shape.secondary": secondBytes,
+        ]
+    )
+}
+
+private func compilerCompositeDefinition(
+    _ base: BrushDefinition,
+    components: [BrushComponentDefinition]
+) throws -> BrushDefinition {
+    try BrushDefinition(
+        id: base.id,
+        metadata: base.metadata,
+        capabilities: base.capabilities,
+        composition: .orderedSourceOver,
+        components: components,
+        stabilization: base.stabilization,
+        replayMode: base.replayMode,
+        replayLimits: base.replayLimits,
+        termination: base.termination,
+        seedPolicy: base.seedPolicy,
+        limits: base.limits,
+        performanceIntent: base.performanceIntent,
+        compatibility: base.compatibility,
+        sensorNormalization: base.sensorNormalization,
+        stabilizationV2: base.stabilizationV2,
+        direction: base.direction
     )
 }
 
@@ -2210,6 +2897,7 @@ private final class CompilerPipelinePreparer:
     DepositionPipelinePreparing
 {
     var failure: DepositionPipelineLibraryError?
+    var failureBrushKey: BrushPipelineKey?
     var suspendedBrushKey: BrushPipelineKey?
     var suspensionGate: CompilerPhaseGate?
     private(set) var prepareCallCount = 0
@@ -2230,7 +2918,9 @@ private final class CompilerPipelinePreparer:
         if key.brush == suspendedBrushKey, let suspensionGate {
             await suspensionGate.suspend()
         }
-        if let failure {
+        if let failure,
+           failureBrushKey == nil || key.brush == failureBrushKey
+        {
             throw failure
         }
         if let binding = bindings[key] {
@@ -2262,11 +2952,11 @@ private func makeCompilerPipelinePreparer(
         """
     let library = try device.makeLibrary(source: source, options: nil)
     let descriptor = MTLRenderPipelineDescriptor()
-    descriptor.vertexFunction = try #require(
-        library.makeFunction(name: "compilerPipelineVertex")
+    descriptor.vertexFunction = library.makeFunction(
+        name: "compilerPipelineVertex"
     )
-    descriptor.fragmentFunction = try #require(
-        library.makeFunction(name: "compilerPipelineFragment")
+    descriptor.fragmentFunction = library.makeFunction(
+        name: "compilerPipelineFragment"
     )
     descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
     return CompilerPipelinePreparer(
@@ -2277,17 +2967,25 @@ private func makeCompilerPipelinePreparer(
 private func compilerPipelineKey(
     program: BrushProgram
 ) -> BrushPipelineKey {
-    let coverage = program.definition.coverage
+    compilerPipelineKey(
+        definition: program.definition.components[0],
+        backend: program.requestedBackend
+    )
+}
+
+private func compilerPipelineKey(
+    definition: BrushComponentDefinition,
+    backend: BrushBackendKind
+) -> BrushPipelineKey {
+    let coverage = definition.coverage
     return BrushPipelineKey(
-        backend: program.requestedBackend,
-        accumulation: program.definition.material.accumulation,
-        edgeTreatment: program.definition.material.edgeTreatment,
+        backend: backend,
+        accumulation: definition.material.accumulation,
+        edgeTreatment: definition.material.edgeTreatment,
         functionConstants: BrushFunctionConstants(
             usesSecondaryShape: coverage.shapes.count > 1,
             usesGrain: !coverage.grains.isEmpty,
-            usesSecondaryGrain: coverage.grains.count > 1,
-            usesDestinationSampling:
-                program.requestedBackend == .canvasInteraction
+            usesSecondaryGrain: coverage.grains.count > 1
         )
     )
 }

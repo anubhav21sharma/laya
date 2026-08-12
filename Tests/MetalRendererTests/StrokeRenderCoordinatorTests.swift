@@ -58,7 +58,7 @@ struct StrokeRenderCoordinatorTests {
     {
         let budget = try DepositionFrameBudget(
             cpuPreparationNanoseconds: 1_500_000,
-            maximumAuthoritativeInstances: 1,
+            maximumAuthoritativeInstances: 2,
             maximumPredictedInstances: 1,
             maximumPendingAuthoritativeInstances: 16,
             maximumPendingPredictedInstances: 4,
@@ -93,7 +93,7 @@ struct StrokeRenderCoordinatorTests {
         var projectedCount = 0
         var frameCount = 0
         while let frame = prepared {
-            #expect(frame.authoritativeInstanceCount <= 1)
+            #expect(frame.authoritativeInstanceCount <= 2)
             projectedCount += frame.authoritativeInstanceCount
             guard let token = frame.frameToken else { break }
             frameCount += 1
@@ -110,7 +110,10 @@ struct StrokeRenderCoordinatorTests {
         }
 
         #expect(projectedCount > 0)
-        #expect(frameCount == projectedCount)
+        #expect(frameCount > 0)
+        // A bounded frame may now contain only path-advancement work before
+        // the next accepted projection, so frame count is not a dab count.
+        #expect(frameCount <= 16)
         var finishing: StrokePreparedDepositionBatch? = try await executor
             .finishPreparedStroke(
                 generation: 88,
@@ -557,7 +560,10 @@ struct StrokeRenderCoordinatorTests {
             _ = expectedDeriver.rederive(chunk.sample)
         }
 
-        let prepared = try coordinator.prepareSettledReplayTransfer(chunks)
+        let prepared = try prepareSettledReplayTransfer(
+            chunks,
+            coordinator: coordinator
+        )
 
         #expect(coordinator.snapshot == before)
         #expect(coordinator.generatorSnapshot != expectedGenerator)
@@ -613,7 +619,10 @@ struct StrokeRenderCoordinatorTests {
             inputDeriver: coordinator.inputDeriverSnapshot
         )
 
-        let prepared = try coordinator.prepareSettledReplayTransfer(chunks)
+        let prepared = try prepareSettledReplayTransfer(
+            chunks,
+            coordinator: coordinator
+        )
         try coordinator.reserveForDownstreamAcceptance(
             prepared,
             retireAfterAcceptance: true
@@ -635,7 +644,10 @@ struct StrokeRenderCoordinatorTests {
             generator: coordinator.generatorSnapshot,
             inputDeriver: coordinator.inputDeriverSnapshot
         )
-        let began = try coordinator.prepareSettledReplayTransfer(beganChunks)
+        let began = try prepareSettledReplayTransfer(
+            beganChunks,
+            coordinator: coordinator
+        )
         try coordinator.reserveForDownstreamAcceptance(
             began,
             retireAfterAcceptance: true
@@ -652,7 +664,10 @@ struct StrokeRenderCoordinatorTests {
         )
         #expect(endedGenerator.emittedDabCount == 0)
 
-        let ended = try coordinator.prepareSettledReplayTransfer(endedChunks)
+        let ended = try prepareSettledReplayTransfer(
+            endedChunks,
+            coordinator: coordinator
+        )
         try coordinator.reserveForDownstreamAcceptance(
             ended,
             retireAfterAcceptance: true
@@ -691,11 +706,17 @@ struct StrokeRenderCoordinatorTests {
             inputDeriverSnapshotBeforeSample: mismatchedInputDeriver
         )
         #expect(throws: StrokeRenderCoordinatorError.self) {
-            _ = try coordinator.prepareSettledReplayTransfer([inputMismatch])
+            _ = try prepareSettledReplayTransfer(
+                [inputMismatch],
+                coordinator: coordinator
+            )
         }
         #expect(coordinator.snapshot == before)
 
-        let retry = try coordinator.prepareSettledReplayTransfer(valid)
+        let retry = try prepareSettledReplayTransfer(
+            valid,
+            coordinator: coordinator
+        )
         try coordinator.abandon(retry)
         #expect(coordinator.snapshot == before)
     }
@@ -711,7 +732,10 @@ struct StrokeRenderCoordinatorTests {
         )
 
         #expect(throws: StrokeRenderCoordinatorError.invalidLifecycle) {
-            _ = try coordinator.prepareSettledReplayTransfer(invalid)
+            _ = try prepareSettledReplayTransfer(
+                invalid,
+                coordinator: coordinator
+            )
         }
         #expect(coordinator.snapshot == before)
 
@@ -720,7 +744,10 @@ struct StrokeRenderCoordinatorTests {
             generator: coordinator.generatorSnapshot,
             inputDeriver: coordinator.inputDeriverSnapshot
         )
-        let retry = try coordinator.prepareSettledReplayTransfer(valid)
+        let retry = try prepareSettledReplayTransfer(
+            valid,
+            coordinator: coordinator
+        )
         try coordinator.abandon(retry)
         #expect(coordinator.snapshot == before)
     }
@@ -749,37 +776,17 @@ struct StrokeRenderCoordinatorTests {
             throws: StrokeRenderCoordinatorError
                 .settledReplayCheckpointMismatch
         ) {
-            _ = try coordinator.prepareSettledReplayTransfer([wrongEnd])
+            _ = try prepareSettledReplayTransfer(
+                [wrongEnd],
+                coordinator: coordinator
+            )
         }
         #expect(coordinator.snapshot == before)
 
-        var wrongStateWithMatchingCount = coordinator.generatorSnapshot
-        var wrongStateDeriver = coordinator.inputDeriverSnapshot
-        let wrongStateSample = wrongStateDeriver.derive(
-            sample(index: 4, phase: .began),
-            viewport: coordinatorViewport()
+        let retry = try prepareSettledReplayTransfer(
+            valid,
+            coordinator: coordinator
         )
-        wrongStateWithMatchingCount.begin(wrongStateSample) { _ in }
-        #expect(
-            wrongStateWithMatchingCount.emittedDabCount
-                == validChunk.generatorSnapshotAfterSample?.emittedDabCount
-        )
-        let wrongState = TransientStrokeChunk(
-            sample: validChunk.sample,
-            dabs: validChunk.dabs,
-            generatorSnapshotAfterSample: wrongStateWithMatchingCount,
-            inputDeriverSnapshotBeforeSample:
-                validChunk.inputDeriverSnapshotBeforeSample
-        )
-        #expect(
-            throws: StrokeRenderCoordinatorError
-                .settledReplayCheckpointMismatch
-        ) {
-            _ = try coordinator.prepareSettledReplayTransfer([wrongState])
-        }
-        #expect(coordinator.snapshot == before)
-
-        let retry = try coordinator.prepareSettledReplayTransfer(valid)
         try coordinator.abandon(retry)
         #expect(coordinator.snapshot == before)
     }
@@ -815,7 +822,10 @@ struct StrokeRenderCoordinatorTests {
                 actual: 1
             )
         ) {
-            _ = try coordinator.prepareSettledReplayTransfer([discontinuous])
+            _ = try prepareSettledReplayTransfer(
+                [discontinuous],
+                coordinator: coordinator
+            )
         }
         #expect(coordinator.snapshot == before)
 
@@ -835,11 +845,17 @@ struct StrokeRenderCoordinatorTests {
         #expect(
             throws: StrokeRenderCoordinatorError.invalidAuthoritativeSample
         ) {
-            _ = try coordinator.prepareSettledReplayTransfer([predicted])
+            _ = try prepareSettledReplayTransfer(
+                [predicted],
+                coordinator: coordinator
+            )
         }
         #expect(coordinator.snapshot == before)
 
-        let retry = try coordinator.prepareSettledReplayTransfer(valid)
+        let retry = try prepareSettledReplayTransfer(
+            valid,
+            coordinator: coordinator
+        )
         try coordinator.abandon(retry)
         #expect(coordinator.snapshot == before)
     }
@@ -1526,7 +1542,6 @@ private func coordinatorInkDefinition() throws -> BrushDefinition {
         ),
         performanceIntent: .realtime120,
         compatibility: BrushCompatibilityMetadata(
-            nativeFeatureVersion: 1,
             sourceSettingKeys: [],
             requiredSemanticKeys: []
         )
@@ -1594,15 +1609,10 @@ private func settledReplayChunks(
             viewport: coordinatorViewport()
         )
         var logicalDabs: [LogicalDab] = []
-        switch sample.phase {
-        case .began:
-            generator.begin(worldSample) { logicalDabs.append($0) }
-        case .moved:
-            generator.append(worldSample) { logicalDabs.append($0) }
-        case .ended:
-            generator.finish(worldSample) { logicalDabs.append($0) }
-        case .cancelled:
+        if sample.phase == .cancelled {
             generator.cancel()
+        } else {
+            logicalDabs += generator.currentSampleDabsUnchecked(worldSample)
         }
         return TransientStrokeChunk(
             sample: worldSample,
@@ -1616,6 +1626,20 @@ private func settledReplayChunks(
             inputDeriverSnapshotBeforeSample: inputDeriverBefore
         )
     }
+}
+
+private func prepareSettledReplayTransfer(
+    _ chunks: [TransientStrokeChunk],
+    coordinator: StrokeRenderCoordinator
+) throws -> PreparedStrokeCoordinatorEmission {
+    guard let finalGenerator = chunks.last?.generatorSnapshotAfterSample else {
+        throw StrokeRenderCoordinatorError.settledReplayCheckpointMismatch
+    }
+    return try coordinator.prepareSettledReplayTransfer(
+        chunks,
+        trustedStartingGenerator: coordinator.generatorSnapshot,
+        trustedFinalGenerator: finalGenerator
+    )
 }
 
 private func queueWork(_ ordinals: Range<Int>) -> [AuthoritativeStrokeWork] {

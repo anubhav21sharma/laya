@@ -42,7 +42,9 @@ struct BrushTextureFactoryTests {
             (.charcoalTipShape, .shape, 128, 8, 21_845),
             (.markerChiselShape, .shape, 128, 8, 21_845),
             (.graphiteGrain, .grain, 256, 9, 87_381),
+            (.graphitePaperGrain, .grain, 256, 9, 87_381),
             (.charcoalGrain, .grain, 256, 9, 87_381),
+            (.charcoalFineGrain, .grain, 256, 9, 87_381),
         ]
         var fingerprints: Set<UInt64> = []
 
@@ -210,13 +212,10 @@ struct BrushTextureResolverTests {
 
     @Test
     @MainActor
-    func supportedRecipeAssetCanBeUnavailableAndFallbackRetainsIdentity() throws {
+    func supportedDefinitionAssetCanBeUnavailableAndFallbackRetainsIdentity() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let requestedIdentity = BrushTextureIdentity.softRoundShape.rawValue
-        let recipe = try BrushRecipe(
-            id: BrushRecipeID("test.asset.available-catalog-miss"),
-            shape: .asset(requestedIdentity)
-        )
+        let shape = BrushShapeDescriptor.asset(requestedIdentity)
         var diagnostics: [BrushAssetFallbackDiagnostic] = []
         let availableIdentities = Set(BrushTextureIdentity.allCases)
             .subtracting([.softRoundShape])
@@ -227,8 +226,8 @@ struct BrushTextureResolverTests {
             diagnostics.append($0)
         }
 
-        let first = try resolver.resolve(shape: recipe.shape)
-        let second = try resolver.resolve(shape: recipe.shape)
+        let first = try resolver.resolve(shape: shape)
+        let second = try resolver.resolve(shape: shape)
 
         #expect(first.requestedIdentity == requestedIdentity)
         #expect(first.resolvedIdentity == .hardRoundShape)

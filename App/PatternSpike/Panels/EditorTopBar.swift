@@ -9,11 +9,41 @@ import AppKit
 import UIKit
 #endif
 
+enum EditorInkColorPreset: CaseIterable, Sendable {
+    case black
+    case deepTeal
+    case burntOrange
+
+    var displayName: String {
+        switch self {
+        case .black: "Black"
+        case .deepTeal: "Deep Teal"
+        case .burntOrange: "Burnt Orange"
+        }
+    }
+
+    var inkColor: InkColor {
+        let bytes: (UInt8, UInt8, UInt8, UInt8) = switch self {
+        case .black: (0x00, 0x00, 0x00, 0xFF)
+        case .deepTeal: (0x10, 0x73, 0x8C, 0xFF)
+        case .burntOrange: (0xC4, 0x51, 0x1B, 0xFF)
+        }
+        return InkColor(
+            red: Float(bytes.0) / 255,
+            green: Float(bytes.1) / 255,
+            blue: Float(bytes.2) / 255,
+            alpha: Float(bytes.3) / 255
+        )!
+    }
+}
+
 struct EditorTopBar: View {
     let controller: EditorSessionController
     let requestEditorFocus: @MainActor () -> Void
     let openProject: @MainActor () -> Void
     let saveProject: @MainActor () -> Void
+    let exportImage: @MainActor () -> Void
+    let imageExportEnabled: Bool
     let fileOperationsEnabled: Bool
     let reportError: @MainActor (Error) -> Void
 
@@ -22,6 +52,8 @@ struct EditorTopBar: View {
         requestEditorFocus: @escaping @MainActor () -> Void,
         openProject: @escaping @MainActor () -> Void = {},
         saveProject: @escaping @MainActor () -> Void = {},
+        exportImage: @escaping @MainActor () -> Void = {},
+        imageExportEnabled: Bool = false,
         fileOperationsEnabled: Bool = false,
         reportError: @escaping @MainActor (Error) -> Void = { _ in }
     ) {
@@ -29,6 +61,8 @@ struct EditorTopBar: View {
         self.requestEditorFocus = requestEditorFocus
         self.openProject = openProject
         self.saveProject = saveProject
+        self.exportImage = exportImage
+        self.imageExportEnabled = imageExportEnabled
         self.fileOperationsEnabled = fileOperationsEnabled
         self.reportError = reportError
     }
@@ -48,6 +82,13 @@ struct EditorTopBar: View {
             .frame(width: editorControlExtent, height: editorControlExtent)
             .accessibilityLabel("Save Project")
             .disabled(!fileOperationsEnabled)
+
+            Button(action: exportImage) {
+                Image(systemName: "photo.badge.arrow.down")
+            }
+            .frame(width: editorControlExtent, height: editorControlExtent)
+            .accessibilityLabel("Export PNG")
+            .disabled(!fileOperationsEnabled || !imageExportEnabled)
 
             Divider()
                 .frame(height: 20)
@@ -115,6 +156,20 @@ struct EditorTopBar: View {
             .labelsHidden()
             .frame(width: editorControlExtent, height: editorControlExtent)
             #endif
+
+            Menu {
+                ForEach(EditorInkColorPreset.allCases, id: \.self) { preset in
+                    Button(preset.displayName) {
+                        controller.handleInkColor(preset.inkColor)
+                        requestEditorFocus()
+                    }
+                }
+            } label: {
+                Image(systemName: "paintpalette")
+            }
+            .frame(width: editorControlExtent, height: editorControlExtent)
+            .accessibilityLabel("Ink Color Preset")
+            .accessibilityValue(Self.rgba8Hex(controller.model.inkColor))
 
             Divider()
                 .frame(height: 20)
@@ -246,6 +301,13 @@ struct EditorTopBar: View {
             alpha: converted.alpha
         )
         #endif
+    }
+
+    static func rgba8Hex(_ color: InkColor) -> String {
+        [color.red, color.green, color.blue, color.alpha].map { component in
+            let scaled = Int((component * 255).rounded())
+            return String(format: "%02x", max(0, min(255, scaled)))
+        }.joined()
     }
 
     private static func boundedEncodedSRGBColor(

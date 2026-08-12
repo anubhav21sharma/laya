@@ -8,6 +8,45 @@ import Testing
 
 @Suite("Linear sparse layer compositor", .serialized)
 struct LayerCompositorTests {
+    @Test
+    func failuresRetainActionableLocalizedDescriptions() {
+        #expect(
+            LayerCompositorError.invalidLimit.localizedDescription
+                == "Layer compositor limits are invalid."
+        )
+        #expect(
+            LayerCompositorError.invalidTarget.localizedDescription
+                == "Layer compositor target is incompatible."
+        )
+        #expect(
+            LayerCompositorError.scratchLimitExceeded(
+                required: 100,
+                maximum: 80
+            ).localizedDescription
+                == "Layer compositor scratch requires 100 bytes; maximum is 80 bytes."
+        )
+        #expect(
+            LayerCompositorError.commandFailed("out of memory")
+                .localizedDescription
+                == "Layer compositor Metal command failed: out of memory"
+        )
+    }
+
+    @Test
+    func productionDisplayLimitsAllowRetinaViewportWithoutIncreasingByteBudget()
+    {
+        let limits = LayerCompositorLimits.production
+        let width = 2_186
+        let height = 1_821
+        let requiredBytes = width * height * 3 * 8
+
+        #expect(requiredBytes == 95_536_944)
+        #expect(requiredBytes <= limits.maximumScratchBytes)
+        #expect(width <= limits.maximumWidth)
+        #expect(height <= limits.maximumHeight)
+        #expect(limits.maximumScratchBytes == 96 * 1_024 * 1_024)
+    }
+
     @Test @MainActor
     func finiteExportCompositesTheCurrentNativeLayerStackOnce() async throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
@@ -601,6 +640,62 @@ struct LayerCompositorTests {
         #expect(store.activeLeaseCount == 0)
         #expect(store.activeSnapshotTokenCount == 0)
         #expect(store.aggregateSnapshotReferenceCount == 0)
+    }
+
+    @Test @MainActor
+    func displayCompletionPollDoesNotTreatConcurrentPreparationAsCleanupDebt()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layer = try descriptor(421)
+        let stack = try LayerStack(layers: [layer], activeLayerID: layer.id)
+        let size = PixelSize(width: 256, height: 256)
+        let registry = try DocumentPaintSurfaceStore(
+            device: device,
+            byteBudget: PaintTileDescriptor.residentByteCount,
+            geometry: DocumentPaintGeometry(
+                documentPixelSize: size,
+                storagePixelSize: size,
+                radialLayout: nil
+            ),
+            layerIDs: stack.orderedLayerIDs,
+            layerStack: stack
+        )
+        let output = try SparseTileOutputRegion(
+            minX: 0, minY: 0, maxX: 2, maxY: 2
+        )
+        let compositor = try LayerCompositor.make(
+            device: device,
+            library: makeLayerCompositorLibrary(device: device),
+            backendRequest: .forceFallback
+        )
+        let plan = try registry.prepareLayerCompositePlan(
+            layerStack: stack,
+            addressing: .finite(size),
+            addressingRevision: 0,
+            outputRegion: output,
+            outputGeometryRevision: 0,
+            limits: .documentProduction
+        )
+
+        let preparation = Task {
+            try await compositor.prepareDisplay(plan, parameters: .identity)
+        }
+        while !(await compositor.snapshot()).isBusy {
+            await Task.yield()
+        }
+
+        try await compositor.retryDisplayCompletion()
+        let submission = try await preparation.value
+
+        #expect(!submission.isTerminal)
+        #expect(plan.isClosed)
+        #expect((await compositor.snapshot()).isBusy)
+
+        try submission.cancel()
+        try await compositor.retryDisplayCompletion()
+        #expect(submission.isTerminal)
+        #expect(!(await compositor.snapshot()).isBusy)
     }
 
     @Test @MainActor

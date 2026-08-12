@@ -102,26 +102,6 @@ import Testing
     #expect(try temporaryFiles(in: directory).isEmpty)
 }
 
-@Test func loadingFrozenSchemaV1ArchiveNeverRewritesItsBytes() throws {
-    let fixture = try #require(
-        Bundle.module.url(
-            forResource: "stage2-v1",
-            withExtension: "layabrush",
-            subdirectory: "Fixtures"
-        )
-    )
-    let directory = try BrushFormatTestSupport.temporaryDirectory()
-    defer { try? FileManager.default.removeItem(at: directory) }
-    let copy = directory.appendingPathComponent("stage2-v1.layabrush")
-    let original = try Data(contentsOf: fixture)
-    try original.write(to: copy)
-
-    let loaded = try BrushPackageIO.load(from: copy)
-
-    #expect(loaded.definition.schemaVersion == 1)
-    #expect(try Data(contentsOf: copy) == original)
-}
-
 private enum InjectedFailure: Error {
     case stop
 }

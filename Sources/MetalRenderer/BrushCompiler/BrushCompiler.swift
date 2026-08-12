@@ -11,20 +11,20 @@ enum BrushCompilerPhase: String, CaseIterable, Equatable, Sendable {
     case beforeCacheTransaction
 }
 
-struct BrushCompilerPhaseContext: Equatable, Sendable {
+package struct BrushCompilerPhaseContext: Equatable, Sendable {
     let phase: BrushCompilerPhase
     let definitionID: String
     let resourceID: String?
 }
 
-struct BrushCompilerTestHooks {
+package struct BrushCompilerTestHooks {
     let uploadFailureResourceID: String?
     let admissionFailureDefinitionID: String?
     let onPackageHash: @Sendable (String) async throws -> Void
     let onPhase:
         @MainActor @Sendable (BrushCompilerPhaseContext) async -> Void
 
-    init(
+    package init(
         uploadFailureResourceID: String? = nil,
         admissionFailureDefinitionID: String? = nil,
         onPackageHash:
@@ -39,7 +39,7 @@ struct BrushCompilerTestHooks {
         self.onPhase = onPhase
     }
 
-    init(
+    package init(
         _ onPhase:
             @escaping @MainActor @Sendable
             (BrushCompilerPhaseContext) async -> Void
@@ -47,7 +47,7 @@ struct BrushCompilerTestHooks {
         self.init(onPhase: onPhase)
     }
 
-    static let none = BrushCompilerTestHooks()
+    package static let none = BrushCompilerTestHooks()
 }
 
 private enum BrushCompilerWorkSource: Sendable {
@@ -70,6 +70,7 @@ private enum BrushCompilerPreparationError: Error {
     case missingManifestResource(resourceID: String)
     case resourceIdentifierCollision(resourceID: String)
     case resourceCostOverflow
+    case missingTipSupport(resourceID: String)
 }
 
 private enum BrushCompilerCounterField {
@@ -153,15 +154,15 @@ public final class BrushCompiler {
         )
     }
 
-    var cachedKeys: [String] {
+    package var cachedKeys: [String] {
         cache.keys
     }
 
-    var pinnedKeys: [String] {
+    package var pinnedKeys: [String] {
         cache.pinnedKeys
     }
 
-    var residentByteCount: Int {
+    package var residentByteCount: Int {
         cache.residentByteCount
     }
 
@@ -176,6 +177,7 @@ public final class BrushCompiler {
     private let device: any MTLDevice
     private let commandQueue: any MTLCommandQueue
     private let profile: BrushDeviceProfile
+    private let backendRegistry: BrushBackendRegistry
     private let pipelinePreparing: any DepositionPipelinePreparing
     private let testHooks: BrushCompilerTestHooks
     private var cache: BrushResourceCache
@@ -214,18 +216,20 @@ public final class BrushCompiler {
         )
     }
 
-    init(
+    package init(
         device: any MTLDevice,
         commandQueue: any MTLCommandQueue,
         profile: BrushDeviceProfile,
         pipelinePreparing: any DepositionPipelinePreparing,
         testHooks: BrushCompilerTestHooks,
         initialRequestGeneration: UInt64 = 0,
-        initialStateRevision: UInt64 = 0
+        initialStateRevision: UInt64 = 0,
+        backendRegistry: BrushBackendRegistry = .nativeSchema3
     ) {
         self.device = device
         self.commandQueue = commandQueue
         self.profile = profile
+        self.backendRegistry = backendRegistry
         self.pipelinePreparing = pipelinePreparing
         self.testHooks = testHooks
         cache = BrushResourceCache(byteBudget: profile.brushCacheBudgetBytes)
@@ -263,7 +267,8 @@ public final class BrushCompiler {
             commandQueue: commandQueue,
             profile: profile,
             pipelinePreparing: pipelinePreparing,
-            testHooks: testHooks
+            testHooks: testHooks,
+            backendRegistry: backendRegistry
         )
         staging.cache = cache
         staging.counters = counters
@@ -334,6 +339,7 @@ public final class BrushCompiler {
         package: BrushPackage
     ) async throws -> CompiledBrush {
         let generation = try beginRequest()
+        var stagedCounters = counters
         let definitionID = package.definition.id.rawValue
         let packageHash = try await packageContentHash(
             package,
@@ -345,7 +351,9 @@ public final class BrushCompiler {
             semanticHash: packageHash
         )
         let requestedBackend: BrushBackendKind =
-            package.definition.material.interaction == .none
+            package.definition.components.allSatisfy {
+                $0.material.interaction == .none
+            }
             ? .deposition
             : .canvasInteraction
         let program: BrushProgram
@@ -363,43 +371,33 @@ public final class BrushCompiler {
             )
         }
 
+        let backendContract: CompiledBrushBackendContract
         do {
-            try validateDepositionSupport(program)
-        } catch let error as DepositionPreparationError {
+            backendContract = try BrushBackendCompiler(
+                registry: backendRegistry
+            ).compile(program: program, forActivation: true)
+        } catch let error as BrushBackendCompilationError {
             throw try failure(
                 packageHash: packageHash,
                 backend: program.requestedBackend,
                 stage: .pipelineSelection,
                 resourceID: nil,
                 requestedBytes: nil,
-                reason: depositionFailureReason(error),
+                reason: backendFailureReason(error),
                 definitionID: definitionID
             )
         }
-        guard package.definition.compatibility.requiredSemanticKeys.isEmpty else {
+        guard case .deposition = backendContract else {
             throw try failure(
                 packageHash: packageHash,
                 backend: program.requestedBackend,
                 stage: .pipelineSelection,
                 resourceID: nil,
                 requestedBytes: nil,
-                reason: "unsupportedRequiredSemantic",
+                reason: "backendEncoderUnavailable",
                 definitionID: definitionID
             )
         }
-        guard program.requestedBackend == .deposition else {
-            throw try failure(
-                packageHash: packageHash,
-                backend: program.requestedBackend,
-                stage: .pipelineSelection,
-                resourceID: nil,
-                requestedBytes: nil,
-                reason: "unsupportedBackend",
-                definitionID: definitionID
-            )
-        }
-        increment(.packageDecode)
-
         let effectiveDimension = min(
             BrushDeviceProfile.maximumPortableTextureDimension,
             profile.maximumWorkingTextureDimension,
@@ -463,6 +461,43 @@ public final class BrushCompiler {
             )
         }
 
+        let primaryPipelineKey = pipelineKey(
+            program: program,
+            component: program.primaryComponent
+        )
+        let primaryPipeline: DepositionPipelineBinding
+        let secondaryPipeline: DepositionPipelineBinding?
+        do {
+            primaryPipeline = try await preparePipeline(
+                for: primaryPipelineKey,
+                generation: generation
+            )
+            if let secondaryComponent = program.secondaryComponent {
+                secondaryPipeline = try await preparePipeline(
+                    for: pipelineKey(
+                        program: program,
+                        component: secondaryComponent
+                    ),
+                    generation: generation
+                )
+            } else {
+                secondaryPipeline = nil
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw try failure(
+                packageHash: packageHash,
+                backend: program.requestedBackend,
+                stage: .pipelineSelection,
+                resourceID: nil,
+                requestedBytes: nil,
+                reason: "pipelinePreparationFailed",
+                definitionID: definitionID
+            )
+        }
+        increment(.packageDecode, in: &stagedCounters)
+
         try ensureCurrent(generation)
         var candidates: [String: BrushResourceCache.Candidate] = [:]
         var textureBindings: [String: String] = [:]
@@ -485,7 +520,7 @@ public final class BrushCompiler {
             guard seenKeys.insert(item.cacheKey).inserted else { continue }
 
             if cache.entry(for: item.cacheKey) != nil {
-                increment(.cacheHit)
+                increment(.cacheHit, in: &stagedCounters)
                 continue
             }
 
@@ -512,7 +547,7 @@ public final class BrushCompiler {
                             profile: effectiveProfile
                         )
                     case let .builtIn(identity, maximumDimension):
-                        result = BrushTextureFactory.makeCPUPyramid(
+                        result = try BrushTextureFactory.makeCPUPyramid(
                             identity: identity,
                             resourceID: resourceID,
                             maximumDimension: maximumDimension
@@ -541,7 +576,7 @@ public final class BrushCompiler {
                 )
             }
             if case .packaged = item.source {
-                increment(.imageDecode)
+                increment(.imageDecode, in: &stagedCounters)
             }
             try await phase(
                 .betweenResources,
@@ -555,7 +590,7 @@ public final class BrushCompiler {
                 resourceID: item.resourceID,
                 generation: generation
             )
-            increment(.textureUpload)
+            increment(.textureUpload, in: &stagedCounters)
             let injectedUploadFailure: BrushTextureUploadPhase? =
                 testHooks.uploadFailureResourceID == item.resourceID
                 ? .beforeEncoderCreation
@@ -588,7 +623,8 @@ public final class BrushCompiler {
             )
             candidates[item.cacheKey] = .init(
                 texture: texture,
-                byteCount: decoded.residentByteCount
+                byteCount: decoded.residentByteCount,
+                tipSupport: decoded.tipSupport
             )
         }
 
@@ -630,27 +666,33 @@ public final class BrushCompiler {
             )
         }
 
-        let textures = try textureDictionary(
-            bindings: textureBindings,
-            cache: stagedCache
-        )
         let residentBytes = try checkedActiveBytes(
             activeKeys,
             cache: stagedCache
         )
-        let pipelineKey = pipelineKey(program: program)
-        let uniformTemplate = BrushUniformTemplate(
-            placement: package.definition.placement,
-            coverage: package.definition.coverage,
-            color: package.definition.color,
-            material: package.definition.material
-        )
-        let depositionMaterial: DepositionMaterialBinding
+        let primaryComponent: CompiledBrushComponent
+        let secondaryComponent: CompiledBrushComponent?
         do {
-            depositionMaterial = try DepositionMaterialBinding(
-                uniformTemplate: uniformTemplate,
-                textures: textures
+            primaryComponent = try compiledComponent(
+                program: program,
+                component: program.primaryComponent,
+                pipeline: primaryPipeline,
+                bindings: textureBindings,
+                cache: stagedCache
             )
+            if let secondaryProgram = program.secondaryComponent,
+               let secondaryPipeline
+            {
+                secondaryComponent = try compiledComponent(
+                    program: program,
+                    component: secondaryProgram,
+                    pipeline: secondaryPipeline,
+                    bindings: textureBindings,
+                    cache: stagedCache
+                )
+            } else {
+                secondaryComponent = nil
+            }
         } catch let error as DepositionPreparationError {
             throw try failure(
                 packageHash: packageHash,
@@ -661,30 +703,15 @@ public final class BrushCompiler {
                 reason: depositionFailureReason(error),
                 definitionID: definitionID
             )
-        }
-        let depositionKey = DepositionPipelineKey(
-            brush: pipelineKey,
-            abiVersion: DepositionABI.version,
-            colorPixelFormatRawValue:
-                DocumentColorPipeline.workingPixelFormat.rawValue,
-            sampleCount: DocumentColorPipeline.renderSampleCount
-        )
-        let depositionPipeline: DepositionPipelineBinding
-        do {
-            depositionPipeline = try await pipelinePreparing.prepare(
-                for: depositionKey
-            )
-            try ensureCurrent(generation)
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
+        } catch let error as BrushCompilerPreparationError {
+            let context = preparationFailureContext(error)
             throw try failure(
                 packageHash: packageHash,
                 backend: program.requestedBackend,
                 stage: .pipelineSelection,
-                resourceID: nil,
+                resourceID: context.resourceID,
                 requestedBytes: nil,
-                reason: "pipelinePreparationFailed",
+                reason: context.reason,
                 definitionID: definitionID
             )
         }
@@ -707,12 +734,10 @@ public final class BrushCompiler {
         )
         let compiled = CompiledBrush(
             program: program,
+            backendContract: backendContract,
             renderIdentity: renderIdentity,
-            pipelineKey: pipelineKey,
-            uniformTemplate: uniformTemplate,
-            textures: textures,
-            depositionPipeline: depositionPipeline,
-            depositionMaterial: depositionMaterial,
+            primaryComponent: primaryComponent,
+            secondaryComponent: secondaryComponent,
             residentByteCount: residentBytes,
             report: report,
             diagnostics: diagnostics,
@@ -724,7 +749,8 @@ public final class BrushCompiler {
         try ensureCurrent(generation)
         cache = stagedCache
         activeBrush = compiled
-        increment(.activation)
+        increment(.activation, in: &stagedCounters)
+        counters = stagedCounters
         return compiled
     }
 
@@ -735,8 +761,11 @@ public final class BrushCompiler {
         for package: BrushPackage
     ) throws -> BrushCompilationReport {
         let program = try BrushProgramCompiler.compile(package.definition)
+        let backendContract = try BrushBackendCompiler(
+            registry: backendRegistry
+        ).compile(program: program, forActivation: false)
         let hash = try package.contentHash
-        let compatibility: [BrushCompatibilityEntry] = switch program.requestedBackend {
+        let compatibility: [BrushCompatibilityEntry] = switch backendContract {
         case .deposition:
             []
         case .canvasInteraction:
@@ -762,19 +791,38 @@ public final class BrushCompiler {
         )
     }
 
-    private func validateDepositionSupport(
-        _ program: BrushProgram
-    ) throws {
-        let material = program.definition.material
-        guard material.interaction == .none else {
-            throw DepositionPreparationError.unsupportedInteraction(
-                material.interaction
-            )
-        }
-        guard material.edgeTreatment != .wetConcentration else {
-            throw DepositionPreparationError.unsupportedEdgeTreatment(
-                material.edgeTreatment
-            )
+    private func backendFailureReason(
+        _ error: BrushBackendCompilationError
+    ) -> String {
+        switch error {
+        case let .registry(registryError):
+            switch registryError {
+            case .unsupportedSchema:
+                "unsupportedBackendSchema"
+            case .unknownBackend:
+                "unknownBackend"
+            case .duplicateRegistration,
+                 .implementedCapabilitiesNotDeclared:
+                "invalidBackendRegistry"
+            }
+        case .retiredNativeIdentifier:
+            "retiredNativeIdentifier"
+        case .unsupportedRequiredSemantic:
+            "unsupportedRequiredSemantic"
+        case .unsupportedInteraction:
+            "unsupportedInteraction"
+        case .unsupportedEdgeTreatment(.wetConcentration):
+            "unsupportedWetConcentration"
+        case .unsupportedEdgeTreatment:
+            "unsupportedEdgeTreatment"
+        case .missingDeclaredCapability:
+            "missingBackendCapability"
+        case let .missingImplementedCapability(capability):
+            capability == .secondaryColorSource
+                ? "unimplementedSecondaryColorSource"
+                : "unimplementedBackendCapability"
+        case .backendUnavailable:
+            "backendEncoderUnavailable"
         }
     }
 
@@ -935,10 +983,26 @@ public final class BrushCompiler {
         )
         var work: [String: BrushCompilerResourceWork] = [:]
 
-        for reference in package.definition.resources
-            .filter({ $0.kind != .preview })
-            .sorted(by: { $0.identifier < $1.identifier })
+        let references = package.definition.components
+            .flatMap(\.resources)
+            .filter { $0.kind != .preview }
+            .sorted {
+                if $0.identifier == $1.identifier {
+                    return $0.kind.rawValue < $1.kind.rawValue
+                }
+                return $0.identifier < $1.identifier
+            }
+        for reference in references
         {
+            if let existing = work[reference.identifier] {
+                guard existing.kind == reference.kind else {
+                    throw BrushCompilerPreparationError
+                        .resourceIdentifierCollision(
+                            resourceID: reference.identifier
+                        )
+                }
+                continue
+            }
             if let resource = manifest[reference.identifier] {
                 guard let data = package.resourceData[resource.id] else {
                     throw BrushCompilerPreparationError
@@ -958,6 +1022,7 @@ public final class BrushCompiler {
                     sourceValidationHash: sourceValidationHash(
                         resource: resource
                     ),
+                    kind: reference.kind,
                     width: dimensions.width,
                     height: dimensions.height
                 )
@@ -998,7 +1063,9 @@ public final class BrushCompiler {
             }
         }
 
-        for shape in package.definition.coverage.shapes {
+        for shape in package.definition.components.flatMap({
+            $0.coverage.shapes
+        }) {
             guard let identity = identity(for: shape.shape) else { continue }
             if let existing = work[identity.rawValue] {
                 guard case let .builtIn(existingIdentity, _) = existing.source,
@@ -1018,7 +1085,9 @@ public final class BrushCompiler {
                 )
             }
         }
-        for grain in package.definition.coverage.grains {
+        for grain in package.definition.components.flatMap({
+            $0.coverage.grains
+        }) {
             guard let identity = identity(for: grain.grain) else { continue }
             if let existing = work[identity.rawValue] {
                 guard case let .builtIn(existingIdentity, _) = existing.source,
@@ -1072,6 +1141,7 @@ public final class BrushCompiler {
                         "builtin-source-v1:\(identity.rawValue)".utf8
                     )
                 ),
+                kind: identity.kind == .shape ? .shape : .grain,
                 width: workingDimension,
                 height: workingDimension
             ),
@@ -1110,10 +1180,8 @@ public final class BrushCompiler {
         for descriptor: BrushShapeDescriptor
     ) -> BrushTextureIdentity? {
         switch descriptor {
-        case .hardRound: .hardRoundShape
-        case .softRound: .softRoundShape
-        case .chisel: .chiselShape
-        case .asset: nil
+        case .hardRound, .softRound, .chisel, .asset:
+            nil
         }
     }
 
@@ -1234,18 +1302,235 @@ public final class BrushCompiler {
         return textures
     }
 
-    private func pipelineKey(program: BrushProgram) -> BrushPipelineKey {
-        let coverage = program.definition.coverage
+    private func componentTextureBindings(
+        component: BrushComponentDefinition,
+        bindings: [String: String]
+    ) -> [String: String] {
+        var identifiers = Set(
+            component.resources
+                .filter { $0.kind != .preview }
+                .map(\.identifier)
+        )
+        for shape in component.coverage.shapes {
+            if let identity = identity(for: shape.shape) {
+                identifiers.insert(identity.rawValue)
+            }
+        }
+        for grain in component.coverage.grains {
+            if let identity = identity(for: grain.grain) {
+                identifiers.insert(identity.rawValue)
+            }
+        }
+        return Dictionary(uniqueKeysWithValues: identifiers.compactMap {
+            identifier in
+            bindings[identifier].map { (identifier, $0) }
+        })
+    }
+
+    private func compiledComponent(
+        program: BrushProgram,
+        component: BrushComponentProgram,
+        pipeline: DepositionPipelineBinding,
+        bindings: [String: String],
+        cache: BrushResourceCache
+    ) throws -> CompiledBrushComponent {
+        let definition = component.definition
+        let componentBindings = componentTextureBindings(
+            component: definition,
+            bindings: bindings
+        )
+        let textures = try textureDictionary(
+            bindings: componentBindings,
+            cache: cache
+        )
+        let tipSupports = try compiledTipSupports(
+            definition: definition,
+            bindings: componentBindings,
+            cache: cache
+        )
+        let uniformTemplate = BrushUniformTemplate(
+            placement: definition.placement,
+            coverage: definition.coverage,
+            color: definition.color,
+            material: definition.material
+        )
+        let material = try DepositionMaterialBinding(
+            uniformTemplate: uniformTemplate,
+            textures: textures,
+            tipSupports: tipSupports
+        )
+        return CompiledBrushComponent(
+            identifier: definition.identifier,
+            ordinal: definition.ordinal,
+            pipelineKey: pipelineKey(
+                program: program,
+                component: component
+            ),
+            uniformTemplate: uniformTemplate,
+            textures: textures,
+            tipSupports: tipSupports,
+            cursorTipProfile: try cursorTipProfile(
+                definition: definition,
+                tipSupports: tipSupports
+            ),
+            depositionPipeline: pipeline,
+            depositionMaterial: material
+        )
+    }
+
+    private func preparePipeline(
+        for brushKey: BrushPipelineKey,
+        generation: UInt64
+    ) async throws -> DepositionPipelineBinding {
+        let key = DepositionPipelineKey(
+            brush: brushKey,
+            abiVersion: DepositionABI.version,
+            colorPixelFormatRawValue:
+                DocumentColorPipeline.workingPixelFormat.rawValue,
+            sampleCount: DocumentColorPipeline.renderSampleCount
+        )
+        let binding = try await pipelinePreparing.prepare(for: key)
+        try ensureCurrent(generation)
+        return binding
+    }
+
+    private func compiledTipSupports(
+        definition: BrushComponentDefinition,
+        bindings: [String: String],
+        cache: BrushResourceCache
+    ) throws -> [CompiledBrushTipSupport] {
+        try definition.coverage.shapes.enumerated().map { index, layer in
+            let declared = definition.tipSupports[index]
+            let source: CompiledBrushTipSource
+            let assetSupport: BrushTipAssetSupport?
+            let sourceWidth: Int?
+            let sourceHeight: Int?
+            let mipLevelCount: Int
+            let sourceIdentity: String
+
+            switch layer.shape {
+            case .hardRound:
+                source = .analyticEllipse
+                assetSupport = nil
+                sourceWidth = nil
+                sourceHeight = nil
+                mipLevelCount = 0
+                sourceIdentity = "analytic-hard-round"
+            case .softRound:
+                source = .analyticEllipse
+                assetSupport = nil
+                sourceWidth = nil
+                sourceHeight = nil
+                mipLevelCount = 0
+                sourceIdentity = "analytic-soft-round"
+            case .chisel:
+                source = .analyticRectangle
+                assetSupport = nil
+                sourceWidth = nil
+                sourceHeight = nil
+                mipLevelCount = 0
+                sourceIdentity = "analytic-rectangle"
+            case let .asset(resourceID):
+                guard let key = bindings[resourceID],
+                      let entry = cache.entry(for: key),
+                      let support = entry.tipSupport
+                else {
+                    throw BrushCompilerPreparationError.missingTipSupport(
+                        resourceID: resourceID
+                    )
+                }
+                source = .texture(resourceID: resourceID)
+                assetSupport = support
+                sourceWidth = entry.texture.width
+                sourceHeight = entry.texture.height
+                mipLevelCount = entry.texture.mipmapLevelCount
+                sourceIdentity = key
+            }
+            let semanticIdentity = [
+                "compiled-tip-v1",
+                sourceIdentity,
+                declared.kind.rawValue,
+                declared.bounds.map {
+                    [
+                        String($0.minX.bitPattern),
+                        String($0.maxX.bitPattern),
+                        String($0.minY.bitPattern),
+                        String($0.maxY.bitPattern),
+                    ].joined(separator: ",")
+                } ?? "full-support",
+                String(layer.scale.bitPattern),
+                String(layer.rotation.bitPattern),
+                String(layer.offset.x.bitPattern),
+                String(layer.offset.y.bitPattern),
+            ].joined(separator: ":")
+            return CompiledBrushTipSupport(
+                semanticTipHash: BrushContentHash.sha256Hex(
+                    of: Data(semanticIdentity.utf8)
+                ),
+                source: source,
+                definition: declared,
+                assetSupport: assetSupport,
+                sourceWidth: sourceWidth,
+                sourceHeight: sourceHeight,
+                mipLevelCount: mipLevelCount
+            )
+        }
+    }
+
+    private func cursorTipProfile(
+        definition: BrushComponentDefinition,
+        tipSupports: [CompiledBrushTipSupport]
+    ) throws -> BrushCursorTipProfile {
+        guard tipSupports.count == definition.coverage.shapes.count,
+              let primarySupport = tipSupports.first
+        else {
+            throw BrushCompilerPreparationError.missingTipSupport(
+                resourceID: definition.identifier.rawValue
+            )
+        }
+        func cursorShape(
+            _ support: CompiledBrushTipSupport
+        ) throws -> BrushCursorTipShape {
+            switch support.source {
+            case .analyticEllipse:
+                return .analyticEllipse
+            case .analyticRectangle:
+                return .analyticRectangle
+            case let .texture(resourceID):
+                guard let contour = support.assetSupport?.contour else {
+                    throw BrushCompilerPreparationError.missingTipSupport(
+                        resourceID: resourceID
+                    )
+                }
+                return .contour(contour)
+            }
+        }
+        let secondary = tipSupports.count == 2
+            ? try cursorShape(tipSupports[1])
+            : nil
+        return BrushCursorTipProfile(
+            primary: try cursorShape(primarySupport),
+            secondary: secondary,
+            secondaryCombination: secondary == nil
+                ? nil
+                : definition.coverage.shapes[1].combination
+        )
+    }
+
+    private func pipelineKey(
+        program: BrushProgram,
+        component: BrushComponentProgram
+    ) -> BrushPipelineKey {
+        let definition = component.definition
+        let coverage = definition.coverage
         return BrushPipelineKey(
             backend: program.requestedBackend,
-            accumulation: program.definition.material.accumulation,
-            edgeTreatment: program.definition.material.edgeTreatment,
+            accumulation: definition.material.accumulation,
+            edgeTreatment: definition.material.edgeTreatment,
             functionConstants: BrushFunctionConstants(
                 usesSecondaryShape: coverage.shapes.count > 1,
                 usesGrain: !coverage.grains.isEmpty,
-                usesSecondaryGrain: coverage.grains.count > 1,
-                usesDestinationSampling:
-                    program.requestedBackend == .canvasInteraction
+                usesSecondaryGrain: coverage.grains.count > 1
             )
         )
     }
@@ -1262,9 +1547,10 @@ public final class BrushCompiler {
         let grainKeys = Set(
             work.filter { $0.kind == .grain }.map(\.cacheKey)
         )
-        let simple = program.requestedBackend == .deposition
-            && definition.coverage.shapes.count <= 1
-            && definition.coverage.grains.count <= 1
+        let simple = definition.components.count == 1
+            && program.requestedBackend == .deposition
+            && definition.components[0].coverage.shapes.count <= 1
+            && definition.components[0].coverage.grains.count <= 1
             && shapeKeys.count <= 1
             && grainKeys.count <= 1
             && residentBytes <= 64 * 1_024 * 1_024
@@ -1291,6 +1577,8 @@ public final class BrushCompiler {
             (resourceID, "resourceIdentifierCollision")
         case .resourceCostOverflow:
             (nil, "resourceCostOverflow")
+        case let .missingTipSupport(resourceID):
+            (resourceID, "missingTipSupport")
         }
     }
 
@@ -1316,7 +1604,8 @@ public final class BrushCompiler {
     }
 
     private func increment(
-        _ field: BrushCompilerCounterField
+        _ field: BrushCompilerCounterField,
+        in counters: inout BrushCompilerCounters
     ) {
         let old = counters
         func incremented(_ value: UInt64) -> UInt64 {

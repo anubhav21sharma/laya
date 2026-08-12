@@ -358,6 +358,8 @@ struct PaintTileProvisionalBinding: @unchecked Sendable {
     let descriptor: PaintTileDescriptor
     let sourceTexture: any MTLTexture
     let candidateTexture: any MTLTexture
+    let sourceComponentCoverageTexture: (any MTLTexture)?
+    let candidateComponentCoverageTexture: any MTLTexture
     let sourceIsKnownClear: Bool
 }
 
@@ -399,6 +401,11 @@ final class PaintTileProvisionalWorkspace: @unchecked Sendable {
 }
 
 final class PaintTileProvisionalReservation: @unchecked Sendable {
+    fileprivate static let componentCoverageBytesPerBinding =
+        DepositionComponentCoverage.residentByteCount(
+            width: PaintTileDescriptor.side,
+            height: PaintTileDescriptor.side
+        )!
     fileprivate let owner: ObjectIdentifier
     fileprivate let slotIndex: Int
     fileprivate let token: UInt64
@@ -422,6 +429,9 @@ final class PaintTileProvisionalReservation: @unchecked Sendable {
     }
 
     var count: Int { workspace.count }
+    var componentCoverageBytesPerBinding: Int {
+        Self.componentCoverageBytesPerBinding
+    }
 
     subscript(index: Int) -> PaintTileProvisionalBinding {
         guard index >= 0, index < workspace.count,
@@ -635,6 +645,7 @@ public struct PaintTileStoreEntrySnapshot: Equatable, Sendable {
     public let identity: PaintTileIdentity
     public let descriptor: PaintTileDescriptor
     public let isResident: Bool
+    public let hasComponentCoverageTexture: Bool
     public let backing: PaintTileBackingSnapshot
     public let lastUseEpoch: UInt64?
     public let pinCounts: [PaintTilePinReason: Int]
@@ -646,6 +657,8 @@ public struct PaintTileStoreSnapshot: Equatable, Sendable {
     public let nextTileID: UInt64
     public let nextLeaseID: UInt64
     public let residentByteCount: Int
+    public let residentByteHighWater: Int
+    public let componentCoverageByteCount: Int
     public let backingByteCount: Int
     public let persistentZeroAllocationBytes: Int
     public let persistentZeroAllocationCount: Int
@@ -706,6 +719,7 @@ public final class PaintTileStore: @unchecked Sendable {
     private struct ProvisionalReservationRecord {
         let token: UInt64
         let byteCount: Int
+        var reservedCoverageByteCount: Int
         let surfaceID: UUID
         let generation: UInt64
     }
@@ -742,17 +756,20 @@ public final class PaintTileStore: @unchecked Sendable {
 
     private final class RecordStorage {
         var texture: (any MTLTexture)?
+        var componentCoverageTexture: (any MTLTexture)?
         var backing: PaintTileBackingSnapshot?
         var isStrokeActive: Bool
         var snapshotRetainCount: UInt32
 
         init(
             texture: (any MTLTexture)?,
+            componentCoverageTexture: (any MTLTexture)? = nil,
             backing: PaintTileBackingSnapshot?,
             isStrokeActive: Bool = false,
             snapshotRetainCount: UInt32 = 0
         ) {
             self.texture = texture
+            self.componentCoverageTexture = componentCoverageTexture
             self.backing = backing
             self.isStrokeActive = isStrokeActive
             self.snapshotRetainCount = snapshotRetainCount
@@ -771,6 +788,7 @@ public final class PaintTileStore: @unchecked Sendable {
             identity: PaintTileIdentity,
             descriptor: PaintTileDescriptor,
             texture: (any MTLTexture)?,
+            componentCoverageTexture: (any MTLTexture)? = nil,
             backing: PaintTileBackingSnapshot?,
             isStrokeActive: Bool = false,
             snapshotRetainCount: UInt32 = 0
@@ -779,6 +797,7 @@ public final class PaintTileStore: @unchecked Sendable {
             self.descriptor = descriptor
             storage = RecordStorage(
                 texture: texture,
+                componentCoverageTexture: componentCoverageTexture,
                 backing: backing,
                 isStrokeActive: isStrokeActive,
                 snapshotRetainCount: snapshotRetainCount
@@ -790,6 +809,7 @@ public final class PaintTileStore: @unchecked Sendable {
                 identity: identity,
                 descriptor: descriptor,
                 texture: texture,
+                componentCoverageTexture: storage.componentCoverageTexture,
                 backing: backing,
                 isStrokeActive: storage.isStrokeActive,
                 snapshotRetainCount: storage.snapshotRetainCount
@@ -884,6 +904,7 @@ public final class PaintTileStore: @unchecked Sendable {
     public let transferByteCapacity: Int
     private let lock = NSLock()
     private var residency: PaintTileResidency
+    private var residentByteHighWater = 0
     private var records: [Key: Record] = [:]
     private var tileKeyByID: [PaintTileID: Key] = [:]
     private var leases: [PaintTileLeaseID: LeaseRecord] = [:]
@@ -899,6 +920,8 @@ public final class PaintTileStore: @unchecked Sendable {
             count: maximumProvisionalReservationCount
         )
     private var provisionalByteCount = 0
+    private var provisionalCoverageByteCount = 0
+    private var componentCoverageByteCount = 0
     private var nextProvisionalReservationID: UInt64 = 0
     private var nextRetirementID: UInt64 = 0
     private var preparedRetirements: [UInt64: PreparedRetirementState] = [:]
@@ -915,6 +938,8 @@ public final class PaintTileStore: @unchecked Sendable {
     private let snapshotTokenDeinitDiagnostic: @Sendable (UInt64) -> Void
     private let snapshotRetainCountMaximum: UInt32
     private let provisionalTextureDescriptor: MTLTextureDescriptor
+    private let provisionalComponentCoverageTextureDescriptor:
+        MTLTextureDescriptor
 
     #if DEBUG
     var testingSnapshotPayloadLiabilityByteBudget: Int {
@@ -927,10 +952,11 @@ public final class PaintTileStore: @unchecked Sendable {
         byteBudget: Int,
         snapshotPayloadLiabilityByteBudget: Int? = nil
     ) {
-        // Preserve the established 3x transfer headroom and add only the one
-        // tile-sized shared allocation that this store may retain.
+        // Two color provisional generations plus their half-sized RG
+        // component-coverage companions can coexist with resident color
+        // tiles. Add the one shared persistent-zero color tile separately.
         let (transferHeadroom, multiplicationOverflow) = byteBudget
-            .multipliedReportingOverflow(by: 3)
+            .multipliedReportingOverflow(by: 4)
         let (capacity, additionOverflow) = transferHeadroom
             .addingReportingOverflow(PaintTileDescriptor.residentByteCount)
         precondition(!multiplicationOverflow && !additionOverflow)
@@ -1008,16 +1034,49 @@ public final class PaintTileStore: @unchecked Sendable {
         provisionalTextureDescriptor.usage = [
             .renderTarget, .shaderRead, .shaderWrite,
         ]
+        provisionalComponentCoverageTextureDescriptor =
+            DepositionComponentCoverage.textureDescriptor(
+                width: PaintTileDescriptor.side,
+                height: PaintTileDescriptor.side
+            )
     }
 
     public var byteBudget: Int { residency.byteBudget }
 
     public var residentByteCount: Int {
-        withLock { residency.residentByteCount }
+        withLock { aggregateResidentByteCount() }
     }
 
     public var backingByteCount: Int {
         withLock { Self.backingByteCount(in: records) }
+    }
+
+    /// Color and component-local coverage textures share one runtime
+    /// residency budget. Coverage is tracked separately only so terminal
+    /// stroke retirement can release it without disturbing the color tile.
+    private func aggregateResidentByteCount(
+        residency selectedResidency: PaintTileResidency? = nil,
+        coverageByteCount selectedCoverageByteCount: Int? = nil
+    ) -> Int {
+        let colorBytes = (selectedResidency ?? residency).residentByteCount
+        let coverageBytes = selectedCoverageByteCount
+            ?? componentCoverageByteCount
+        let (total, overflow) = colorBytes.addingReportingOverflow(
+            coverageBytes
+        )
+        precondition(!overflow)
+        return total
+    }
+
+    private func aggregatePinnedByteCount(
+        residency selectedResidency: PaintTileResidency? = nil
+    ) -> Int {
+        let colorBytes = (selectedResidency ?? residency).pinnedByteCount
+        let (total, overflow) = colorBytes.addingReportingOverflow(
+            componentCoverageByteCount
+        )
+        precondition(!overflow)
+        return total
     }
 
     /// Metadata-only lookup. Texture access is deliberately available only
@@ -1588,6 +1647,9 @@ public final class PaintTileStore: @unchecked Sendable {
                     pinReasons: pinReasons
                 ))
             }
+            evicted.append(contentsOf: try stagedResidency.evictUnpinned(
+                to: availableColorResidencyByteBudget
+            ))
             var uniqueEvictions: [PaintTileIdentity] = []
             for value in evicted where !uniqueEvictions.contains(value) {
                 uniqueEvictions.append(value)
@@ -1682,6 +1744,10 @@ public final class PaintTileStore: @unchecked Sendable {
             )
             records = stagedRecords
             residency = stagedResidency
+            residentByteHighWater = max(
+                residentByteHighWater,
+                aggregateResidentByteCount(residency: stagedResidency)
+            )
             leases = stagedLeases
             nextLeaseID = leaseRawID
             stateRevision = nextRevision
@@ -1894,7 +1960,9 @@ public final class PaintTileStore: @unchecked Sendable {
                 stateRevision: stateRevision,
                 nextTileID: nextTileID,
                 nextLeaseID: nextLeaseID,
-                residentByteCount: residency.residentByteCount,
+                residentByteCount: aggregateResidentByteCount(),
+                residentByteHighWater: residentByteHighWater,
+                componentCoverageByteCount: componentCoverageByteCount,
                 backingByteCount: Self.backingByteCount(in: records),
                 persistentZeroAllocationBytes: persistentZeroSource == nil
                     ? 0 : PaintTileDescriptor.residentByteCount,
@@ -1932,6 +2000,8 @@ public final class PaintTileStore: @unchecked Sendable {
             identity: record.identity,
             descriptor: record.descriptor,
             isResident: record.texture != nil,
+            hasComponentCoverageTexture:
+                record.storage.componentCoverageTexture != nil,
             backing: record.backing ?? .residentOnly,
             lastUseEpoch: entry?.lastUseEpoch,
             pinCounts: entry?.pinCounts.dictionary ?? [:],
@@ -2154,6 +2224,9 @@ public final class PaintTileStore: @unchecked Sendable {
                     pinReasons: pinReasons
                 ))
             }
+            evicted.append(contentsOf: try stagedResidency.evictUnpinned(
+                to: availableColorResidencyByteBudget
+            ))
             var uniqueEvictions: [PaintTileIdentity] = []
             uniqueEvictions.reserveCapacity(evicted.count)
             for identity in evicted where !uniqueEvictions.contains(identity) {
@@ -2284,6 +2357,10 @@ public final class PaintTileStore: @unchecked Sendable {
             records = stagedRecords
             tileKeyByID = stagedTileKeyByID
             residency = stagedResidency
+            residentByteHighWater = max(
+                residentByteHighWater,
+                aggregateResidentByteCount(residency: stagedResidency)
+            )
             leases = stagedLeases
             nextTileID = stagedNextTileID
             nextLeaseID = leaseRawID
@@ -2580,6 +2657,7 @@ public final class PaintTileStore: @unchecked Sendable {
         surfaceID: UUID,
         currentGeneration: UInt64,
         coordinates: [PaintTileCoordinate],
+        modifiedCoordinates: [PaintTileCoordinate],
         workspace: PaintTileProvisionalWorkspace
     ) throws -> PaintTileProvisionalReservation {
         try withLock {
@@ -2593,6 +2671,8 @@ public final class PaintTileStore: @unchecked Sendable {
                 {
                     provisionalReservations[provisionalSlot] = nil
                     provisionalByteCount -= record.byteCount
+                    provisionalCoverageByteCount -=
+                        record.reservedCoverageByteCount
                 }
                 workspace.clear()
             }
@@ -2602,21 +2682,49 @@ public final class PaintTileStore: @unchecked Sendable {
                 surfaceID: surfaceID,
                 currentGeneration: currentGeneration
             )
-            let (computedAllocationBytes, allocationOverflow) = coordinates.count
-                .multipliedReportingOverflow(
-                    by: PaintTileDescriptor.residentByteCount
+            guard let componentCoverageBytes = DepositionComponentCoverage
+                .residentByteCount(
+                    width: PaintTileDescriptor.side,
+                    height: PaintTileDescriptor.side
                 )
+            else {
+                throw PaintTileStoreError.transferCapacityExceeded(
+                    requiredBytes: .max,
+                    capacityBytes: transferByteCapacity,
+                    residentBytes: residency.residentByteCount,
+                    allocationBytes: .max,
+                    persistentZeroBytes: 0,
+                    stagingBytes: provisionalByteCount
+                )
+            }
+            guard Self.isStrictlySortedUnique(coordinates),
+                  Self.isStrictlySortedUnique(modifiedCoordinates),
+                  modifiedCoordinates.allSatisfy({
+                      Self.containsSorted(coordinates, $0)
+                  })
+            else { throw PaintTileStoreError.leaseBindingMismatch }
+            let (bytesPerBinding, bindingOverflow) =
+                PaintTileDescriptor.residentByteCount
+                    .addingReportingOverflow(componentCoverageBytes)
+            let (computedAllocationBytes, allocationOverflow) = coordinates.count
+                .multipliedReportingOverflow(by: bytesPerBinding)
             allocationBytes = allocationOverflow ? .max : computedAllocationBytes
             let residentBytes = residency.residentByteCount
+            let (trackedResidentBytes, residentCoverageOverflow) =
+                residentBytes.addingReportingOverflow(
+                    componentCoverageByteCount
+                )
             let persistentZeroBytes = persistentZeroSource == nil
                 ? 0 : PaintTileDescriptor.residentByteCount
-            let (residentAndPersistent, persistentOverflow) = residentBytes
+            let (residentAndPersistent, persistentOverflow) =
+                trackedResidentBytes
                 .addingReportingOverflow(persistentZeroBytes)
             let (residentAndProvisional, provisionalOverflow) = residentAndPersistent
                 .addingReportingOverflow(provisionalByteCount)
             let (requiredBytes, requiredOverflow) = residentAndProvisional
                 .addingReportingOverflow(allocationBytes)
-            guard !allocationOverflow, !persistentOverflow,
+            guard !bindingOverflow, !allocationOverflow,
+                  !residentCoverageOverflow, !persistentOverflow,
                   !provisionalOverflow, !requiredOverflow,
                   requiredBytes <= transferByteCapacity
             else {
@@ -2625,7 +2733,8 @@ public final class PaintTileStore: @unchecked Sendable {
                         || provisionalOverflow || requiredOverflow
                         ? .max : requiredBytes,
                     capacityBytes: transferByteCapacity,
-                    residentBytes: residentBytes,
+                    residentBytes: residentCoverageOverflow
+                        ? .max : trackedResidentBytes,
                     allocationBytes: allocationOverflow
                         ? .max : allocationBytes,
                     persistentZeroBytes: persistentZeroBytes,
@@ -2661,6 +2770,7 @@ public final class PaintTileStore: @unchecked Sendable {
             provisionalReservations[freeSlot] = ProvisionalReservationRecord(
                 token: token,
                 byteCount: allocationBytes,
+                reservedCoverageByteCount: 0,
                 surfaceID: surfaceID,
                 generation: currentGeneration
             )
@@ -2670,6 +2780,7 @@ public final class PaintTileStore: @unchecked Sendable {
             provisionalToken = token
             var bindingIndex = 0
             var previousCoordinate: PaintTileCoordinate?
+            var reservedCoverageBytes = 0
             for (outputIndex, coordinate) in coordinates.enumerated() {
                 if let previousCoordinate,
                    !(previousCoordinate < coordinate)
@@ -2698,8 +2809,23 @@ public final class PaintTileStore: @unchecked Sendable {
                       record.identity == binding.identity,
                 let sourceTexture = record.texture
                 else { throw PaintTileStoreError.leaseBindingMismatch }
+                if record.storage.componentCoverageTexture == nil,
+                   Self.containsSorted(modifiedCoordinates, coordinate)
+                {
+                    let (nextReservedCoverageBytes, overflow) =
+                        reservedCoverageBytes.addingReportingOverflow(
+                            componentCoverageBytes
+                        )
+                    guard !overflow else {
+                        throw PaintTileResidencyError
+                            .residentByteCountOverflow
+                    }
+                    reservedCoverageBytes = nextReservedCoverageBytes
+                }
                 guard let candidate = device.makeTexture(
                     descriptor: provisionalTextureDescriptor
+                ), let candidateComponentCoverage = device.makeTexture(
+                    descriptor: provisionalComponentCoverageTextureDescriptor
                 )
                 else {
                     throw PaintTileStoreError.textureAllocationFailed(
@@ -2711,9 +2837,72 @@ public final class PaintTileStore: @unchecked Sendable {
                     descriptor: binding.descriptor,
                     sourceTexture: sourceTexture,
                     candidateTexture: candidate,
+                    sourceComponentCoverageTexture:
+                        record.storage.componentCoverageTexture,
+                    candidateComponentCoverageTexture:
+                        candidateComponentCoverage,
                     sourceIsKnownClear: record.backing == .knownClear
                 ), at: outputIndex)
             }
+            let (nextProvisionalCoverageBytes, coverageOverflow) =
+                provisionalCoverageByteCount.addingReportingOverflow(
+                    reservedCoverageBytes
+                )
+            guard !coverageOverflow else {
+                throw PaintTileResidencyError.residentByteCountOverflow
+            }
+            var stagedResidency = residency
+            let colorTarget = max(
+                0,
+                residency.byteBudget
+                    - componentCoverageByteCount
+                    - nextProvisionalCoverageBytes
+            )
+            let evicted = try stagedResidency.evictUnpinned(
+                to: colorTarget
+            )
+            guard stagedResidency.residentByteCount <= colorTarget else {
+                let pinnedBytes = try checkedSum([
+                    aggregatePinnedByteCount(),
+                    provisionalCoverageByteCount,
+                ])
+                throw PaintTileResidencyError.insufficientCapacity(
+                    requestedBytes: reservedCoverageBytes,
+                    byteBudget: residency.byteBudget,
+                    pinnedBytes: pinnedBytes
+                )
+            }
+            let accounting = try transferAccounting(
+                captureIdentities: evicted,
+                allocationBackings: [],
+                additionalAllocatedTextureBytes:
+                    provisionalByteCount
+            )
+            let transferResult = try transfer(
+                evicted: evicted,
+                allocations: []
+            )
+            let nextStateRevision = evicted.isEmpty
+                ? stateRevision : try advancedStateRevision()
+            let stagedRecords = Self.cloneRecords(records)
+            for evictedIdentity in evicted {
+                guard let key = tileKeyByID[evictedIdentity.tileID],
+                      stagedRecords[key]?.identity == evictedIdentity
+                else { continue }
+                stagedRecords[key]?.storage.texture = nil
+                if let payload = transferResult.captured[evictedIdentity] {
+                    stagedRecords[key]?.storage.backing = payload
+                }
+            }
+            if !evicted.isEmpty {
+                records = stagedRecords
+                residency = stagedResidency
+                stateRevision = nextStateRevision
+                lastTransferAccounting = accounting
+            }
+            provisionalReservations[freeSlot]?
+                .reservedCoverageByteCount = reservedCoverageBytes
+            provisionalCoverageByteCount = nextProvisionalCoverageBytes
             return PaintTileProvisionalReservation(
                 owner: ObjectIdentifier(self),
                 slotIndex: provisionalSlot!,
@@ -2738,6 +2927,9 @@ public final class PaintTileStore: @unchecked Sendable {
     ) throws -> PaintTileLease {
         return try withLock {
             try validateProvisionalReservation(provisional)
+            guard let provisionalRecord =
+                    provisionalReservations[provisional.slotIndex]
+            else { throw PaintTileStoreError.invalidProvisionalReservation }
             _ = try validate(
                 lease,
                 surfaceID: surfaceID,
@@ -2750,6 +2942,8 @@ public final class PaintTileStore: @unchecked Sendable {
             else { throw PaintTileStoreError.leaseBindingMismatch }
             var leaseIndex = 0
             var newActivePinCount = 0
+            var coverageByteDelta = 0
+            var newCoverageByteCount = 0
             for candidateIndex in 0..<provisional.count {
                 let candidate = provisional[candidateIndex]
                 while leaseIndex < lease.retainedBindingCount,
@@ -2791,6 +2985,19 @@ public final class PaintTileStore: @unchecked Sendable {
                 guard isModified != isKnownClear else {
                     throw PaintTileStoreError.leaseBindingMismatch
                 }
+                if isModified,
+                   record.storage.componentCoverageTexture == nil
+                {
+                    coverageByteDelta += provisional
+                        .componentCoverageBytesPerBinding
+                    newCoverageByteCount += provisional
+                        .componentCoverageBytesPerBinding
+                } else if isKnownClear,
+                          record.storage.componentCoverageTexture != nil
+                {
+                    coverageByteDelta -= provisional
+                        .componentCoverageBytesPerBinding
+                }
                 if isModified, !record.storage.isStrokeActive {
                     try residency.preflightPinExisting(
                         candidate.identity,
@@ -2805,7 +3012,35 @@ public final class PaintTileStore: @unchecked Sendable {
                     )
                 }
             }
+            guard newCoverageByteCount
+                    == provisionalRecord.reservedCoverageByteCount
+            else { throw PaintTileStoreError.invalidProvisionalReservation }
             try residency.preflightUseEpochAdvance(by: newActivePinCount)
+            let (nextCoverageByteCount, coverageOverflow) =
+                componentCoverageByteCount.addingReportingOverflow(
+                    coverageByteDelta
+                )
+            guard !coverageOverflow, nextCoverageByteCount >= 0 else {
+                throw PaintTileStoreError.transferCapacityExceeded(
+                    requiredBytes: .max,
+                    capacityBytes: transferByteCapacity,
+                    residentBytes: residency.residentByteCount,
+                    allocationBytes: provisional.reservedBytes,
+                    persistentZeroBytes: persistentZeroSource == nil
+                        ? 0 : PaintTileDescriptor.residentByteCount,
+                    stagingBytes: provisionalByteCount
+                )
+            }
+            let nextResidentByteCount = aggregateResidentByteCount(
+                coverageByteCount: nextCoverageByteCount
+            )
+            guard nextResidentByteCount <= residency.byteBudget else {
+                throw PaintTileResidencyError.insufficientCapacity(
+                    requestedBytes: max(0, coverageByteDelta),
+                    byteBudget: residency.byteBudget,
+                    pinnedBytes: aggregatePinnedByteCount()
+                )
+            }
             let nextRevision = try advancedStateRevision()
             for candidateIndex in 0..<provisional.count {
                 let candidate = provisional[candidateIndex]
@@ -2821,6 +3056,7 @@ public final class PaintTileStore: @unchecked Sendable {
                     knownClearCoordinates,
                     candidate.descriptor.coordinate
                 ) {
+                    records[recordKey]?.storage.componentCoverageTexture = nil
                     if records[recordKey]?.storage.isStrokeActive == true {
                         try residency.unpin(
                             candidate.identity,
@@ -2833,6 +3069,8 @@ public final class PaintTileStore: @unchecked Sendable {
                     modifiedCoordinates,
                     candidate.descriptor.coordinate
                 ) {
+                    records[recordKey]?.storage.componentCoverageTexture =
+                        candidate.candidateComponentCoverageTexture
                     if records[recordKey]?.storage.isStrokeActive == false {
                         residency.pinExistingPreflighted(
                             candidate.identity,
@@ -2849,6 +3087,19 @@ public final class PaintTileStore: @unchecked Sendable {
                 from: provisional
             )
             provisional.markCommitted()
+            precondition(
+                provisionalCoverageByteCount
+                    >= provisionalRecord.reservedCoverageByteCount
+            )
+            provisionalCoverageByteCount -=
+                provisionalRecord.reservedCoverageByteCount
+            provisionalReservations[provisional.slotIndex]?
+                .reservedCoverageByteCount = 0
+            componentCoverageByteCount = nextCoverageByteCount
+            residentByteHighWater = max(
+                residentByteHighWater,
+                nextResidentByteCount
+            )
             stateRevision = nextRevision
             return committedLease
         }
@@ -2907,9 +3158,16 @@ public final class PaintTileStore: @unchecked Sendable {
             provisionalReservations[provisional.slotIndex]?.token
                 == provisional.token
         )
+        let reservedCoverageBytes = provisionalReservations[
+            provisional.slotIndex
+        ]?.reservedCoverageByteCount ?? 0
         provisionalReservations[provisional.slotIndex] = nil
         precondition(provisionalByteCount >= provisional.reservedBytes)
         provisionalByteCount -= provisional.reservedBytes
+        precondition(
+            provisionalCoverageByteCount >= reservedCoverageBytes
+        )
+        provisionalCoverageByteCount -= reservedCoverageBytes
     }
 
     private static func containsSorted(
@@ -3150,11 +3408,31 @@ public final class PaintTileStore: @unchecked Sendable {
     ) throws -> PaintTilePressureResult {
         try withLock {
             var stagedResidency = residency
+            let colorTarget = targetResidentBytes < 0
+                ? targetResidentBytes
+                : max(
+                    0,
+                    targetResidentBytes
+                        - componentCoverageByteCount
+                        - provisionalCoverageByteCount
+                )
             let evicted = try stagedResidency.evictUnpinned(
-                to: targetResidentBytes
+                to: colorTarget
             )
-            let remainingBytes = stagedResidency.residentByteCount
-            let pinnedBytes = stagedResidency.pinnedByteCount
+            let actualRemainingBytes = aggregateResidentByteCount(
+                residency: stagedResidency
+            )
+            let actualPinnedBytes = aggregatePinnedByteCount(
+                residency: stagedResidency
+            )
+            let remainingBytes = try checkedSum([
+                actualRemainingBytes,
+                provisionalCoverageByteCount,
+            ])
+            let pinnedBytes = try checkedSum([
+                actualPinnedBytes,
+                provisionalCoverageByteCount,
+            ])
             let stagedRecords = Self.cloneRecords(records)
             var accounting: PaintTileTransferAccounting?
             if !evicted.isEmpty {
@@ -3180,6 +3458,10 @@ public final class PaintTileStore: @unchecked Sendable {
             }
             records = stagedRecords
             residency = stagedResidency
+            residentByteHighWater = max(
+                residentByteHighWater,
+                actualRemainingBytes
+            )
             if let accounting { lastTransferAccounting = accounting }
             let backingBytes = Self.backingByteCount(in: stagedRecords)
             if remainingBytes > targetResidentBytes {
@@ -3382,6 +3664,16 @@ public final class PaintTileStore: @unchecked Sendable {
             else { continue }
             try residency.unpin(record.identity, reason: .active)
             record.storage.isStrokeActive = false
+            if record.storage.componentCoverageTexture != nil {
+                precondition(
+                    componentCoverageByteCount
+                        >= PaintTileProvisionalReservation
+                            .componentCoverageBytesPerBinding
+                )
+                record.storage.componentCoverageTexture = nil
+                componentCoverageByteCount -= PaintTileProvisionalReservation
+                    .componentCoverageBytesPerBinding
+            }
         }
     }
 
@@ -3461,6 +3753,15 @@ public final class PaintTileStore: @unchecked Sendable {
               record.storage.snapshotRetainCount == 0
         else { return false }
         records.removeValue(forKey: key)
+        if record.storage.componentCoverageTexture != nil {
+            precondition(
+                componentCoverageByteCount
+                    >= PaintTileProvisionalReservation
+                        .componentCoverageBytesPerBinding
+            )
+            componentCoverageByteCount -= PaintTileProvisionalReservation
+                .componentCoverageBytesPerBinding
+        }
         guard tileKeyByID.removeValue(forKey: record.identity.tileID) == key
         else { preconditionFailure("Paint tile identity index drift") }
         residency.remove(record.identity)
@@ -3552,11 +3853,50 @@ public final class PaintTileStore: @unchecked Sendable {
         residency: PaintTileResidency
     ) throws {
         let requested = Set(requestedIdentities)
-        let requestedBytes = try checkedMultiply(
-            requested.count,
-            PaintTileDescriptor.residentByteCount
-        )
-        var independentlyPinned = 0
+        let coverageBytes = PaintTileProvisionalReservation
+            .componentCoverageBytesPerBinding
+        var requestedBytes = 0
+        var requestedCoverageBytes = 0
+        for identity in requested {
+            let identityCoverageBytes = hasComponentCoverage(identity)
+                ? coverageBytes : 0
+            let (identityBytes, identityOverflow) = PaintTileDescriptor
+                .residentByteCount.addingReportingOverflow(
+                    identityCoverageBytes
+                )
+            guard !identityOverflow else {
+                throw PaintTileResidencyError.residentByteCountOverflow
+            }
+            let (next, overflow) = requestedBytes.addingReportingOverflow(
+                identityBytes
+            )
+            guard !overflow else {
+                throw PaintTileResidencyError.residentByteCountOverflow
+            }
+            requestedBytes = next
+            let (nextCoverage, coverageOverflow) = requestedCoverageBytes
+                .addingReportingOverflow(identityCoverageBytes)
+            guard !coverageOverflow else {
+                throw PaintTileResidencyError.residentByteCountOverflow
+            }
+            requestedCoverageBytes = nextCoverage
+        }
+        guard requestedCoverageBytes <= componentCoverageByteCount else {
+            preconditionFailure("Requested coverage accounting drift")
+        }
+        // Component coverage is persistent stroke state, so it consumes the
+        // pinned side of the aggregate budget even when its color entry was
+        // independently evicted under pressure.
+        let existingCoverageOutsideRequest =
+            componentCoverageByteCount - requestedCoverageBytes
+        let (initialPinned, initialPinnedOverflow) =
+            existingCoverageOutsideRequest.addingReportingOverflow(
+                provisionalCoverageByteCount
+            )
+        guard !initialPinnedOverflow else {
+            throw PaintTileResidencyError.residentByteCountOverflow
+        }
+        var independentlyPinned = initialPinned
         for (identity, entry) in residency.entries
         where entry.isPinned && !requested.contains(identity) {
             let (next, overflow) = independentlyPinned.addingReportingOverflow(
@@ -3582,9 +3922,30 @@ public final class PaintTileStore: @unchecked Sendable {
         }
     }
 
+    private var availableColorResidencyByteBudget: Int {
+        max(
+            0,
+            residency.byteBudget
+                - componentCoverageByteCount
+                - provisionalCoverageByteCount
+        )
+    }
+
+    private func hasComponentCoverage(
+        _ identity: PaintTileIdentity
+    ) -> Bool {
+        guard let key = tileKeyByID[identity.tileID],
+              let record = records[key],
+              record.identity == identity
+        else { return false }
+        return record.storage.componentCoverageTexture != nil
+    }
+
     private func transferAccounting(
         captureIdentities: [PaintTileIdentity],
-        allocationBackings: [PaintTileBackingSnapshot]
+        allocationBackings: [PaintTileBackingSnapshot],
+        additionalAllocatedTextureBytes: Int = 0,
+        additionalStagingBytes: Int = 0
     ) throws -> PaintTileTransferAccounting {
         let captureCount = captureIdentities.reduce(into: 0) {
             count, identity in
@@ -3594,10 +3955,13 @@ public final class PaintTileStore: @unchecked Sendable {
             else { return }
             count += 1
         }
-        let allocatedBytes = try checkedMultiply(
-            allocationBackings.count,
-            PaintTileDescriptor.residentByteCount
-        )
+        let allocatedBytes = try checkedSum([
+            try checkedMultiply(
+                allocationBackings.count,
+                PaintTileDescriptor.residentByteCount
+            ),
+            additionalAllocatedTextureBytes,
+        ])
         let uploadCount = allocationBackings.reduce(into: 0) {
             if case .rgba16Float = $1 { $0 += 1 }
         }
@@ -3624,9 +3988,12 @@ public final class PaintTileStore: @unchecked Sendable {
         )
         let capturedBytes = readbackBytes
         let stagingBytes = try checkedSum([
-            uploadBytes, readbackBytes, capturedBytes,
+            uploadBytes,
+            readbackBytes,
+            capturedBytes,
+            additionalStagingBytes,
         ])
-        let residentBytes = residency.residentByteCount
+        let residentBytes = aggregateResidentByteCount()
         let peakBytes = try checkedSum([
             residentBytes,
             allocatedBytes,

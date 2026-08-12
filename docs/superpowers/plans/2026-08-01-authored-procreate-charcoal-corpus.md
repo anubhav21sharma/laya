@@ -1,5 +1,10 @@
 # Authored Procreate Charcoal Corpus Implementation Plan
 
+**Execution status (2026-08-12):** Tasks 1 through 7 and their automated
+functional/performance evidence are complete. The approved archive remains on
+the offline tooling path, the `.key` file remains excluded, and product manual
+acceptance remains pending with the main corrective program.
+
 **Goal:** Convert the replacement author-supplied `FREE Charcoal Set` into an
 honestly reported native composite charcoal brush, with `C Charcoal` as the
 primary target and `C Charcoal Soft` as a secondary characterization target.
@@ -96,22 +101,22 @@ Companion sources:
 - Create
   `Tests/BrushConverterIntegrationTests/ProcreateCharcoalCorpusTests.swift`.
 
-- [ ] Add a real-corpus test that independently computes the three file hashes,
+- [x] Add a real-corpus test that independently computes the three file hashes,
   decodes `brushset.plist`, and verifies set name plus exact eight-member order.
-- [ ] Parse the archive through `ProcreateBrushParser` and verify all eight
+- [x] Parse the archive through `ProcreateBrushParser` and verify all eight
   top-level identities/names are present. Do not depend on parser output order;
   compare a safely constructed keyed inventory and fail on duplicates.
-- [ ] Verify the current baseline explicitly: all eight inspect without crash,
+- [x] Verify the current baseline explicitly: all eight inspect without crash,
   both target brushes report an active unsupported sub-brush, and the three
   required built-in resource names are absent from archive members.
-- [ ] Record archive/photo ownership, hashes, member inventory, target IDs,
+- [x] Record archive/photo ownership, hashes, member inventory, target IDs,
   component topology, missing built-ins, and `notBundledInRelease: true` in
   `corpus.json`.
-- [ ] Document that replacement requires a new manifest revision and test hash;
+- [x] Document that replacement requires a new manifest revision and test hash;
   do not silently edit an accepted hash.
-- [ ] Explicitly exclude the `.key` file from parsing, fixtures, packaging, and
+- [x] Explicitly exclude the `.key` file from parsing, fixtures, packaging, and
   release targets.
-- [ ] Run:
+- [x] Run:
 
   ```bash
   swift test --filter ProcreateCharcoalCorpusTests
@@ -134,22 +139,22 @@ Companion sources:
 - Modify `Sources/BrushConverter/ProcreateBrushSemanticKeys.swift`.
 - Modify parser fixtures/tests and the real-corpus integration test.
 
-- [ ] Replace `.token("present")` for direct scalar values with bounded typed
+- [x] Replace `.token("present")` for direct scalar values with bounded typed
   decoding of Boolean, integer, finite real, string, and null.
-- [ ] Keep unknown direct scalars in a stable raw namespace. Keep uncharacterized
+- [x] Keep unknown direct scalars in a stable raw namespace. Keep uncharacterized
   object graphs presence-only with a diagnostic; never copy them into runtime
   definitions.
-- [ ] Add stable semantic keys for the verified shape, grain, placement,
+- [x] Add stable semantic keys for the verified shape, grain, placement,
   dynamics, color, taper, material, and `dualBlendMode` fields.
-- [ ] Decode each active archive independently. Do not allow parent values to
+- [x] Decode each active archive independently. Do not allow parent values to
   fill absent sub-brush fields implicitly.
-- [ ] Characterize and pin at least the following target evidence:
+- [x] Characterize and pin at least the following target evidence:
   parent/sub `paintSize`, `plotSpacing`, pressure size/opacity, tilt size/shape
   roundness, texture scale/movement, bundled shape/grain paths, and parent
   `dualBlendMode`.
-- [ ] Add malformed kind, non-finite, invalid UID, cycle, and aggregate-budget
+- [x] Add malformed kind, non-finite, invalid UID, cycle, and aggregate-budget
   tests. The same hostile value must fail identically in root and sub-brush.
-- [ ] Run parser, archive, converter, and fuzz suites.
+- [x] Run parser, archive, converter, and fuzz suites.
 
 ---
 
@@ -176,28 +181,28 @@ public struct ForeignBrushComponent: Codable, Equatable, Sendable {
 }
 ```
 
-- [ ] Advance `ForeignBrushIR` to schema version 2 with ordered `components` as
+- [x] Advance `ForeignBrushIR` to schema version 2 with ordered `components` as
   the single source of component settings/resources. Decode version 1 as one
   synthesized `root` component so existing fixtures/packages remain readable;
   encode new output only as version 2.
-- [ ] Parse only active root and `SubNN` paths. Ignore all `Reset/**`, QuickLook,
+- [x] Parse only active root and `SubNN` paths. Ignore all `Reset/**`, QuickLook,
   Signature, and AuthorPicture paths for component discovery.
-- [ ] Support root plus `Sub01` in parser version 2. Represent the ordered array
+- [x] Support root plus `Sub01` in parser version 2. Represent the ordered array
   so later versions can raise the limit without redesigning IR.
-- [ ] Enforce depth one, maximum two active components, aggregate byte/pixel/
+- [x] Enforce depth one, maximum two active components, aggregate byte/pixel/
   object/setting/diagnostic budgets, normalized ZIP paths, and deterministic
   numeric `SubNN` ordering.
-- [ ] Reject duplicate logical components, case/path aliases, missing archive,
+- [x] Reject duplicate logical components, case/path aliases, missing archive,
   non-contiguous active indices, traversal, and conflicting members with typed
   errors. Never construct a dictionary that can trap on duplicates.
-- [ ] Add tests proving Reset copies do not change active component count or
+- [x] Add tests proving Reset copies do not change active component count or
   hashes. Add fixtures with nested `Sub01/Sub01`, `Sub02` without `Sub01`, and
   component-level ZIP bombs.
-- [ ] Update CLI inspect JSON to expose component identity and diagnostics while
+- [x] Update CLI inspect JSON to expose component identity and diagnostics while
   keeping old top-level summaries readable.
-- [ ] Verify both charcoal targets contain exactly `root` and `sub01`, with the
+- [x] Verify both charcoal targets contain exactly `root` and `sub01`, with the
   expected missing tip/grain references and no Reset contamination.
-- [ ] Run focused tests, full converter tests, deterministic fuzz campaigns,
+- [x] Run focused tests, full converter tests, deterministic fuzz campaigns,
   and `swift test`.
 
 ---
@@ -219,41 +224,41 @@ discard behavior.
 - Modify compiler, resource residency, deposition encoding, content hashing,
   package coding, and all affected tests.
 
-- [ ] Introduce native schema version 3 with one or two ordered dry components.
+- [x] Introduce native schema version 3 with one or two ordered dry components.
   Schema version 2 is already reserved by corrective-program Task 9 for ordered
   multi-sensor dynamics.
   Each component owns coverage, placement, dynamics, color, material, taper,
   and a stable identifier. Stroke-level metadata, stabilization, replay policy,
   limits, and seed policy remain shared.
-- [ ] Decode version-1 and version-2 `BrushDefinition` values as one canonical
+- [x] Decode version-1 and version-2 `BrushDefinition` values as one canonical
   primary component, applying the existing v1-to-v2 dynamics adapter first.
   Migrate built-ins mechanically and prove byte/pixel compatibility through
   existing anchors before removing duplicated singular fields.
-- [ ] Define explicit bounded composition modes. Characterize Procreate
+- [x] Define explicit bounded composition modes. Characterize Procreate
   `dualBlendMode = 1`; if exact equivalence cannot be established without an
   iPad, map the closest dry source-over composition as `approximated` and retain
   an acceptance flag. Unknown required modes block activation.
-- [ ] Drive all component generators from the same authoritative input samples
+- [x] Drive all component generators from the same authoritative input samples
   while preserving independent resampling, dynamics, dabs, and random streams.
   Randomness is keyed by stroke seed, source identity, component ordinal,
   component-dab ordinal, and channel.
-- [ ] Preserve append-only causality. Component expansion is bounded by two,
+- [x] Preserve append-only causality. Component expansion is bounded by two,
   preallocated, and included in the frame-work budget. Never replay the stroke
   body to add the secondary component.
-- [ ] Carry stable component identity through compile and deposition so the
+- [x] Carry stable component identity through compile and deposition so the
   renderer selects the correct textures/pipeline state. Batch/group only where
   doing so preserves declared composition order.
-- [ ] Apply tiling/radial transforms to the complete component dab transform;
+- [x] Apply tiling/radial transforms to the complete component dab transform;
   brush-local tip/grain orientation must rotate or reflect with each replica
   according to its coordinate mode.
-- [ ] Compute cursor support as the conservative evaluated union of visible
+- [x] Compute cursor support as the conservative evaluated union of visible
   components. Paint and erase must use identical component geometry.
-- [ ] Add one- and two-component definition validation, v1/v2 migration,
+- [x] Add one- and two-component definition validation, v1/v2 migration,
   deterministic digest, independent spacing, independent dynamics, component
   random isolation, symmetry, erase, history, empty-output, and budget tests.
-- [ ] Add a performance negative control whose component loop allocates or
+- [x] Add a performance negative control whose component loop allocates or
   replays; the production path must reject/fail the intended gate.
-- [ ] Run `swift test` and the existing single-component raster anchors before
+- [x] Run `swift test` and the existing single-component raster anchors before
   accepting this schema migration.
 
 ---
@@ -268,29 +273,29 @@ discard behavior.
   `Sources/BrushFormat/Resources/Professional/Charcoal/`.
 - Add deterministic normalization tooling and resource-quality tests.
 
-- [ ] Implement an exact, case-sensitive, offline substitution registry with
+- [x] Implement an exact, case-sensitive, offline substitution registry with
   duplicate rejection, resource-role checks, byte count/hash verification,
   deterministic order, and no network/fuzzy lookup.
-- [ ] Author a Laya-owned irregular oval tip corresponding in physical role—not
+- [x] Author a Laya-owned irregular oval tip corresponding in physical role—not
   bytes—to `Haggard-Oval.png`. Preserve the editable lossless source and record
   every deterministic normalization operation.
-- [ ] Derive a fine paper-tooth grain and a coarse/fibrous charcoal grain from
+- [x] Derive a fine paper-tooth grain and a coarse/fibrous charcoal grain from
   `DSC_0006.jpg` and/or `DSC_0175.jpg`. Correct EXIF orientation, crop,
   illumination, contrast, seams, and frequency balance offline.
-- [ ] Prefer separate outputs for the parent and sub-brush roles. Sharing one
+- [x] Prefer separate outputs for the parent and sub-brush roles. Sharing one
   source is allowed only if parent-only/sub-only raster evidence proves that
   independent transforms provide genuinely distinct useful behavior.
-- [ ] Record source photo hash, crop/transform parameters, tool versions,
+- [x] Record source photo hash, crop/transform parameters, tool versions,
   derived hashes, intended role, color interpretation, support bounds, mip
   policy, maximum useful size, and license/ownership in `PROVENANCE.md`.
-- [ ] Map the three missing Procreate names to owned resource IDs with reason
+- [x] Map the three missing Procreate names to owned resource IDs with reason
   `project-owned-source-library-substitute`; never call them exact or
   resource-resampled.
-- [ ] Require dimensions/support, grayscale range, seam error, frequency bands,
+- [x] Require dimensions/support, grayscale range, seam error, frequency bands,
   mip variance, no dominant line/repetition, and useful projected modulation.
-- [ ] Add blank, one-pixel, hard-seam, stripe, clipped-tip, and low-resolution
+- [x] Add blank, one-pixel, hard-seam, stripe, clipped-tip, and low-resolution
   negative controls.
-- [ ] Run resource, normalizer, cache/mip, and full tests.
+- [x] Run resource, normalizer, cache/mip, and full tests.
 
 ---
 
@@ -301,24 +306,24 @@ discard behavior.
 - Create `Sources/BrushConverter/ProcreateClassicV1BrushMapper.swift`.
 - Modify semantic keys, command runner, conversion reports, and focused tests.
 
-- [ ] Map the root and `sub01` independently into two native components. Resolve
+- [x] Map the root and `sub01` independently into two native components. Resolve
   all three missing resources only through the injected registry.
-- [ ] Preserve independent size, spacing, flow, opacity, pressure, tilt,
+- [x] Preserve independent size, spacing, flow, opacity, pressure, tilt,
   rotation, scatter, grain transform, and randomization wherever the native
   contract has characterized equivalence.
-- [ ] Report every source field exactly once per component using a stable
+- [x] Report every source field exactly once per component using a stable
   component-qualified key. Active unknown rendering controls are required-
   unsupported unless proven inert.
-- [ ] Keep both target packages dry: `interaction = .none`, append-only replay,
+- [x] Keep both target packages dry: `interaction = .none`, append-only replay,
   causal termination, and no destination sampling. Wet/mix settings remain
   report data and cannot silently activate a backend.
-- [ ] Extend `convert` with explicit brush selection and substitution-manifest
+- [x] Extend `convert` with explicit brush selection and substitution-manifest
   options. Reject duplicates, unknown IDs, unused replacements, role/hash/path
   mismatches, and missing required resources.
-- [ ] Keep `inspect` available for all eight brushes. `Finger Smudge` may prove
+- [x] Keep `inspect` available for all eight brushes. `Finger Smudge` may prove
   embedded-resource normalization/package behavior, but conversion must remain
   inactive while smudge semantics are unsupported.
-- [ ] Convert each target twice:
+- [x] Convert each target twice:
 
   ```bash
   swift run layabrush-convert convert --json \
@@ -338,9 +343,9 @@ discard behavior.
     brushes/procreate/1_FREE_Charcoal_Set.brushset
   ```
 
-- [ ] Require byte-identical repeated primary output, save/reopen equivalence,
+- [x] Require byte-identical repeated primary output, save/reopen equivalence,
   complete reports, and no parser/converter dependency in the packages.
-- [ ] Run focused mapper/CLI/integration/fuzz tests and `swift test`.
+- [x] Run focused mapper/CLI/integration/fuzz tests and `swift test`.
 
 ---
 
@@ -355,38 +360,38 @@ discard behavior.
 - Modify professional dynamics and Metal functional tests.
 - Modify the Natural Charcoal harness scene and manual card.
 
-- [ ] Use the primary conversion as the baseline and the soft target as a
+- [x] Use the primary conversion as the baseline and the soft target as a
   cross-check. Any native retune must be recorded as an approximation in
   retained evidence; it cannot silently diverge from both targets.
-- [ ] Add parent-only, child-only, and combined characterization scenes. Each
+- [x] Add parent-only, child-only, and combined characterization scenes. Each
   component must make a measurable useful contribution; disabling either must
   change its intended texture/coverage metric.
-- [ ] At low/neutral/high pressure check changed pixels, alpha percentiles,
+- [x] At low/neutral/high pressure check changed pixels, alpha percentiles,
   visible width versus evaluated support, broad-side/edge variation, and cursor
   agreement. Sparse pores may use documented percentile-aware tolerance, but
   a 40 px cursor cannot hide a hairline principal stroke.
-- [ ] Test straight, curve, tight turn, reversal, stationary hold, short tap,
+- [x] Test straight, curve, tight turn, reversal, stationary hold, short tap,
   and pointer-up. Require continuity, no spikes/icicles, causal endpoint, and
   no retroactive body change.
-- [ ] Test repeated-pass buildup, local paper anchoring, scale/zoom behavior,
+- [x] Test repeated-pass buildup, local paper anchoring, scale/zoom behavior,
   periodic seams, radial rotation/reflection, erase parity, undo/redo, clear,
   deterministic replay, and predicted-input replacement.
-- [ ] Run all negative controls: blank/one-pixel/clipped tip, missing fine grain,
+- [x] Run all negative controls: blank/one-pixel/clipped tip, missing fine grain,
   missing coarse grain, disabled component, merged random streams, shrunken
   support, zero flow, hard seam, and retained-body replay.
-- [ ] Run nominal and large-size production-path performance traces in plain,
+- [x] Run nominal and large-size production-path performance traces in plain,
   periodic, and maximum radial symmetry. Persist HUD and JSONL counters for CPU
   preparation, input-to-submit, GPU time, FPS, missed frames, backlog, dabs by
   component, cache hits/misses, memory, uploads, pipeline creation, and replay.
-- [ ] Include Natural Charcoal in the full post-Stage-G performance matrix:
+- [x] Include Natural Charcoal in the full post-Stage-G performance matrix:
   cold selection, warm long strokes, size extremes, cache churn, memory
   pressure, 10-second traces, and accelerated 10-minute traces repeated three
   times. No decode/upload/pipeline creation/GPU wait/replay may occur on the
   warm input path.
-- [ ] Export deterministic PNG/JSON evidence and keep
+- [x] Export deterministic PNG/JSON evidence and keep
   `manualQualityPassed = false` and `productAccepted = false` until the final
   user review.
-- [ ] Run focused suites, both Debug and Release macOS app builds, `swift test`,
+- [x] Run focused suites, both Debug and Release macOS app builds, `swift test`,
   and the full corrective evidence gate.
 
 ---
@@ -403,17 +408,17 @@ behavior is deferred to the ordered destination-sampling backend.
 
 ## Self-Review Checklist
 
-- [ ] Replacement archive/photo hashes and all eight members match disk.
-- [ ] Root and active `Sub01` parse; Reset copies never become components.
-- [ ] All readers and component budgets remain bounded and fuzzed.
-- [ ] Native composite components preserve independent settings and randomness.
-- [ ] Single-component native brushes retain their established behavior.
-- [ ] No missing Procreate resource is copied or called exact.
-- [ ] Owned tip/grains carry reproducible provenance and quality evidence.
-- [ ] Every source field has one component-qualified report disposition.
-- [ ] Runtime/release targets contain no Procreate parser, archive, or key.
-- [ ] Cursor, paint, erase, tiling, radial transforms, and history agree.
-- [ ] Negative controls prove the gates can detect invisible, undersized,
+- [x] Replacement archive/photo hashes and all eight members match disk.
+- [x] Root and active `Sub01` parse; Reset copies never become components.
+- [x] All readers and component budgets remain bounded and fuzzed.
+- [x] Native composite components preserve independent settings and randomness.
+- [x] Single-component native brushes retain their established behavior.
+- [x] No missing Procreate resource is copied or called exact.
+- [x] Owned tip/grains carry reproducible provenance and quality evidence.
+- [x] Every source field has one component-qualified report disposition.
+- [x] Runtime/release targets contain no Procreate parser, archive, or key.
+- [x] Cursor, paint, erase, tiling, radial transforms, and history agree.
+- [x] Negative controls prove the gates can detect invisible, undersized,
   textureless, single-component, discontinuous, or replay-heavy output.
-- [ ] Warm performance evidence proves no decode/upload/pipeline/replay work.
-- [ ] Manual validation is deferred but remains mandatory for acceptance.
+- [x] Warm performance evidence proves no decode/upload/pipeline/replay work.
+- [x] Manual validation is deferred but remains mandatory for acceptance.

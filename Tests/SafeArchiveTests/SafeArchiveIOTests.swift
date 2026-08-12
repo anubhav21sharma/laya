@@ -5,6 +5,70 @@ import Testing
 @Suite("Safe archive I/O")
 struct SafeArchiveIOTests {
     @Test
+    func fileBackedOpenPreflightsMetadataAndStreamsBoundedPayloadReads()
+        throws
+    {
+        let fixture = try TemporaryArchiveFixture()
+        defer { fixture.close() }
+        let limits = SafeArchiveLimits(
+            maximumEntryCount: 2,
+            maximumEntryBytes: 256 * 1_024,
+            maximumExpandedBytes: 256 * 1_024,
+            maximumPathBytes: 128
+        )
+        let payload = Data(repeating: 0x5A, count: 192 * 1_024)
+        let encoded = try SafeArchiveCodec.encode(
+            entries: ["tiles/large.bin": payload],
+            limits: limits
+        )
+        try encoded.write(to: fixture.destination)
+        var reads: [Int] = []
+        let archive = try SafeArchiveIO.open(
+            at: fixture.destination,
+            limits: limits,
+            readObserver: { reads.append($0) }
+        )
+        let preflightReadBytes = reads.reduce(0, +)
+        #expect(preflightReadBytes < encoded.count / 2)
+        #expect((reads.max() ?? 0) <= 65_557)
+
+        var decoded = Data()
+        try archive.consumeEntry(
+            at: "tiles/large.bin",
+            maximumChunkByteCount: 4_096
+        ) { decoded.append($0) }
+        #expect(decoded == payload)
+        #expect((reads.max() ?? 0) <= 65_557)
+        #expect(!reads.contains(encoded.count))
+    }
+
+    @Test
+    func fileBackedOpenDefersPayloadChecksumToBoundedConsumption() throws {
+        let fixture = try TemporaryArchiveFixture()
+        defer { fixture.close() }
+        let payload = Data((0..<64).map(UInt8.init))
+        var encoded = try SafeArchiveCodec.encode(
+            entries: ["tile.bin": payload],
+            limits: .testing
+        )
+        let payloadRange = try #require(encoded.range(of: payload))
+        encoded[payloadRange.lowerBound] ^= 0xFF
+        try encoded.write(to: fixture.destination)
+
+        let archive = try SafeArchiveIO.open(
+            at: fixture.destination,
+            limits: .testing
+        )
+        #expect(throws: SafeArchiveError.checksumMismatch("tile.bin")) {
+            try archive.consumeEntry(
+                at: "tile.bin",
+                maximumChunkByteCount: 7,
+                consume: { _ in }
+            )
+        }
+    }
+
+    @Test
     func streamingProviderIsBoundedClosedOnceAndByteCanonical() throws {
         let fixture = try TemporaryArchiveFixture()
         defer { fixture.close() }

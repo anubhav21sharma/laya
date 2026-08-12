@@ -58,13 +58,13 @@ run_logged foundation-tests \
 run_logged foundation-bootstrap ./scripts/bootstrap.sh
 run_logged foundation-mac-build xcodebuild \
   -project App/PatternSpike.xcodeproj \
-  -scheme PatternSpikeMac \
+  -scheme PatternSpikeMacHarness \
   -configuration Debug \
   -destination platform=macOS \
   -derivedDataPath "$derived" \
   build CODE_SIGNING_ALLOWED=NO
 
-binary="$derived/Build/Products/Debug/PatternSpike.app/Contents/MacOS/PatternSpike"
+binary="$derived/Build/Products/Debug/PatternSpikeHarness.app/Contents/MacOS/PatternSpikeHarness"
 [[ -x "$binary" ]] \
   || fail "Mac harness binary is unavailable: $binary"
 

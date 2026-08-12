@@ -28,6 +28,30 @@ macOS 14+, and iPadOS 18+.
 
 ## Authority And Status
 
+**Execution status (2026-08-12):** Stages A through G and the automated
+performance/repair portion of Task 28 are complete. The persisted three-pass,
+24-trace matrix sets `engineIntegrated=true` and
+`softwarePerformancePassed=true`. That matrix predates the final compositor
+completion-poll lifecycle repair. Focused final-source lifecycle and hosted
+production-canvas tests pass, but a fresh matrix attempt on the current Apple
+Paravirtual GPU host stops at its first strict timing gate (9.13 ms
+event-to-submit p95 versus the required value below 8 ms). A controlled
+pre-repair build measures 9.21 ms on the same host, so the lifecycle repair is
+not the regression. Final-source performance requalification remains pending
+an eligible run environment; the earlier matrix remains historical accepted
+evidence rather than a fresh claim about this host.
+Manual review of 68 candidate cards, any fixes it identifies, catalog
+admission, and qualifying iPad/Pencil/120 Hz/thermal/memory/Wacom evidence
+remain pending; therefore `manualQualityPassed=false`,
+`physicalProfilePassed=false`, and `productAccepted=false`. The Xcode-hosted
+UI route is being requested again after source-control closeout; direct signed
+production-UI replay and the hosted non-XCTest regression are already green.
+
+The original task-level commit checkpoints are represented by existing
+mainline history plus the authorized consolidated corrective-program closeout
+commit. They are not retroactively rewritten into artificial historical
+commits.
+
 This plan implements the independently validated findings in
 `docs/superpowers/reports/2026-08-01-brush-engine-corrective-report.md` plus the
 additional repository-confirmed gaps recorded during the external-analysis
@@ -349,21 +373,22 @@ public protocol PaintTileStore: Sendable {
 - Modify: `docs/superpowers/milestones/12-professional-dry-media.md`
 - Modify: `docs/superpowers/16-reference-sheet.md`
 
-**Behavior:** Keep the four definitions available only to Brush Lab as
-`correctiveRebuildRequired`. Remove them from `EditorBrushCatalog.drawEntries`
+**Behavior:** Keep the four definitions available only to Brush Lab with the
+five-field candidate status. Remove them from `EditorBrushCatalog.drawEntries`
 and restore the vetted anchor ink as `defaultDraw`. Persisted professional IDs
 must resolve to a laboratory-only entry with a clear message instead of
 silently selecting a different brush.
 
-- [ ] Add catalog tests proving none of the four IDs is product-selectable,
+- [x] Add catalog tests proving none of the four IDs is product-selectable,
   all remain resolvable in Brush Lab, and a persisted ID reports laboratory
   status.
-- [ ] Add `ProfessionalBrushStatus.correctiveRebuildRequired` and route the
-  four entries through it.
-- [ ] Change milestone language from completed/realtime120 to corrective work
+- [x] Add the `engineIntegrated`, `softwarePerformancePassed`,
+  `manualQualityPassed`, `physicalProfilePassed`, and `productAccepted` fields
+  and route all four entries through them.
+- [x] Change milestone language from completed/realtime120 to corrective work
   required; retain old counts only as historical evidence.
-- [ ] Run `swift test --filter 'ProfessionalBrushCatalogTests|BrushLabSessionTests'`.
-- [ ] Commit as `fix(brush): revoke broken preset acceptance`.
+- [x] Run `swift test --filter 'ProfessionalBrushCatalogTests|BrushLabSessionTests'`.
+- [x] Mainline commit coverage complete (planned checkpoint: `fix(brush): revoke broken preset acceptance`).
 
 ### Task 2: Convert User Reports Into Failing Functional Fixtures
 
@@ -394,19 +419,19 @@ struct BrushFunctionalMeasurement: Codable, Equatable, Sendable {
 }
 ```
 
-- [ ] Check in timestamped direct traces for a 10-second Technical Ink line, a
+- [x] Check in timestamped direct traces for a 10-second Technical Ink line, a
   fast-release ink stroke, 40 px Graphite, neutral-pressure Charcoal, and a
   90-degree plus circular Chisel turn.
-- [ ] Implement measurements from readback pixels using independent scalar CPU
+- [x] Implement measurements from readback pixels using independent scalar CPU
   code; do not call brush dynamics or shader helpers to compute expected data.
-- [ ] Add assertions that currently fail for retained-body replay, endpoint
+- [x] Add assertions that currently fail for retained-body replay, endpoint
   retreat, Graphite cursor/support mismatch, Charcoal visibility, and Chisel
   protrusions.
-- [ ] Preserve current rasters under `.build/brush-corrective-baseline/` as
+- [x] Preserve current rasters under `.build/brush-corrective-baseline/` as
   failure evidence, never under an approved golden directory.
-- [ ] Run `swift test --filter 'BrushCorrectiveFunctionalTests|ProfessionalStrokeTraceTests'`
+- [x] Run `swift test --filter 'BrushCorrectiveFunctionalTests|ProfessionalStrokeTraceTests'`
   and record the expected failures in the task report.
-- [ ] Commit as `test(brush): freeze reported functional failures`.
+- [x] Mainline commit coverage complete (planned checkpoint: `test(brush): freeze reported functional failures`).
 
 ### Task 3: Make Performance Evidence Measure The Production Path
 
@@ -429,13 +454,13 @@ are buffered off the input path. The compact HUD shows current/target FPS,
 frame p95, prepare p95, submit p95, GPU p95, actual/predicted queue depth, and
 logging state.
 
-- [ ] Write aggregation tests using a deterministic synthetic timestamp source.
-- [ ] Add begin/end segment markers so a user session can be isolated from logs.
-- [ ] Add a 10-second and accelerated 10-minute production-renderer trace.
-- [ ] Fail the software gate when actual replay is nonzero for an append-only
+- [x] Write aggregation tests using a deterministic synthetic timestamp source.
+- [x] Add begin/end segment markers so a user session can be isolated from logs.
+- [x] Add a 10-second and accelerated 10-minute production-renderer trace.
+- [x] Fail the software gate when actual replay is nonzero for an append-only
   brush, backlog grows monotonically, or event-to-submit misses exceed 1%.
-- [ ] Run `swift test --filter 'StrokeRuntimeTelemetryTests|DebugPerformanceMonitorTests|BenchmarkRecordTests'`.
-- [ ] Commit as `feat(perf): measure live stroke pipeline`.
+- [x] Run `swift test --filter 'StrokeRuntimeTelemetryTests|DebugPerformanceMonitorTests|BenchmarkRecordTests'`.
+- [x] Mainline commit coverage complete (planned checkpoint: `feat(perf): measure live stroke pipeline`).
 
 **Stage A exit:** The app and docs no longer claim the four brushes are done;
 all five user-visible failures reproduce through stable traces; a production
@@ -465,18 +490,18 @@ or `.boundedCorrection(maximumSamples:maximumWorldLength:maximumDabs:)`.
 Obsolete native termination encodings are rejected and cannot select an old
 renderer path.
 
-- [ ] Add red tests asserting pointer-up cannot change body dabs, endpoint
+- [x] Add red tests asserting pointer-up cannot change body dabs, endpoint
   retreat is at most 1 logical pixel for `.cap`, and correction limits reject
   excess samples, distance, or dabs.
-- [ ] Introduce `BrushTerminationDefinition` and compile it into an immutable
+- [x] Introduce `BrushTerminationDefinition` and compile it into an immutable
   `BrushTerminationProgram`.
-- [ ] Delete the product-path call that reevaluates the complete stroke after
+- [x] Delete the product-path call that reevaluates the complete stroke after
   total length becomes known.
-- [ ] Record the required producer inventory and typed old-version rejection;
+- [x] Record the required producer inventory and typed old-version rejection;
   physical native-v1 deletion occurs at Task 14A after Stage D so it does not
   overlap the atomic renderer cutover.
-- [ ] Run `swift test --filter 'Brush(Definition|DynamicsEngine|TerminationEvaluator)Tests'`.
-- [ ] Commit as `fix(brush): make stroke termination causal`.
+- [x] Run `swift test --filter 'Brush(Definition|DynamicsEngine|TerminationEvaluator)Tests'`.
+- [x] Mainline commit coverage complete (planned checkpoint: `fix(brush): make stroke termination causal`).
 
 ### Task 5: Introduce Append-Only Authoritative Stroke State
 
@@ -496,21 +521,21 @@ Successfully submitted ordinals are retired and can never re-enter a frame.
 The coordinator retains generator state and compact commit metadata, not a
 renderable copy of the completed dab body.
 
-- [ ] Add tests for 1, 10, 1,000, and 100,000 input events proving each ordinal
+- [x] Add tests for 1, 10, 1,000, and 100,000 input events proving each ordinal
   is emitted and submitted once and per-event returned work does not grow with
   stroke age.
-- [ ] Add batching-invariance tests: one batch versus arbitrary subdivisions
+- [x] Add batching-invariance tests: one batch versus arbitrary subdivisions
   must produce identical ordered authoritative dabs and canonical pixels.
-- [ ] Extract a sendable immutable `CompiledBrushRenderState` from the
+- [x] Extract a sendable immutable `CompiledBrushRenderState` from the
   main-actor `CompiledBrush`; isolate immutable Metal references in one audited
   `@unchecked Sendable` resource holder if the SDK lacks conformances.
-- [ ] Route one current native ink brush through the coordinator. Use any
+- [x] Route one current native ink brush through the coordinator. Use any
   temporary A/B oracle only within the cutover test, then delete the old path
   and selector in the same accepted slice.
-- [ ] Remove ordinary actual-input calls to `rebuildReplayLayer` and equivalent
+- [x] Remove ordinary actual-input calls to `rebuildReplayLayer` and equivalent
   retained-body encoding.
-- [ ] Run `swift test --filter 'StrokeRenderCoordinatorTests|TransientStrokeBufferTests|DepositionMetamorphicTests'`.
-- [ ] Commit as `refactor(render): append authoritative stroke work`.
+- [x] Run `swift test --filter 'StrokeRenderCoordinatorTests|TransientStrokeBufferTests|DepositionMetamorphicTests'`.
+- [x] Mainline commit coverage complete (planned checkpoint: `refactor(render): append authoritative stroke work`).
 
 ### Task 6: Isolate Replaceable Prediction
 
@@ -534,15 +559,15 @@ Replacement clears only those tiles, then draws the bounded predicted suffix.
 Actual input invalidates prediction from the matching provenance boundary.
 Prediction is never promoted as canonical truth.
 
-- [ ] Write tests proving prediction on/off and arbitrary replacement cadence
+- [x] Write tests proving prediction on/off and arbitrary replacement cadence
   produce byte-identical committed output.
-- [ ] Set caps to 64 normalized samples, 512 logical dabs, and the frame
+- [x] Set caps to 64 normalized samples, 512 logical dabs, and the frame
   profile's predicted-instance budget; exceeding them truncates prediction
   only and records overload.
-- [ ] Implement tile-local clear/rebuild for the prediction overlay.
-- [ ] Ensure pointer-up discards prediction before draining final actual work.
-- [ ] Run `swift test --filter 'PredictionOverlayTests|DepositionMetamorphicTests|DepositionRendererTests'`.
-- [ ] Commit as `feat(render): isolate prediction overlay`.
+- [x] Implement tile-local clear/rebuild for the prediction overlay.
+- [x] Ensure pointer-up discards prediction before draining final actual work.
+- [x] Run `swift test --filter 'PredictionOverlayTests|DepositionMetamorphicTests|DepositionRendererTests'`.
+- [x] Mainline commit coverage complete (planned checkpoint: `feat(render): isolate prediction overlay`).
 
 ### Task 7: Move Preparation Off Main And Add Frame Backpressure
 
@@ -576,7 +601,7 @@ encoding. Drawable acquisition stays late in `draw(in:)`.
 - [x] Run `swift test --filter 'StrokeFrameSchedulerTests|StrokeRenderCoordinatorTests|InteractiveFrameTimestampTests|DepositionRendererTests'`.
 - [x] Run the 10-minute trace and assert bounded memory plus flat per-event CPU
   work between the first and last deciles.
-- [x] Commit as `perf(render): move stroke preparation off main`.
+- [x] Mainline commit coverage complete (planned checkpoint: `perf(render): move stroke preparation off main`).
 
 **Stage B exit:** Task 5A's renderer event dispatcher is independently clean;
 long strokes have O(new work) CPU behavior, zero actual replay, bounded memory
@@ -631,21 +656,21 @@ erase coverage, and layer blend equations operate in linear values. Display
 and PNG export convert back to encoded sRGB exactly once. Alpha is never gamma
 encoded.
 
-- [ ] Add independent CPU reference vectors for sRGB transfer boundaries,
+- [x] Add independent CPU reference vectors for sRGB transfer boundaries,
   50% source-over, low-flow repeated buildup, erase, transparent colors, and
   round-trip error.
-- [ ] Add a shader differential test with absolute linear-channel error at most
+- [x] Add a shader differential test with absolute linear-channel error at most
   `2e-3` for half-float working surfaces.
-- [ ] Implement the typed conversion functions and shader reference kernels,
+- [x] Implement the typed conversion functions and shader reference kernels,
   but do not switch production paint surfaces in this task. The atomic switch
   occurs with sparse allocation in Task 13 so no intermediate commit creates
   full-canvas RGBA16F front/scratch textures.
-- [ ] Change display texture/view formats to `.bgra8Unorm_srgb` or explicit
+- [x] Change display texture/view formats to `.bgra8Unorm_srgb` or explicit
   output encode where that format cannot be used.
-- [ ] Audit every `InkColor`/`CGColor`/texture boundary and label values as
+- [x] Audit every `InkColor`/`CGColor`/texture boundary and label values as
   encoded, linear-unpremultiplied, or linear-premultiplied in types.
-- [ ] Run `swift test --filter 'DocumentColorTests|DocumentColorPipelineTests|DepositionReferenceTests|DepositionShaderSourceTests'`.
-- [ ] Commit as `feat(color): blend paint in linear sRGB`.
+- [x] Run `swift test --filter 'DocumentColorTests|DocumentColorPipelineTests|DepositionReferenceTests|DepositionShaderSourceTests'`.
+- [x] Mainline commit coverage complete (planned checkpoint: `feat(color): blend paint in linear sRGB`).
 
 ### Task 13: Replace Full-Canvas Working Textures With Sparse Tiles
 
@@ -670,20 +695,20 @@ evictable after their backing snapshot exists. The budget is
 device reports a nonzero recommendation, otherwise 128 MiB on macOS and 64 MiB
 on iOS.
 
-- [ ] Add allocation tests proving a one-dab 4096 canvas allocates only touched
+- [x] Add allocation tests proving a one-dab 4096 canvas allocates only touched
   tiles, not a 4096 x 4096 RGBA16F texture.
-- [ ] Add edge/halo tests for dabs and erasers crossing 2 and 4 tile corners.
-- [ ] Add deterministic LRU tests, pinning tests, memory-pressure eviction, and
+- [x] Add edge/halo tests for dabs and erasers crossing 2 and 4 tile corners.
+- [x] Add deterministic LRU tests, pinning tests, memory-pressure eviction, and
   typed allocation-failure rollback.
-- [ ] Make commit transactions capture before/after tile snapshots while still
+- [x] Make commit transactions capture before/after tile snapshots while still
   producing one region-history command per stroke.
-- [ ] Atomically activate `DocumentColorPipeline` and `rgba16Float` for every
+- [x] Atomically activate `DocumentColorPipeline` and `rgba16Float` for every
   paint-bearing canonical/live/prediction/scratch tile; delete the legacy
   encoded-BGRA8 paint blend path in the same commit.
-- [ ] Add differential raster tests between the old full surface and tiled
+- [x] Add differential raster tests between the old full surface and tiled
   surface for existing dry scenes before removing the old allocation path.
-- [ ] Run `swift test --filter 'TiledRasterSurfaceTests|PaintTileResidencyTests|RasterRevisionStoreTests|DepositionRendererTests'`.
-- [ ] Commit as `refactor(raster): use sparse paint tiles`.
+- [x] Run `swift test --filter 'TiledRasterSurfaceTests|PaintTileResidencyTests|RasterRevisionStoreTests|DepositionRendererTests'`.
+- [x] Mainline commit coverage complete (planned checkpoint: `refactor(raster): use sparse paint tiles`).
 
 ### Task 14: Add A Linear Tile-Based Layer Compositor
 
@@ -707,17 +732,17 @@ linear premultiplied equations. Project persistence stores nonempty RGBA16F
 tiles with IDs, bounds, byte order, semantic hash, and revision; PNG remains an
 encoded-sRGB interchange/export format.
 
-- [ ] Add pure model tests for add/delete/reorder/visibility/opacity/lock and
+- [x] Add pure model tests for add/delete/reorder/visibility/opacity/lock and
   active-layer fallback.
-- [ ] Add independent CPU/GPU blend differentials and transparent-edge tests.
-- [ ] Add deterministic current-project schema-4 round trips and prove native
+- [x] Add independent CPU/GPU blend differentials and transparent-edge tests.
+- [x] Add deterministic current-project schema-4 round trips and prove native
   schemas 1, 2, 3, and unknown future versions fail typed before payload reads
   or renderer allocation. Do not add a native migration path.
-- [ ] Add a 2048 x 2048 eight-layer residency test and fail if live GPU tile
+- [x] Add a 2048 x 2048 eight-layer residency test and fail if live GPU tile
   bytes exceed the configured budget.
-- [ ] Verify undo/redo targets the original layer ID after reorder.
-- [ ] Run `swift test --filter 'LayerStackTests|LayerCompositorTests|PatternRasterExportCodecTests|PatternProjectBridgeTests'`.
-- [ ] Commit as `feat(layers): add bounded linear compositor`.
+- [x] Verify undo/redo targets the original layer ID after reorder.
+- [x] Run `swift test --filter 'LayerStackTests|LayerCompositorTests|PatternRasterExportCodecTests|PatternProjectBridgeTests'`.
+- [x] Mainline commit coverage complete (planned checkpoint: `feat(layers): add bounded linear compositor`).
 
 **Stage D exit:** Low-flow buildup and blending match independent linear-light
 references, high precision no longer requires full-canvas per-layer textures,
@@ -765,14 +790,14 @@ Round/ellipse/chisel procedural tips use analytic shader coverage rather than
 prebaked 64/128/256 circles. The cache key includes semantic tip hash,
 quantized size/aspect/rotation/hardness/subpixel phase, and precision.
 
-- [ ] Add malformed/missing resource and support-bound tests.
-- [ ] Add mip-selection tests from projected footprint and high-zoom edge tests.
-- [ ] Add cache hit/miss/eviction metrics and prove warm drawing performs no
+- [x] Add malformed/missing resource and support-bound tests.
+- [x] Add mip-selection tests from projected footprint and high-zoom edge tests.
+- [x] Add cache hit/miss/eviction metrics and prove warm drawing performs no
   image decode, upload, or pipeline creation.
-- [ ] Do not add universal border padding; only asset-specific support metadata
+- [x] Do not add universal border padding; only asset-specific support metadata
   demonstrated by a failing clipping test may request padding.
-- [ ] Run `swift test --filter 'BrushMaskCacheTests|BrushCompilerTests|DepositionStampInstanceTests'`.
-- [ ] Commit as `perf(brush): compile reusable tip support`.
+- [x] Run `swift test --filter 'BrushMaskCacheTests|BrushCompilerTests|DepositionStampInstanceTests'`.
+- [x] Mainline commit coverage complete (planned checkpoint: `perf(brush): compile reusable tip support`).
 
 ### Task 16: Derive A Truthful Cursor From The Evaluated Tip
 
@@ -792,13 +817,13 @@ scale. Circular tips show a circle; broad tips show the transformed contour;
 textured/scattered tips show a stable conservative core/envelope. The cursor
 path does not read texture bytes or allocate per pointer move.
 
-- [ ] Add pure transform tests for circle, ellipse, chisel, rotation, reflection,
+- [x] Add pure transform tests for circle, ellipse, chisel, rotation, reflection,
   zoom, backing scale, and missing pressure.
-- [ ] Add controlled single-dab raster tests requiring cursor/support IoU at
+- [x] Add controlled single-dab raster tests requiring cursor/support IoU at
   least 0.85 and maximum support-edge error at most 1.5 logical pixels.
-- [ ] Route hover and brush-size changes through the descriptor immediately.
-- [ ] Run `swift test --filter 'BrushCursorDescriptorTests|BrushCursorIntegrationTests|BrushCorrectiveFunctionalTests'`.
-- [ ] Commit as `fix(cursor): show evaluated brush footprint`.
+- [x] Route hover and brush-size changes through the descriptor immediately.
+- [x] Run `swift test --filter 'BrushCursorDescriptorTests|BrushCursorIntegrationTests|BrushCorrectiveFunctionalTests'`.
+- [x] Mainline commit coverage complete (planned checkpoint: `fix(cursor): show evaluated brush footprint`).
 
 ### Task 17: Install A Compile-Time Backend Registry
 
@@ -821,17 +846,17 @@ resolve.
 During Task 17 it registers only exact native definition schema 2; Task 18
 atomically replaces that registration with schema 3.
 
-- [ ] Add duplicate, unknown, version mismatch, deterministic-order, and
+- [x] Add duplicate, unknown, version mismatch, deterministic-order, and
   backend-capability tests.
-- [ ] Register deposition and continuous-ribbon capabilities; the latter may
+- [x] Register deposition and continuous-ribbon capabilities; the latter may
   remain internal until a brush proves it necessary.
-- [ ] Remove `usesDestinationSampling` from the deposition function-constant
+- [x] Remove `usesDestinationSampling` from the deposition function-constant
   path because it is not actually wired; represent it only in a compiled
   canvas-interaction backend contract.
-- [ ] Keep `secondaryColorMix` as a semantic value but reject nonzero use until
+- [x] Keep `secondaryColorMix` as a semantic value but reject nonzero use until
   a backend declares and implements the required color-source capability.
-- [ ] Run `swift test --filter 'BrushBackendRegistryTests|BrushCompilerTests|DepositionPipelineLibraryTests'`.
-- [ ] Commit as `refactor(brush): register static render backends`.
+- [x] Run `swift test --filter 'BrushBackendRegistryTests|BrushCompilerTests|DepositionPipelineLibraryTests'`.
+- [x] Mainline commit coverage complete (planned checkpoint: `refactor(brush): register static render backends`).
 
 ### Task 18: Add Bounded Native Composite Dry Brushes
 
@@ -857,25 +882,25 @@ The native package manifest remains exact current schema 2 because its wire
 layout does not change; the package validates that its definition payload is
 schema 3. Tasks 15 through 17 are prerequisites for this cutover.
 
-- [ ] Migrate every in-tree producer to schema 3, delete schema-v1/v2
+- [x] Migrate every in-tree producer to schema 3, delete schema-v1/v2
   decode/compile/hash branches, and prove current single-component and composite
   semantic/raster anchors plus typed old-version rejection.
-- [ ] Drive component generators from the same authoritative input stream while
+- [x] Drive component generators from the same authoritative input stream while
   preserving independent resampling and append-only output; never replay the
   retained stroke to produce the secondary component.
-- [ ] Key randomness by stroke/sample identity, component ordinal,
+- [x] Key randomness by stroke/sample identity, component ordinal,
   component-dab ordinal, and channel so collection order cannot change pixels.
-- [ ] Carry component identity through compile, resource selection, batching,
+- [x] Carry component identity through compile, resource selection, batching,
   deposition, erase, bounds, cursor support, history, tiling, and radial
   transforms.
-- [ ] Enforce a maximum of two components in this schema version and include
+- [x] Enforce a maximum of two components in this schema version and include
   component expansion in frame-work, resident-memory, and dab-count budgets.
-- [ ] Characterize the initial dry composition mode independently. Unknown or
+- [x] Characterize the initial dry composition mode independently. Unknown or
   unsupported required modes fail activation instead of silently flattening.
-- [ ] Add independent-spacing/dynamics, component-order, random-isolation,
+- [x] Add independent-spacing/dynamics, component-order, random-isolation,
   erase, cursor-union, symmetry, empty-output, budget, and performance tests.
-- [ ] Run `swift test` plus existing single-component raster anchors.
-- [ ] Commit as `feat(brush): add composite dry components`.
+- [x] Run `swift test` plus existing single-component raster anchors.
+- [x] Mainline commit coverage complete (planned checkpoint: `feat(brush): add composite dry components`).
 
 ### Task 19: Separate Diagnostics From Production Rendering
 
@@ -897,13 +922,13 @@ and validators live in `MetalRendererDiagnostics`, which depends on
 `MetalRenderer`; the dependency never points back. Debug/harness app builds
 link diagnostics, release product builds do not.
 
-- [ ] Add package boundary tests/build checks proving the release app does not
+- [x] Add package boundary tests/build checks proving the release app does not
   link the diagnostics target.
-- [ ] Move files mechanically first, then expose the smallest public snapshot
+- [x] Move files mechanically first, then expose the smallest public snapshot
   API needed by diagnostics; do not make renderer internals broadly public.
-- [ ] Update every evidence executable/test dependency and XcodeGen source path.
-- [ ] Run `swift test` and both Debug and Release macOS app builds.
-- [ ] Commit as `refactor(render): isolate diagnostics target`.
+- [x] Update every evidence executable/test dependency and XcodeGen source path.
+- [x] Run `swift test` and both Debug and Release macOS app builds.
+- [x] Mainline commit coverage complete (planned checkpoint: `refactor(render): isolate diagnostics target`).
 
 **Stage E exit:** Warm brushes reuse compiled resources, the cursor matches tip
 support, backend choice is typed and static, bounded composite dry brushes
@@ -932,21 +957,21 @@ explicitly passes it. Physical iPad/Wacom status remains pending.
 - Modify: `App/PatternSpike/Harness/Scenes/professional-technical-ink.json`
 - Modify: `App/PatternSpike/BrushLab/BrushLabManualCard.swift`
 
-- [ ] Author a neutral anti-aliased ink tip and provenance; do not reuse the
+- [x] Author a neutral anti-aliased ink tip and provenance; do not reuse the
   current fixture as the visual target.
-- [ ] Use append-only deposition, causal cap termination, short weighted path
+- [x] Use append-only deposition, causal cap termination, short weighted path
   stabilization, and pressure-driven size/flow with explicit mouse neutral.
-- [ ] Require neutral straight width to be 0.80...1.10 of nominal diameter,
+- [x] Require neutral straight width to be 0.80...1.10 of nominal diameter,
   endpoint retreat at most 1 logical pixel, no centerline gaps, and cursor IoU
   at least 0.90.
-- [ ] Require CPU preparation p95 below 2 ms, event-to-submit p95 below 8 ms for
+- [x] Require CPU preparation p95 below 2 ms, event-to-submit p95 below 8 ms for
   the 60 Hz software trace, missed fraction at most 1%, zero actual replay, and
   no growing backlog.
-- [ ] Export the Brush Lab edge/join, taper, pressure, erase, responsiveness,
+- [x] Export the Brush Lab edge/join, taper, pressure, erase, responsiveness,
   and prolonged-drawing candidate artifacts with manual status still pending.
-- [ ] Run the focused tests and production app trace; do not wait for manual
+- [x] Run the focused tests and production app trace; do not wait for manual
   validation before starting the next brush.
-- [ ] Commit as `feat(brush): rebuild technical ink`.
+- [x] Mainline commit coverage complete (planned checkpoint: `feat(brush): rebuild technical ink`).
 
 ### Task 21: Rebuild Graphite Pencil
 
@@ -958,18 +983,18 @@ explicitly passes it. Physical iPad/Wacom status remains pending.
 - Modify: `Tests/MetalRendererTests/BrushCorrectiveFunctionalTests.swift`
 - Modify: `App/PatternSpike/Harness/Scenes/professional-graphite-pencil.json`
 
-- [ ] Author at least one irregular tip and one independent paper grain with
+- [x] Author at least one irregular tip and one independent paper grain with
   lossless sources, mips, support bounds, scale, and provenance.
-- [ ] Separate pressure effects on coverage, size, and grain strength; use
+- [x] Separate pressure effects on coverage, size, and grain strength; use
   direction/tilt only where the authored physical model justifies them.
-- [ ] Require the cursor to match measured visible support within 1.5 logical
+- [x] Require the cursor to match measured visible support within 1.5 logical
   pixels, one neutral pass to remain visibly textured, and three repeated
   passes to increase median darkness by at least 20% without one-pass clipping.
-- [ ] Check grain continuity through turns, zoom, periodic seams, and radial
+- [x] Check grain continuity through turns, zoom, periodic seams, and radial
   transforms; reject screen-locked or swimming texture.
-- [ ] Pass the same runtime thresholds as Technical Ink at its declared nominal
+- [x] Pass the same runtime thresholds as Technical Ink at its declared nominal
   workload and export Graphite manual candidates as pending.
-- [ ] Commit as `feat(brush): rebuild graphite pencil`.
+- [x] Mainline commit coverage complete (planned checkpoint: `feat(brush): rebuild graphite pencil`).
 
 ### Task 22: Rebuild Natural Charcoal
 
@@ -981,31 +1006,31 @@ explicitly passes it. Physical iPad/Wacom status remains pending.
 - Modify: `Tests/MetalRendererTests/BrushCorrectiveFunctionalTests.swift`
 - Modify: `App/PatternSpike/Harness/Scenes/professional-natural-charcoal.json`
 
-- [ ] Complete Tasks 1–6 of
+- [x] Complete Tasks 1–6 of
   `docs/superpowers/plans/2026-08-01-authored-procreate-charcoal-corpus.md` so
   the approved `C Charcoal` and `C Charcoal Soft` parent-plus-`Sub01` archives
   yield native composite packages and honest conversion reports before
   calibrating the product preset.
-- [ ] Execute focused-plan Task 7 here. Use Laya-owned replacements for the
+- [x] Execute focused-plan Task 7 here. Use Laya-owned replacements for the
   absent `Haggard-Oval.png`, `Brush-Preset-Bonobo.png`, and
   `Brush-Artery-Charcoal-Corse.jpg`; derive the grains from the supplied owned
   paper photographs. Do not package or label any absent built-in as exact.
-- [ ] Keep the supplied `.brushset` on the offline tooling/test path; the native
+- [x] Keep the supplied `.brushset` on the offline tooling/test path; the native
   definition and admitted resources are the only inputs to `EditorCore` and
   `MetalRenderer`.
-- [ ] Require parent-only, child-only, and combined evidence so both components
+- [x] Require parent-only, child-only, and combined evidence so both components
   make a useful measurable contribution and retain independent size, spacing,
   dynamics, grain transform, and random streams.
-- [ ] At neutral pressure require changed pixels, alpha p50 at least 0.12 inside
+- [x] At neutral pressure require changed pixels, alpha p50 at least 0.12 inside
   the authored support, alpha p90 at least 0.30, and visible broad-side versus
   edge variation for tilt-capable input.
-- [ ] Validate tonal buildup, grain scale, seam continuity, footprint-matched
+- [x] Validate tonal buildup, grain scale, seam continuity, footprint-matched
   erase, mouse fallback, cursor/support agreement, and low/mid/high spatial
   frequency energy. One-pixel tip, zero-grain, disabled-component,
   merged-random-stream, shrunken-support, and seam negative controls must fail.
-- [ ] Pass runtime thresholds at nominal and large sizes and export Charcoal
+- [x] Pass runtime thresholds at nominal and large sizes and export Charcoal
   manual candidates as pending.
-- [ ] Commit as `feat(brush): rebuild natural charcoal`.
+- [x] Mainline commit coverage complete (planned checkpoint: `feat(brush): rebuild natural charcoal`).
 
 ### Task 23: Rebuild Chisel Marker And Gate The Ribbon Backend
 
@@ -1018,20 +1043,20 @@ explicitly passes it. Physical iPad/Wacom status remains pending.
 - Modify: `App/PatternSpike/Harness/Scenes/professional-chisel-marker.json`
 - Conditionally create: `Sources/MetalRenderer/BrushBackend/ContinuousRibbonEncoder.swift`
 
-- [ ] First implement with filtered shortest-angle stamp frames and
+- [x] First implement with filtered shortest-angle stamp frames and
   footprint-aware spacing; add fan interpolation only where the turn test shows
   an uncovered wedge.
-- [ ] Require zero isolated icicle components, maximum turn protrusion at most
+- [x] Require zero isolated icicle components, maximum turn protrusion at most
   0.15 nominal diameter, no interior gap wider than 2 logical pixels, and
   consistent broad/edge widths.
-- [ ] If automated turn thresholds pass with stamps, keep the stamp backend as
+- [x] If automated turn thresholds pass with stamps, keep the stamp backend as
   the candidate; the final manual round may still reopen this decision.
-- [ ] If an automated threshold fails, capture the failing raster/metric,
+- [x] If an automated threshold fails, capture the failing raster/metric,
   implement the registered continuous-ribbon backend for Chisel only, and
   rerun the complete deposition/tiling/symmetry/erase/history matrix.
-- [ ] Pass nominal and tight-turn performance thresholds and export Chisel
+- [x] Pass nominal and tight-turn performance thresholds and export Chisel
   manual candidates as pending.
-- [ ] Commit as `feat(brush): rebuild chisel marker`.
+- [x] Mainline commit coverage complete (planned checkpoint: `feat(brush): rebuild chisel marker`).
 
 **Stage F exit:** Each brush has authored resources and provenance and passes
 its focused functional/performance gate. The exhaustive cross-family dry-brush
@@ -1057,16 +1082,16 @@ commands, the active coordinator handle, and final composition. It does not own
 `BrushStrokeGenerator`, `TransientStrokeBuffer`, retained projected records,
 resource decoding, evidence generation, or frame-budget policy.
 
-- [ ] Move display composition and commit/history bridging into the focused
+- [x] Move display composition and commit/history bridging into the focused
   units after characterization tests are green.
-- [ ] Delete the debug old-runtime switch and all unreachable replay-layer
+- [x] Delete the debug old-runtime switch and all unreachable replay-layer
   product code.
-- [ ] Prove compile-time ownership by keeping `PatternEngine` independent and
+- [x] Prove compile-time ownership by keeping `PatternEngine` independent and
   `MetalRendererDiagnostics -> MetalRenderer` one-way.
-- [ ] Run `swift test` and a production trace that proves input/frame CPU work is
+- [x] Run `swift test` and a production trace that proves input/frame CPU work is
   independent of completed-stroke length and no completed-stroke replay loop is
   reachable.
-- [ ] Commit as `refactor(render): finish stroke runtime split`.
+- [x] Mainline commit coverage complete (planned checkpoint: `refactor(render): finish stroke runtime split`).
 
 ### Task 25: Run The Cross-Family Functional Matrix
 
@@ -1084,16 +1109,16 @@ tight turns; reversal; low/neutral/high pressure; tilt/azimuth sweeps; mouse;
 maximum symmetry; draw/erase; cold/warm/cache churn/memory pressure; 10-second
 and accelerated 10-minute runs.
 
-- [ ] Require deterministic canonical pixels across batching, prediction,
+- [x] Require deterministic canonical pixels across batching, prediction,
   viewport zoom, and display cadence.
-- [ ] Require canonical parity across preview/commit, exactly one history
+- [x] Require canonical parity across preview/commit, exactly one history
   command, correct undo/redo, and cancel preserving prior pixels.
-- [ ] Require no input-path decode/upload/pipeline creation/GPU wait, zero
+- [x] Require no input-path decode/upload/pipeline creation/GPU wait, zero
   append-only actual replay, bounded queue and residency, and no monotonic
   latency growth.
-- [ ] Add negative controls that independently fail each gate category.
-- [ ] Run `swift test`, then `swift run BrushCorrectiveEvidenceGate`.
-- [ ] Commit as `test(brush): add corrective evidence gate`.
+- [x] Add negative controls that independently fail each gate category.
+- [x] Run `swift test`, then `swift run BrushCorrectiveEvidenceGate`.
+- [x] Mainline commit coverage complete (planned checkpoint: `test(brush): add corrective evidence gate`).
 
 ### Task 26: Exercise The Production macOS UI And Export Manual Candidates
 
@@ -1106,41 +1131,41 @@ and accelerated 10-minute runs.
 - Modify: `docs/superpowers/milestones/12-professional-dry-media.md`
 - Modify: `docs/superpowers/16-reference-sheet.md`
 
-- [ ] Launch the production app, select every candidate brush, set exact sizes,
+- [x] Launch the production app, select every candidate brush, set exact sizes,
   perform straight/curved/long strokes, change tools, erase, undo/redo, clear,
   switch plain/periodic/radial on a clean canvas, and verify controls remain
   responsive while drawing.
-- [ ] Capture canvas PNG, screen image, input trace, semantic hash, HUD snapshot,
+- [x] Capture canvas PNG, screen image, input trace, semantic hash, HUD snapshot,
   and isolated JSONL segment for every test workload.
-- [ ] Keep the HUD compact at bottom-right and verify opening it with tilde does
+- [x] Keep the HUD compact at bottom-right and verify opening it with tilde does
   not steal numeric input focus or alter shortcut routing.
-- [ ] Export complete Brush Lab candidate cards and reference artifacts for
+- [x] Export complete Brush Lab candidate cards and reference artifacts for
   look, feel, texture, joins, pressure, tilt, erase, responsiveness, and
   prolonged use. Leave their result explicitly pending; do not request manual
   validation during Stage G.
-- [ ] Build the iPadOS simulator target and run platform-independent app tests;
+- [x] Build the iPadOS simulator target and run platform-independent app tests;
   record physical Pencil/120 Hz/thermal/memory/Wacom checks as pending.
-- [ ] Update milestones with the five-state vocabulary only:
+- [x] Update milestones with the five-state vocabulary only:
   `engineIntegrated`, `softwarePerformancePassed`, `manualQualityPassed`,
   `physicalProfilePassed`, and `productAccepted`.
-- [ ] Commit as `docs(brush): publish corrective evidence status`.
+- [x] Mainline commit coverage complete (planned checkpoint: `docs(brush): publish corrective evidence status`).
 
 ### Task 27: Complete Automated Integration Verification
 
-- [ ] Run `swift test` with normal parallelism, then rerun only documented
+- [x] Run `swift test` with normal parallelism, then rerun only documented
   process-global Metal/harness suites with `--no-parallel`.
-- [ ] Regenerate Xcode projects and build Debug/Release macOS plus Debug iPadOS
+- [x] Regenerate Xcode projects and build Debug/Release macOS plus Debug iPadOS
   simulator targets with warnings treated as errors.
-- [ ] Run one full 10-second and accelerated 10-minute integration trace;
+- [x] Run one full 10-second and accelerated 10-minute integration trace;
   compare hashes, p95/p99 latency, memory high-water, and cache behavior. The
   mandatory repeated performance round runs after this stage.
-- [ ] Inspect the production app log for input-path allocations, actual replay,
+- [x] Inspect the production app log for input-path allocations, actual replay,
   unbounded queue growth, GPU waits, dropped actual input, and silent fallback.
-- [ ] Set `engineIntegrated` only when every Stage G automated gate is green.
+- [x] Set `engineIntegrated` only when every Stage G automated gate is green.
   Keep every candidate laboratory-only while `manualQualityPassed` is pending.
-- [ ] Do not mark `softwarePerformancePassed`, `physicalProfilePassed`,
+- [x] Do not mark `softwarePerformancePassed`, `physicalProfilePassed`,
   `realtime120`, or `productAccepted` here.
-- [ ] Commit as `feat(brush): complete automated integration`.
+- [x] Mainline commit coverage complete (planned checkpoint: `feat(brush): complete automated integration`).
 
 **Stage G exit:** All implementation stages, cross-family functional checks,
 production-app automation, and builds are green. Candidate manual cards are
@@ -1160,19 +1185,24 @@ complete but pending. No brush is product-admitted yet.
 - Modify: `docs/superpowers/16-reference-sheet.md`
 - Persist generated artifacts under: `.build/brush-corrective-acceptance/`
 
-- [ ] Run the complete cold/warm, nominal/large/max-size,
+- [x] Run the complete cold/warm, nominal/large/max-size,
   plain/periodic/radial, maximum-symmetry, cache-churn, memory-pressure,
   10-second, and accelerated 10-minute matrix three times for all four brushes.
-- [ ] Compare FPS, frame p95/p99, event-to-submit p95/p99, CPU preparation, GPU
+- [x] Compare FPS, frame p95/p99, event-to-submit p95/p99, CPU preparation, GPU
   duration, missed-frame fraction, actual/predicted queue depth, backlog
   high-water, memory high-water, cache hits/misses, input-path work, and
   canonical hashes across runs.
-- [ ] Treat any visible-output, cursor, endpoint, texture, continuity, control,
+- [x] Treat any visible-output, cursor, endpoint, texture, continuity, control,
   determinism, backlog, latency, memory, or silent-fallback failure as an
   implementation defect. Fix it, add a focused regression, and rerun the
   affected cluster. Rerun the full matrix after any performance-path change.
-- [ ] Set `softwarePerformancePassed` only when all three complete runs pass and
+- [x] Set `softwarePerformancePassed` only when all three complete runs pass and
   HUD values agree with persisted JSONL summaries.
+- [ ] Requalify the final compositor completion-poll lifecycle repair with the
+  complete three-pass matrix on a host that can satisfy the strict timing
+  gate. The 2026-08-12 Apple Paravirtual GPU A/B measured 9.13 ms with the fix
+  and 9.21 ms without it against the required event-to-submit p95 below 8 ms;
+  focused final-source lifecycle and hosted-canvas tests are green.
 - [ ] Present the complete candidate set for one user manual round covering
   look, feel, texture, joins, taper, pressure, tilt, buildup, erase, symmetry,
   responsiveness, and prolonged drawing. Record explicit pass/fail notes.
@@ -1181,10 +1211,13 @@ complete but pending. No brush is product-admitted yet.
   validation only for affected cards.
 - [ ] Admit only brushes with green automated gates and explicit manual passes
   into `EditorBrushCatalog.drawEntries`; keep any other brush laboratory-only.
-- [ ] Keep iPad/Pencil/120 Hz/thermal/memory/Wacom evidence pending. Do not set
+- [x] Keep iPad/Pencil/120 Hz/thermal/memory/Wacom evidence pending. Do not set
   `physicalProfilePassed`, `realtime120`, or `productAccepted` without qualifying
   hardware evidence.
-- [ ] Commit as `feat(brush): complete corrective acceptance`.
+- [ ] On qualifying hardware, capture iPad/Pencil/120 Hz/thermal/memory/Wacom
+  evidence and set `physicalProfilePassed` only if every physical gate passes.
+- [ ] Commit final accepted product state as
+  `feat(brush): complete corrective acceptance` after manual and physical gates.
 
 ## Engineering Completion Criteria
 
@@ -1228,17 +1261,17 @@ requires the final manual cards to pass. The criteria are:
 
 ## Plan Self-Review Checklist
 
-- [ ] Every confirmed corrective finding maps to a task or an explicit non-goal.
-- [ ] No archived external claim is used without a repository or primary-source
+- [x] Every confirmed corrective finding maps to a task or an explicit non-goal.
+- [x] No archived external claim is used without a repository or primary-source
   confirmation.
-- [ ] Every behavior-changing task begins with a failing test or measurable
+- [x] Every behavior-changing task begins with a failing test or measurable
   functional assertion.
-- [ ] Every new public type has module ownership, serialization implications,
+- [x] Every new public type has module ownership, serialization implications,
   and concurrency semantics stated.
-- [ ] Every stage has a runnable exit gate and a small commit boundary.
-- [ ] No task contains unfinished implementation markers, stub code, or a
+- [x] Every stage has a runnable exit gate and a small commit boundary.
+- [x] No task contains unfinished implementation markers, stub code, or a
   fabricated physical result.
-- [ ] A final reviewer checks current-only native definition/package/hash and
+- [x] A final reviewer checks current-only native definition/package/hash and
   PatternFile enforcement, typed old/future-version rejection, preservation of
   external-import provenance/semantic refusal, strict concurrency, color
   transfer count, memory budget, and product status language before execution.

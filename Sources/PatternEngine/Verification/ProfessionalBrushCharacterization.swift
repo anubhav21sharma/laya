@@ -345,7 +345,7 @@ public enum ProfessionalBrushCharacterizer {
                     viewport: viewport
                 )
                 sampleCount += 1
-                generate(
+                try generate(
                     worldSample,
                     with: &authoritativeGenerator
                 ) { dab in
@@ -367,7 +367,7 @@ public enum ProfessionalBrushCharacterizer {
                     viewport: viewport
                 )
                 evaluatedPredictedSampleCount += 1
-                generate(worldSample, with: &cursor.generator) { _ in
+                try generate(worldSample, with: &cursor.generator) { _ in
                     evaluatedPredictedLogicalDabCount += 1
                 }
                 predictionCursor = cursor
@@ -419,17 +419,24 @@ public enum ProfessionalBrushCharacterizer {
         _ sample: WorldStrokeSample,
         with generator: inout BrushStrokeGenerator,
         emit: (LogicalDab) -> Void
-    ) {
-        switch sample.phase {
-        case .began:
-            generator.begin(sample, emit: emit)
-        case .moved:
-            generator.append(sample, emit: emit)
-        case .ended:
-            generator.finish(sample, emit: emit)
-        case .cancelled:
+    ) throws {
+        if sample.phase == .cancelled {
             generator.cancel()
+            return
         }
+        var cursor = try generator.emissionCursor(
+            for: sample,
+            maximumPathSubdivisionCount: .max
+        )
+        repeat {
+            _ = try cursor.emitNextPage(emit)
+        } while !cursor.isComplete
+        guard let completed = cursor.completedGenerator else {
+            preconditionFailure(
+                "Completed characterization cursor has no generator"
+            )
+        }
+        generator = completed
     }
 
     private struct PredictionCursor {

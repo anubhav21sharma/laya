@@ -13,6 +13,10 @@ let package = Package(
         .library(name: "EditorCore", targets: ["EditorCore"]),
         .library(name: "CShaderTypes", targets: ["CShaderTypes"]),
         .library(name: "MetalRenderer", targets: ["MetalRenderer"]),
+        .library(
+            name: "MetalRendererDiagnostics",
+            targets: ["MetalRendererDiagnostics"]
+        ),
         .library(name: "SafeArchive", targets: ["SafeArchive"]),
         .library(name: "BrushFormat", targets: ["BrushFormat"]),
         .library(name: "BrushConverter", targets: ["BrushConverter"]),
@@ -41,8 +45,16 @@ let package = Package(
             targets: ["ProfessionalBrushEvidenceGate"]
         ),
         .executable(
+            name: "BrushCorrectiveEvidenceGate",
+            targets: ["BrushCorrectiveEvidenceGate"]
+        ),
+        .executable(
             name: "BrushInputAllocationProbeHarness",
             targets: ["BrushInputAllocationProbeHarness"]
+        ),
+        .executable(
+            name: "StageDAcceptanceProbe",
+            targets: ["StageDAcceptanceProbe"]
         ),
         .library(name: "PatternFile", targets: ["PatternFile"]),
     ],
@@ -64,13 +76,49 @@ let package = Package(
             exclude: ["Shaders.metal"]
         ),
         .target(
+            name: "MetalRendererDiagnostics",
+            dependencies: [
+                "MetalRenderer",
+                "PatternEngine",
+                "BrushFormat",
+                "CShaderTypes",
+                "ProfessionalBrushEvidenceValidation",
+            ]
+        ),
+        .target(
             name: "PatternFile",
             dependencies: ["PatternEngine", "SafeArchive"]
         ),
         .target(name: "SafeArchive"),
         .target(
             name: "BrushFormat",
-            dependencies: ["PatternEngine", "SafeArchive"]
+            dependencies: ["PatternEngine", "SafeArchive"],
+            exclude: [
+                "Resources/Professional/TechnicalInk/Sources",
+                "Resources/Professional/TechnicalInk/technical-ink-tip.png",
+                "Resources/Professional/TechnicalInk/PROVENANCE.md",
+                "Resources/Professional/Graphite/Sources",
+                "Resources/Professional/Graphite/graphite-tip.png",
+                "Resources/Professional/Graphite/graphite-paper-grain.png",
+                "Resources/Professional/Graphite/PROVENANCE.md",
+                "Resources/Professional/Charcoal/Sources",
+                "Resources/Professional/Charcoal/charcoal-tip.png",
+                "Resources/Professional/Charcoal/charcoal-fine-grain.png",
+                "Resources/Professional/Charcoal/charcoal-coarse-grain.png",
+                "Resources/Professional/Charcoal/PROVENANCE.md",
+                "Resources/Professional/Chisel/Sources",
+                "Resources/Professional/Chisel/chisel-tip.png",
+                "Resources/Professional/Chisel/PROVENANCE.md",
+            ],
+            resources: [
+                .copy("Resources/Professional/TechnicalInk/technical-ink-tip.r8"),
+                .copy("Resources/Professional/Graphite/graphite-tip.r8"),
+                .copy("Resources/Professional/Graphite/graphite-paper-grain.r8"),
+                .copy("Resources/Professional/Charcoal/charcoal-tip.r8"),
+                .copy("Resources/Professional/Charcoal/charcoal-fine-grain.r8"),
+                .copy("Resources/Professional/Charcoal/charcoal-coarse-grain.r8"),
+                .copy("Resources/Professional/Chisel/chisel-tip.r8"),
+            ]
         ),
         .target(
             name: "BrushConverter",
@@ -101,8 +149,12 @@ let package = Package(
             dependencies: ["ProfessionalBrushEvidenceValidation"]
         ),
         .executableTarget(
+            name: "BrushCorrectiveEvidenceGate",
+            dependencies: ["MetalRendererDiagnostics"]
+        ),
+        .executableTarget(
             name: "BrushFoundationEvidenceGate",
-            dependencies: ["MetalRenderer"]
+            dependencies: ["MetalRendererDiagnostics"]
         ),
         .target(
             name: "BrushDepositionEvidenceValidation"
@@ -123,6 +175,10 @@ let package = Package(
             name: "BrushInputAllocationProbeHarness",
             dependencies: ["BrushFormat", "MetalRenderer", "PatternEngine"]
         ),
+        .executableTarget(
+            name: "StageDAcceptanceProbe",
+            dependencies: ["MetalRenderer"]
+        ),
         .testTarget(
             name: "PatternEngineTests",
             dependencies: ["PatternEngine"]
@@ -136,11 +192,20 @@ let package = Package(
             name: "MetalRendererTests",
             dependencies: [
                 "MetalRenderer",
+                "MetalRendererDiagnostics",
                 "CShaderTypes",
                 "EditorCore",
                 "BrushFormat",
                 "BrushDepositionEvidenceValidation",
                 "ProfessionalBrushEvidenceValidation",
+            ]
+        ),
+        .testTarget(
+            name: "MetalRendererDiagnosticsTests",
+            dependencies: [
+                "MetalRenderer",
+                "MetalRendererDiagnostics",
+                "PatternEngine",
             ]
         ),
         .testTarget(
@@ -205,6 +270,7 @@ let package = Package(
                 "PatternSpike/Canvas/MetalCanvas.swift",
                 "PatternSpike/Commands/EditorFocusedCommands.swift",
                 "PatternSpike/ContentView.swift",
+                "PatternSpike/Harness/StageDAppRouteEvidence.swift",
                 "PatternSpike/Debug/DebugPerformanceHUD.swift",
                 "PatternSpike/Debug/DebugPerformanceMonitor.swift",
                 "PatternSpike/Panels/EditorTopBar.swift",
@@ -215,6 +281,7 @@ let package = Package(
                 "PatternSpike/Persistence/PatternProjectBridge.swift",
                 "PatternSpike/Persistence/PatternProjectFileDocument.swift",
                 "Tests/ContentViewLifecycleTests.swift",
+                "Tests/BrushCursorIntegrationTests.swift",
                 "Tests/BrushLabSessionTests.swift",
                 "Tests/DebugPerformanceMonitorTests.swift",
                 "Tests/EditorTopBarColorBoundaryTests.swift",

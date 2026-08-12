@@ -1,8 +1,10 @@
+#if HARNESS_BUILD
 import Darwin
 import EditorCore
 import Foundation
 import Metal
 import MetalRenderer
+import MetalRendererDiagnostics
 import PatternEngine
 
 enum HarnessLaunch {
@@ -66,7 +68,7 @@ enum HarnessLaunch {
                         outputDirectory: outputDirectory,
                         build: build
                     )
-                    let result = try attachRuntimeTrace(
+                    let result = try await attachRuntimeTrace(
                         runtimeTraceProfile,
                         device: device,
                         to: baseResult
@@ -154,13 +156,14 @@ enum HarnessLaunch {
         _ requested: StrokeRuntimeTraceProfile?,
         device: any MTLDevice,
         to result: HarnessRunResult
-    ) throws -> HarnessRunResult {
+    ) async throws -> HarnessRunResult {
         guard let requested else { return result }
-        let runtime = try ProductionStrokeRuntimeTraceRunner(
+        let trace = try await ProductionStrokeRuntimeTraceRunner(
             device: device
         ).run(profile: requested)
         var benchmark = result.benchmark
-        benchmark.strokeRuntime = runtime
+        benchmark.strokeRuntime = trace.runtime
+        benchmark.stageDAcceptanceRendererEvidence = trace.rendererEvidence
         try BenchmarkRecord.encode(benchmark).write(
             to: result.benchmarkURL,
             options: .atomic
@@ -176,20 +179,31 @@ enum HarnessLaunch {
 
 @MainActor
 private struct ProductionStrokeRuntimeTraceRunner {
+    struct Result {
+        let runtime: StrokeRuntimeTelemetrySnapshot
+        let rendererEvidence: StageDAcceptanceRendererEvidence
+    }
+
     let device: any MTLDevice
 
     func run(
         profile: StrokeRuntimeTraceProfile
-    ) throws -> StrokeRuntimeTelemetrySnapshot {
+    ) async throws -> Result {
         guard let library = device.makeDefaultLibrary() else {
             throw MetalRendererError.defaultLibraryUnavailable
         }
         let renderer = try GridRenderer(
             device: device,
             library: library,
-            drawableSize: PatternSize(width: 512, height: 512),
+            drawableSize: PatternSize(
+                width: Float(StrokeRuntimeTraceWorkload.canvasDimension),
+                height: Float(StrokeRuntimeTraceWorkload.canvasDimension)
+            ),
             configuration: try TilingCanvasConfiguration(
-                pixelSize: PixelSize(width: 512, height: 512),
+                pixelSize: PixelSize(
+                    width: StrokeRuntimeTraceWorkload.canvasDimension,
+                    height: StrokeRuntimeTraceWorkload.canvasDimension
+                ),
                 tiling: .grid
             )
         )
@@ -208,54 +222,61 @@ private struct ProductionStrokeRuntimeTraceRunner {
         try renderer.beginStroke(
             token: token,
             sample: sample(
-                x: 96,
-                y: 256,
+                position: StrokeRuntimeTraceWorkload.position(frameIndex: 0),
                 timestamp: 0,
                 phase: .began
             ),
             style: style
         )
-        _ = try renderer.flushPendingLiveForHarness()
+        _ = try await renderer.flushAcceptedStrokeInputForHarness()
 
-        var frame: UInt64 = 1
-        while DispatchTime.now().uptimeNanoseconds - started
-            < profile.requiredWallDurationNanoseconds
-        {
-            let phase = Float(frame % 320) / 319
-            let x = frame / 320 % 2 == 0
-                ? 96 + phase * 320
-                : 416 - phase * 320
+        let frameIntervalNanoseconds: UInt64 = 16_666_667
+        for frameIndex in 1...profile.requiredMovedSampleCount {
+            let frame = UInt64(frameIndex)
             try renderer.appendStroke(
                 token: token,
                 sample: sample(
-                    x: x,
-                    y: 256 + sin(Float(frame) * 0.05) * 48,
+                    position: StrokeRuntimeTraceWorkload.position(
+                        frameIndex: frameIndex
+                    ),
                     timestamp: Double(frame) / 60,
                     phase: .moved
                 )
             )
-            _ = try renderer.flushPendingLiveForHarness()
-            frame &+= 1
-            usleep(16_000)
+            _ = try await renderer.flushAcceptedStrokeInputForHarness()
+            let (offset, offsetOverflow) = frame
+                .multipliedReportingOverflow(by: frameIntervalNanoseconds)
+            let (deadline, deadlineOverflow) = started
+                .addingReportingOverflow(offset)
+            guard !offsetOverflow, !deadlineOverflow else {
+                throw HarnessLaunchError.missingProductionRuntimeTrace(
+                    profile.rawValue
+                )
+            }
+            let now = DispatchTime.now().uptimeNanoseconds
+            if now < deadline {
+                try await Task.sleep(nanoseconds: deadline - now)
+            }
         }
 
+        let terminalFrame = UInt64(profile.requiredMovedSampleCount + 1)
         try renderer.requestStrokeCommit(
             token: token,
             sample: sample(
-                x: 416,
-                y: 256,
-                timestamp: Double(frame) / 60,
+                position: StrokeRuntimeTraceWorkload.position(
+                    frameIndex: Int(terminalFrame)
+                ),
+                timestamp: Double(terminalFrame) / 60,
                 phase: .ended
-            ),
-            maximumRetainedBytes: 64 * 1_024 * 1_024
+            )
         )
         while renderer.brushLabDiagnosticSnapshot.deposition
             .authoritativePending > 0
         {
-            _ = try renderer.flushPendingLiveForHarness()
+            _ = try await renderer.flushPendingLiveForHarness()
         }
-        _ = try renderer.flushPendingLiveForHarness()
-        _ = try renderer.finishCommitForHarness()
+        _ = try await renderer.flushPendingLiveForHarness()
+        _ = try await renderer.finishCommitForHarness()
         guard let evidence = renderer.strokeRuntimeRecordedEvidence else {
             throw HarnessLaunchError.missingProductionRuntimeTrace(
                 profile.rawValue
@@ -265,17 +286,24 @@ private struct ProductionStrokeRuntimeTraceRunner {
             evidence,
             replayMode: .appendOnly
         )
-        return evidence.report
+        _ = try evidence.report.requiredLongStrokeMetrics(
+            validatesPerformance: !BenchmarkHardware
+                .isPerformancePendingEnvironment(gpuName: device.name)
+        )
+        let rendererEvidence = await renderer.stageDAcceptanceEvidence()
+        return Result(
+            runtime: evidence.report,
+            rendererEvidence: rendererEvidence
+        )
     }
 
     private func sample(
-        x: Float,
-        y: Float,
+        position: ScreenPoint,
         timestamp: TimeInterval,
         phase: StrokePhase
     ) -> StrokeSample {
         StrokeSample(
-            position: ScreenPoint(x: x, y: y),
+            position: position,
             pressure: 0.75,
             timestamp: timestamp,
             phase: phase,
@@ -305,3 +333,4 @@ enum HarnessLaunchError: Error, LocalizedError {
         }
     }
 }
+#endif

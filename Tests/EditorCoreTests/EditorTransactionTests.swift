@@ -334,8 +334,8 @@ func pointerDownCapturesProgramForWholeTransaction() {
     #expect(drawing.program == capturedProgram)
 
     #expect(
-        transaction.apply(.recipeIntent(AnchorBrushCatalog.glazeMarker.id))
-            == [.updateRecipe(AnchorBrushCatalog.glazeMarker.id)]
+        transaction.apply(.recipeIntent(AnchorBrushCatalog.marker.id))
+            == [.updateRecipe(AnchorBrushCatalog.marker.id)]
     )
     guard case let .drawing(afterIntent) = transaction.state else {
         Issue.record("Expected the in-flight stroke to remain captured")
@@ -346,7 +346,7 @@ func pointerDownCapturesProgramForWholeTransaction() {
 
 @Test
 func recipeIntentFollowsConfigurationOrderingAcrossStrokeStates() {
-    let recipeID = AnchorBrushCatalog.glazeMarker.id
+    let recipeID = AnchorBrushCatalog.marker.id
 
     var idle = EditorTransaction()
     #expect(idle.apply(.recipeIntent(recipeID)) == [.updateRecipe(recipeID)])
@@ -785,7 +785,7 @@ func everyStateAndEventPairIsTotal() {
         .toolIntent(.erase),
         .colorIntent(alternateColor),
         .brushDiameterIntent(24),
-        .recipeIntent(AnchorBrushCatalog.glazeMarker.id),
+        .recipeIntent(AnchorBrushCatalog.marker.id),
         .gridVisibilityIntent(true),
         .command(.undo),
         .tilingIntent(.halfDrop),
@@ -888,7 +888,7 @@ func illegalStateEventPairsRejectWithoutMutationOrIllegalEffects() {
         ),
         RejectedPair(
             transaction: pending,
-            event: .recipeIntent(AnchorBrushCatalog.dryPencil.id),
+            event: .recipeIntent(AnchorBrushCatalog.dryMedia.id),
             effects: [.busy]
         ),
     ]

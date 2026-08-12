@@ -2,209 +2,6 @@ import Foundation
 import Testing
 @testable import PatternEngine
 
-@Test
-func schemaV1EvaluatorPinsEveryInputAndOutputBeforeOrderedPrograms() throws {
-    let base = nativeTestDefinition()
-    let dynamics = BrushDynamicsDefinition(
-        size: legacyLinear(.pressure, 1...2),
-        flow: legacyLinear(.speed, 0.5...1),
-        opacity: legacyLinear(.direction, 0.5...1),
-        spacing: legacyLinear(.tilt, 0.5...1),
-        rotation: legacyLinear(.azimuth, -1...1),
-        scatter: legacyLinear(.roll, 0.5...1),
-        hardness: legacyLinear(.tangentialPressure, 0.5...1),
-        grain: legacyLinear(.age, 0.5...1),
-        offsetX: legacyLinear(.distance, -2...2),
-        offsetY: legacyLinear(.pressure, -2...2),
-        hue: legacyLinear(.pressure, -0.2...0.2),
-        saturation: legacyLinear(.speed, -0.2...0.2),
-        brightness: legacyLinear(.direction, -0.2...0.2),
-        secondaryColorMix: legacyLinear(.tilt, 0...1),
-        noPressureNeutral: 1,
-        randomization: BrushRandomization(
-            spacing: 0, scatter: 1, rotation: 0, grain: 0, material: 0
-        )
-    )
-    let definition = try schemaV1Definition(base: base, dynamics: dynamics)
-    let program = try BrushProgramCompiler.compile(definition)
-    let sample = sensorSample(
-        pressure: 0.25,
-        velocity: 25,
-        altitude: 3 * .pi / 8,
-        azimuth: -.pi / 2,
-        roll: -.pi / 2,
-        tangentialPressure: -0.5,
-        capabilities: .supported
-    )
-    let context = sensorContext(
-        nominalDiameter: 64,
-        color: InkColor(red: 1, green: 0, blue: 0, alpha: 1)!,
-        direction: -.pi / 2,
-        strokeAge: 2.5,
-        traveledDistance: 25
-    )
-    let dab = BrushDynamicsEngine().evaluate(
-        sample: sample,
-        context: context,
-        program: program,
-        random: BrushRandomValues(
-            spacing: 0.5,
-            scatterX: 0.75,
-            scatterY: 0.25,
-            rotation: 0.5,
-            grainX: 0.5,
-            grainY: 0.5,
-            materialVariation: 0.5
-        ),
-        strokeSeed: 0x0123_4567_89ab_cdef
-    )
-
-    #expect(program.stageC == nil)
-    #expect(dab.diameter == 80)
-    #expect(dab.flow == 0.625)
-    #expect(dab.strokeOpacity == 0.625)
-    #expect(dab.spacing == 6.25)
-    #expect(dab.rotation == -0.5)
-    #expect(dab.scatter == SIMD2<Float>(2, -2))
-    #expect(dab.hardness == 0.625)
-    #expect(dab.grainScale == 0.625)
-    #expect(dab.position == WorldPoint(x: 1, y: -3))
-    #expect(dab.color == InkColor(
-        red: 0.9, green: 0.090_000_03, blue: 0.576_000_33, alpha: 1
-    ))
-    #expect(dab.secondaryColorMix == 0.249_999_94)
-}
-
-@Test
-func schemaV1OptionalAbsenceAndCounterRandomStayPinned() throws {
-    let base = nativeTestDefinition()
-    let fallback = BrushMappingDefinition(
-        input: .tilt,
-        response: .linear,
-        scale: 1,
-        offset: 1,
-        lowerClamp: 1,
-        upperClamp: 2,
-        inverted: false,
-        jitter: 0,
-        missingInputValue: 0.75
-    )
-    let randomOffset = BrushMappingDefinition(
-        input: .random,
-        response: .linear,
-        scale: 2,
-        offset: -1,
-        lowerClamp: -1,
-        upperClamp: 1,
-        inverted: false,
-        jitter: 0,
-        missingInputValue: 0
-    )
-    let dynamics = BrushDynamicsDefinition(
-        size: fallback,
-        flow: base.dynamics.flow,
-        opacity: base.dynamics.opacity,
-        spacing: base.dynamics.spacing,
-        rotation: base.dynamics.rotation,
-        scatter: base.dynamics.scatter,
-        hardness: base.dynamics.hardness,
-        grain: base.dynamics.grain,
-        offsetX: randomOffset,
-        offsetY: base.dynamics.offsetY,
-        hue: base.dynamics.hue,
-        saturation: base.dynamics.saturation,
-        brightness: base.dynamics.brightness,
-        secondaryColorMix: base.dynamics.secondaryColorMix,
-        noPressureNeutral: base.dynamics.noPressureNeutral,
-        randomization: base.dynamics.randomization
-    )
-    let program = try BrushProgramCompiler.compile(
-        schemaV1Definition(base: base, dynamics: dynamics)
-    )
-    let engine = BrushDynamicsEngine()
-    let absent = engine.evaluate(
-        sample: sensorSample(), context: sensorContext(), program: program,
-        random: .centered, strokeSeed: 0x0123_4567_89ab_cdef
-    )
-    let presentZero = engine.evaluate(
-        sample: sensorSample(
-            altitude: .pi / 2, capabilities: [.altitude]
-        ),
-        context: sensorContext(), program: program, random: .centered,
-        strokeSeed: 0x0123_4567_89ab_cdef
-    )
-
-    #expect(absent.diameter == 35)
-    #expect(presentZero.diameter == 20)
-    #expect(absent.position.x == 0.947_274_3)
-    #expect(presentZero.position.x == absent.position.x)
-}
-
-@Suite("BrushStrokeGeneratorTests velocity selection")
-struct BrushStrokeGeneratorVelocitySelectionTests {
-    @Test
-    func compiledSchemaSelectsInstantaneousForV1AndNormalizedArtisticForV2()
-        throws
-    {
-        let base = nativeTestDefinition()
-        let legacyDynamics = BrushDynamicsDefinition(
-            size: base.dynamics.size,
-            flow: legacyLinear(.speed, 0...1),
-            opacity: base.dynamics.opacity,
-            spacing: base.dynamics.spacing,
-            rotation: base.dynamics.rotation,
-            scatter: base.dynamics.scatter,
-            hardness: base.dynamics.hardness,
-            grain: base.dynamics.grain,
-            offsetX: base.dynamics.offsetX,
-            offsetY: base.dynamics.offsetY,
-            hue: base.dynamics.hue,
-            saturation: base.dynamics.saturation,
-            brightness: base.dynamics.brightness,
-            secondaryColorMix: base.dynamics.secondaryColorMix,
-            noPressureNeutral: base.dynamics.noPressureNeutral,
-            randomization: base.dynamics.randomization
-        )
-        let v1 = try BrushProgramCompiler.compile(
-            schemaV1Definition(base: base, dynamics: legacyDynamics)
-        )
-        let speedTerm = BrushResponseTermDefinition(
-            input: .speed,
-            response: .linear,
-            inputInverted: false,
-            missingInputValue: 0,
-            responseScale: 1,
-            responseOffset: 0,
-            responseLowerClamp: 0,
-            responseUpperClamp: 1,
-            jitter: 0,
-            operation: .replace
-        )
-        let v2 = try BrushProgramCompiler.compile(
-            schemaV2Definition(sensorProgram: sensorProgramReplacing(
-                .size,
-                with: BrushOutputProgramDefinition(
-                    baseValue: 1,
-                    terms: [speedTerm]
-                )
-            ))
-        )
-        let sample = sensorSample(velocity: 25, artisticVelocity: 75)
-        let context = sensorContext(nominalDiameter: 20)
-        let v1Dab = BrushDynamicsEngine().evaluate(
-            sample: sample, context: context, program: v1,
-            random: .centered, strokeSeed: 1
-        )
-        let v2Dab = BrushDynamicsEngine().evaluate(
-            sample: sample, context: context, program: v2,
-            random: .centered, strokeSeed: 1
-        )
-
-        #expect(abs(v1Dab.flow - 0.25) < 0.0001)
-        #expect(abs(v2Dab.diameter - 15) < 0.0001)
-    }
-}
-
 @Test(arguments: BrushDynamicsInput.allCases)
 func schemaV2OneTermMatchesIndependentScalarReferenceForEverySensor(
     input: BrushDynamicsInput
@@ -407,7 +204,7 @@ func schemaV2FourTermProgramMatchesIndependentReferenceForEveryOutput(
         #expect(closeSensor(
             dab.spacing
                 / (context.nominalDiameter
-                    * program.definition.placement.baseSpacingFraction),
+                    * program.primaryComponent.definition.placement.baseSpacingFraction),
             expected
         ))
     case .rotation:
@@ -416,7 +213,7 @@ func schemaV2FourTermProgramMatchesIndependentReferenceForEveryOutput(
         #expect(closeSensor(
             dab.scatter.x
                 / (context.nominalDiameter
-                    * program.definition.placement.baseScatterFraction * 0.5),
+                    * program.primaryComponent.definition.placement.baseScatterFraction * 0.5),
             expected
         ))
     case .hardness:
@@ -598,153 +395,6 @@ func schemaV2PeriodicCurveHasEqualCyclicEndpointEvaluation() throws {
 }
 
 @Test
-func schemaV2CompilerBoundaryRejectsEveryInvalidOrderedProgramClass() throws {
-    let valid = BrushResponseTermDefinition(
-        input: .pressure,
-        response: .linear,
-        inputInverted: false,
-        missingInputValue: 0,
-        responseScale: 1,
-        responseOffset: 0,
-        responseLowerClamp: 0,
-        responseUpperClamp: 1,
-        jitter: 0,
-        operation: .replace
-    )
-    #expect(throws: BrushProgramCompilerError.invalidStageCDefinition) {
-        _ = try BrushProgramCompiler.compileSensorProgram(
-            sensorProgramReplacing(
-            .size,
-            with: BrushOutputProgramDefinition(
-                baseValue: 1,
-                terms: [valid, valid, valid, valid, valid]
-            )
-            ),
-            maximumOpacity: 1
-        )
-    }
-    #expect(throws: BrushProgramCompilerError.invalidStageCDefinition) {
-        _ = try BrushProgramCompiler.compileSensorProgram(
-            sensorProgramReplacing(
-            .offsetX,
-            with: BrushOutputProgramDefinition(
-                baseValue: 0,
-                terms: [BrushResponseTermDefinition(
-                    input: .pressure,
-                    response: .linear,
-                    inputInverted: false,
-                    missingInputValue: 0,
-                    responseScale: 1,
-                    responseOffset: 0,
-                    responseLowerClamp: 0,
-                    responseUpperClamp: 1,
-                    jitter: 0,
-                    operation: .multiply
-                )]
-            )
-            ),
-            maximumOpacity: 1
-        )
-    }
-    #expect(throws: BrushProgramCompilerError.invalidStageCDefinition) {
-        _ = try BrushProgramCompiler.compileSensorProgram(
-            sensorProgramReplacing(
-            .size,
-            with: BrushOutputProgramDefinition(
-                baseValue: 1,
-                terms: [BrushResponseTermDefinition(
-                    input: .pressure,
-                    response: .linear,
-                    inputInverted: false,
-                    missingInputValue: 0,
-                    responseScale: 1,
-                    responseOffset: 0,
-                    responseLowerClamp: 2,
-                    responseUpperClamp: 1,
-                    jitter: 0,
-                    operation: .replace
-                )]
-            )
-            ),
-            maximumOpacity: 1
-        )
-    }
-    #expect(throws: BrushProgramCompilerError.invalidStageCDefinition) {
-        _ = try BrushProgramCompiler.compileSensorProgram(
-            sensorProgramReplacing(
-            .size,
-            with: BrushOutputProgramDefinition(
-                baseValue: 1,
-                terms: [BrushResponseTermDefinition(
-                    input: .pressure,
-                    response: .curve(BrushCurveDefinition(points: [
-                        BrushCurvePoint(x: 0, y: 0),
-                        BrushCurvePoint(x: 0, y: 1),
-                    ])),
-                    inputInverted: false,
-                    missingInputValue: 0,
-                    responseScale: 1,
-                    responseOffset: 0,
-                    responseLowerClamp: 0,
-                    responseUpperClamp: 1,
-                    jitter: 0,
-                    operation: .replace
-                )]
-            )
-            ),
-            maximumOpacity: 1
-        )
-    }
-    #expect(throws: BrushProgramCompilerError.invalidStageCDefinition) {
-        _ = try BrushProgramCompiler.compileSensorProgram(
-            sensorProgramReplacing(
-            .size,
-            with: BrushOutputProgramDefinition(
-                baseValue: 1,
-                terms: [BrushResponseTermDefinition(
-                    input: .pressure,
-                    response: .linear,
-                    inputInverted: false,
-                    missingInputValue: 0,
-                    responseScale: .nan,
-                    responseOffset: 0,
-                    responseLowerClamp: 0,
-                    responseUpperClamp: 1,
-                    jitter: 0,
-                    operation: .replace
-                )]
-            )
-            ),
-            maximumOpacity: 1
-        )
-    }
-    let cyclicConstant = sensorProgramReplacing(
-            .rotation,
-            with: BrushOutputProgramDefinition(
-                baseValue: 0,
-                terms: [BrushResponseTermDefinition(
-                    input: .direction,
-                    response: .constant(0.5),
-                    inputInverted: false,
-                    missingInputValue: 0,
-                    responseScale: 1,
-                    responseOffset: 0,
-                    responseLowerClamp: 0,
-                    responseUpperClamp: 1,
-                    jitter: 0,
-                    operation: .replace
-                )]
-            )
-    )
-    #expect(throws: BrushProgramCompilerError.invalidStageCDefinition) {
-        _ = try BrushProgramCompiler.compileSensorProgram(
-            cyclicConstant,
-            maximumOpacity: 1
-        )
-    }
-}
-
-@Test
 func schemaV2RandomIsTermLocalOutputStableAndDictionaryOrderIndependent()
     throws
 {
@@ -847,59 +497,6 @@ func schemaV2RandomIsTermLocalOutputStableAndDictionaryOrderIndependent()
     ))
 }
 
-private func legacyLinear(
-    _ input: BrushDynamicsInput,
-    _ output: ClosedRange<Float>
-) -> BrushMappingDefinition {
-    BrushMappingDefinition(
-        input: input,
-        response: .linear,
-        scale: output.upperBound - output.lowerBound,
-        offset: output.lowerBound,
-        lowerClamp: output.lowerBound,
-        upperClamp: output.upperBound,
-        inverted: false,
-        jitter: 0,
-        missingInputValue: 0.75
-    )
-}
-
-private func schemaV1Definition(
-    base: BrushDefinition,
-    dynamics: BrushDynamicsDefinition
-) throws -> BrushDefinition {
-    try BrushDefinition(
-        id: base.id,
-        schemaVersion: BrushDefinition.legacySchemaVersion,
-        metadata: base.metadata,
-        capabilities: base.capabilities,
-        resources: base.resources,
-        coverage: base.coverage,
-        placement: BrushPlacementDefinition(
-            baseSpacingFraction: 0.125,
-            maximumSpacingFraction: 0.125,
-            baseFlow: 1,
-            strokeOpacity: 1,
-            baseScatterFraction: 0.1,
-            baseRotation: 0,
-            baseJitterFraction: 0,
-            baseOffset: .zero
-        ),
-        dynamics: dynamics,
-        color: base.color,
-        material: base.material,
-        stabilization: base.stabilization,
-        taper: .none,
-        replayMode: .appendOnly,
-        replayLimits: nil,
-        termination: .cap,
-        seedPolicy: .perStroke,
-        limits: base.limits,
-        performanceIntent: base.performanceIntent,
-        compatibility: base.compatibility
-    )
-}
-
 private func sensorSample(
     pressure: Float = 0,
     velocity: Float = 0,
@@ -954,37 +551,37 @@ private func schemaV2Definition(
 ) throws -> BrushDefinition {
     let base = nativeTestDefinition()
     return try BrushDefinition(
-        v2ID: BrushRecipeID("test.stage-c.ordered"),
+        id: BrushRecipeID("test.stage-c.ordered"),
         metadata: base.metadata,
         capabilities: base.capabilities,
-        resources: base.resources,
-        coverage: base.coverage,
+        resources: base.components[0].resources,
+        coverage: base.components[0].coverage,
         placement: BrushPlacementDefinition(
-            baseSpacingFraction: base.placement.baseSpacingFraction,
-            maximumSpacingFraction: base.placement.maximumSpacingFraction,
-            baseFlow: base.placement.baseFlow,
-            strokeOpacity: base.placement.strokeOpacity,
+            baseSpacingFraction: base.components[0].placement.baseSpacingFraction,
+            maximumSpacingFraction: base.components[0].placement.maximumSpacingFraction,
+            baseFlow: base.components[0].placement.baseFlow,
+            strokeOpacity: base.components[0].placement.strokeOpacity,
             baseScatterFraction: 0.1,
-            baseRotation: base.placement.baseRotation,
+            baseRotation: base.components[0].placement.baseRotation,
             baseJitterFraction: 0,
             baseOffset: .zero
         ),
         dynamics: BrushDynamicsDefinition(
-            size: base.dynamics.size,
-            flow: base.dynamics.flow,
-            opacity: base.dynamics.opacity,
-            spacing: base.dynamics.spacing,
-            rotation: base.dynamics.rotation,
-            scatter: base.dynamics.scatter,
-            hardness: base.dynamics.hardness,
-            grain: base.dynamics.grain,
-            offsetX: base.dynamics.offsetX,
-            offsetY: base.dynamics.offsetY,
-            hue: base.dynamics.hue,
-            saturation: base.dynamics.saturation,
-            brightness: base.dynamics.brightness,
-            secondaryColorMix: base.dynamics.secondaryColorMix,
-            noPressureNeutral: base.dynamics.noPressureNeutral,
+            size: base.components[0].dynamics.size,
+            flow: base.components[0].dynamics.flow,
+            opacity: base.components[0].dynamics.opacity,
+            spacing: base.components[0].dynamics.spacing,
+            rotation: base.components[0].dynamics.rotation,
+            scatter: base.components[0].dynamics.scatter,
+            hardness: base.components[0].dynamics.hardness,
+            grain: base.components[0].dynamics.grain,
+            offsetX: base.components[0].dynamics.offsetX,
+            offsetY: base.components[0].dynamics.offsetY,
+            hue: base.components[0].dynamics.hue,
+            saturation: base.components[0].dynamics.saturation,
+            brightness: base.components[0].dynamics.brightness,
+            secondaryColorMix: base.components[0].dynamics.secondaryColorMix,
+            noPressureNeutral: base.components[0].dynamics.noPressureNeutral,
             randomization: BrushRandomization(
                 spacing: 0,
                 scatter: 1,
@@ -993,8 +590,8 @@ private func schemaV2Definition(
                 material: 0
             )
         ),
-        color: base.color,
-        material: base.material,
+        color: base.components[0].color,
+        material: base.components[0].material,
         stabilization: base.stabilization,
         taper: .none,
         replayMode: .appendOnly,

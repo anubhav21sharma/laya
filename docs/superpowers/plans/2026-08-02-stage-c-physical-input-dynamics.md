@@ -1,5 +1,8 @@
 # Stage C Physical Input And Dynamics Implementation Plan
 
+**Execution status (2026-08-12):** C0 through C13 are complete, including the
+bounded sustained trace, clustered regression verification, and final review.
+
 > **Execution:** Implement this plan directly on `main` with
 > `superpowers:subagent-driven-development`. Every behavior change starts with
 > a failing test, every task receives a fresh review, and work continues through
@@ -827,37 +830,37 @@ swift test --filter 'StrokeFrameSchedulerTests|StrokeRenderCoordinatorTests|Tran
 
 **Acceptance matrix:**
 
-- [ ] V1 package reads without rewrite and matches pinned definition, compiled
+- [x] V1 package reads without rewrite and matches pinned definition, compiled
       program, logical dabs, legacy hash, and rendered output.
-- [ ] Every v2 semantic field changes the current semantic digest; collection
+- [x] Every v2 semantic field changes the current semantic digest; collection
       insertion/hash order does not.
-- [ ] Every partition of the canonical traces emits identical dabs, ordinals,
+- [x] Every partition of the canonical traces emits identical dabs, ordinals,
       random values, and committed pixels.
-- [ ] Prediction on/off and prediction batching do not change authoritative
+- [x] Prediction on/off and prediction batching do not change authoritative
       dabs or committed pixels.
-- [ ] 60/120/uncapped display schedules produce identical authoritative output.
-- [ ] Zoom does not change world velocity, dynamics, spacing, or output.
-- [ ] Estimated location/sensor suffix replacement equals a final actual trace
+- [x] 60/120/uncapped display schedules produce identical authoritative output.
+- [x] Zoom does not change world velocity, dynamics, spacing, or output.
+- [x] Estimated location/sensor suffix replacement equals a final actual trace
       generated from scratch.
-- [ ] V1 exact endpoint, v2 weighted endpoint tolerance, delayed declared lag,
+- [x] V1 exact endpoint, v2 weighted endpoint tolerance, delayed declared lag,
       click visibility, and stationary directional fallback pass.
-- [ ] Direction wrap, pi tie, reversal, maximum angular delta, bounded fans,
+- [x] Direction wrap, pi tie, reversal, maximum angular delta, bounded fans,
       and broad-tip corner raster metrics pass.
-- [ ] Time/distance tie, huge gap, resume, overflow, finish, and cancel pass.
-- [ ] Analytic/textured support across size/aspect/rotation/tangent/corners and
+- [x] Time/distance tie, huge gap, resume, overflow, finish, and cancel pass.
+- [x] Analytic/textured support across size/aspect/rotation/tangent/corners and
       symmetry invariance pass.
-- [ ] Begin, append, prediction, estimate, finish, cancel, failure, rapid next
+- [x] Begin, append, prediction, estimate, finish, cancel, failure, rapid next
       stroke, resize, clear, undo/redo, brush switch, and plain/seamless/radial
       production routes pass.
-- [ ] No production input route uses the legacy synchronous renderer.
-- [ ] Focused allocation traces show no post-warm-up growth for new filters,
+- [x] No production input route uses the legacy synchronous renderer.
+- [x] Focused allocation traces show no post-warm-up growth for new filters,
       trackers, stabilizers, support math, or candidate merger.
-- [ ] The 10-minute production trace has bounded queues, flat first-vs-last
+- [x] The 10-minute production trace has bounded queues, flat first-vs-last
       decile CPU work, stable allocations, and acceptable frame scheduling.
-- [ ] The broad `swift test` returns the expected nonzero status and the C0
+- [x] The broad `swift test` returns the expected nonzero status and the C0
       verifier byte-compares exactly the accepted 27 Stage B issue records with
       no added, removed, or changed issue.
-- [ ] A fresh independent review finds no unresolved Critical or Important
+- [x] A fresh independent review finds no unresolved Critical or Important
       correctness, concurrency, determinism, compatibility, or performance issue.
 
 Record commands, commit, environment, counts, hashes, trace paths, skipped

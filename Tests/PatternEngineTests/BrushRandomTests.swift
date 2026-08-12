@@ -50,6 +50,55 @@ func splitMix64PinsWordsAndUpper24BitFloats(
     #expect(actual.nextValues() != authoritative)
 }
 
+@Test func componentRandomNamespacesPinPrimaryCompatibilityAndSecondarySeeds() {
+    #expect(BrushComponentRandomNamespace.seed(
+        strokeSeed: 73,
+        componentOrdinal: 0
+    ) == 73)
+    #expect(BrushComponentRandomNamespace.seed(
+        strokeSeed: 73,
+        componentOrdinal: 1
+    ) == 0xa2a5_94f4_52bd_8284)
+    #expect(BrushComponentRandomNamespace.seed(
+        strokeSeed: 73,
+        componentOrdinal: 2
+    ) == 0x9409_47dc_a186_f38b)
+
+    var original = BrushRandom(seed: 73)
+    var primary = BrushRandom(seed: BrushComponentRandomNamespace.seed(
+        strokeSeed: 73,
+        componentOrdinal: 0
+    ))
+    #expect(primary.nextValues() == original.nextValues())
+}
+
+@Test func componentRandomValuesDoNotDependOnCollectionOrder() {
+    func values(componentOrdinal: UInt8) -> (BrushRandomValues, Float) {
+        let seed = BrushComponentRandomNamespace.seed(
+            strokeSeed: 0x0123_4567_89ab_cdef,
+            componentOrdinal: componentOrdinal
+        )
+        var compatibility = BrushRandom(seed: seed)
+        return (
+            compatibility.nextValues(),
+            BrushRandom.extensionUnitFloat(
+                strokeSeed: seed,
+                logicalDabOrdinal: 11,
+                outputChannel: .hue
+            )
+        )
+    }
+
+    let forward = [values(componentOrdinal: 0), values(componentOrdinal: 1)]
+    let reverse = [values(componentOrdinal: 1), values(componentOrdinal: 0)]
+
+    #expect(forward[0].0 == reverse[1].0)
+    #expect(forward[0].1 == reverse[1].1)
+    #expect(forward[1].0 == reverse[0].0)
+    #expect(forward[1].1 == reverse[0].1)
+    #expect(forward[0].0 != forward[1].0)
+}
+
 @Test func disabledDynamicsStillReserveEveryRandomChannel() throws {
     var disabledCursor = BrushRandom(seed: 88)
     var enabledCursor = BrushRandom(seed: 88)
@@ -58,15 +107,15 @@ func splitMix64PinsWordsAndUpper24BitFloats(
     let engine = BrushDynamicsEngine()
     let sample = dynamicsSample()
     let context = dynamicsContext()
-    let enabledRecipe = try BrushRecipe(
+    let enabledDefinition = nativeTestDefinition(
         id: BrushRecipeID("test.random.enabled"),
-        randomization: BrushRandomization(
+        dynamics: nativeTestDynamics(randomization: BrushRandomization(
             spacing: 0.25,
             scatter: 0.25,
             rotation: 0.25,
             grain: 0.25,
             material: 0.25
-        )
+        ))
     )
 
     _ = engine.evaluate(
@@ -79,7 +128,7 @@ func splitMix64PinsWordsAndUpper24BitFloats(
     _ = engine.evaluate(
         sample: sample,
         context: context,
-        program: nativeTestProgram(enabledRecipe),
+        program: nativeTestProgram(enabledDefinition),
         random: enabledValues,
         strokeSeed: 1
     )

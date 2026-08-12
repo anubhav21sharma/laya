@@ -5,16 +5,28 @@ import PatternEngine
 /// resource protocols do not declare `Sendable`, but these references are
 /// immutable after compilation and are only dereferenced by renderer encoding
 /// code on its owning executor.
-public final class CompiledBrushMetalResourceHolder: @unchecked Sendable {
+public final class CompiledBrushRenderComponentResources: @unchecked Sendable {
+    public let identifier: BrushComponentIdentifier
+    public let ordinal: UInt8
+    public let pipelineKey: BrushPipelineKey
+    public let uniformTemplate: BrushUniformTemplate
     public let depositionPipeline: DepositionPipelineBinding
     public let depositionMaterial: DepositionMaterialBinding
     public let textures: [String: any MTLTexture]
+    public let tipSupports: [CompiledBrushTipSupport]
+    public let cursorTipProfile: BrushCursorTipProfile
 
     @MainActor
-    fileprivate init(compiledBrush: CompiledBrush) {
-        depositionPipeline = compiledBrush.depositionPipeline
-        depositionMaterial = compiledBrush.depositionMaterial
-        textures = compiledBrush.textures
+    fileprivate init(component: CompiledBrushComponent) {
+        identifier = component.identifier
+        ordinal = component.ordinal
+        pipelineKey = component.pipelineKey
+        uniformTemplate = component.uniformTemplate
+        depositionPipeline = component.depositionPipeline
+        depositionMaterial = component.depositionMaterial
+        textures = component.textures
+        tipSupports = component.tipSupports
+        cursorTipProfile = component.cursorTipProfile
     }
 }
 
@@ -22,9 +34,8 @@ public final class CompiledBrushMetalResourceHolder: @unchecked Sendable {
 public struct CompiledBrushRenderState: Sendable {
     public let program: BrushProgram
     public let renderIdentity: BrushRenderIdentity
-    public let pipelineKey: BrushPipelineKey
-    public let uniformTemplate: BrushUniformTemplate
-    public let resources: CompiledBrushMetalResourceHolder
+    public let primaryComponent: CompiledBrushRenderComponentResources
+    public let secondaryComponent: CompiledBrushRenderComponentResources?
     public let residentByteCount: Int
     public let report: BrushCompilationReport
     public let diagnostics: [BrushCompilationDiagnostic]
@@ -33,10 +44,11 @@ public struct CompiledBrushRenderState: Sendable {
     public init(compiledBrush: CompiledBrush) {
         program = compiledBrush.program
         renderIdentity = compiledBrush.renderIdentity
-        pipelineKey = compiledBrush.pipelineKey
-        uniformTemplate = compiledBrush.uniformTemplate
-        resources = CompiledBrushMetalResourceHolder(
-            compiledBrush: compiledBrush
+        primaryComponent = CompiledBrushRenderComponentResources(
+            component: compiledBrush.primaryComponent
+        )
+        secondaryComponent = compiledBrush.secondaryComponent.map(
+            CompiledBrushRenderComponentResources.init(component:)
         )
         residentByteCount = compiledBrush.residentByteCount
         report = compiledBrush.report

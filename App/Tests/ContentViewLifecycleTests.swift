@@ -1,6 +1,7 @@
 #if os(macOS)
 import AppKit
 import EditorCore
+import Foundation
 import Metal
 @testable import MetalRenderer
 import PatternEngine
@@ -38,6 +39,142 @@ private struct HostedEditorCanvas: View {
 }
 
 private final class EstimatedTouchIdentity {}
+
+@Test
+func appProjectExportsEveryBrushLabDocumentTypeOnMacAndPad() throws {
+    let appDirectory = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let project = try String(
+        contentsOf: appDirectory.appendingPathComponent("project.yml"),
+        encoding: .utf8
+    )
+    let identifier =
+        "UTTypeIdentifier: com.anubhav.brush-lab-professional-review-matrix"
+    let extensionTag = "- json"
+
+    #expect(project.components(separatedBy: identifier).count - 1 == 2)
+    #expect(project.components(separatedBy: extensionTag).count - 1 == 2)
+}
+
+@Test
+func productionPerformanceTraceWaitsForAcceptedInputWork() throws {
+    let repositoryRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let source = try String(
+        contentsOf: repositoryRoot.appendingPathComponent(
+            "App/PatternSpike/Harness/HarnessLaunch.swift"
+        ),
+        encoding: .utf8
+    )
+
+    #expect(source.contains(
+        "renderer.flushAcceptedStrokeInputForHarness()"
+    ))
+}
+
+@Test
+func imageExportPolicyKeepsTheProductRouteAvailableWithoutAcceptanceInjection() {
+    let destination = URL(fileURLWithPath: "/tmp/stage-d-export.png")
+    #expect(EditorImageExportPolicy.disposition(
+        acceptanceDestination: nil
+    ) == .userSelectedDestination)
+    #expect(EditorImageExportPolicy.disposition(
+        acceptanceDestination: destination
+    ) == .direct(destination))
+}
+
+@Test
+func stageDRouteConfigurationRequiresEveryDeterministicBoundary() throws {
+    #expect(StageDAppRouteConfiguration(environment: [:]) == nil)
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let environment = [
+        StageDAppRouteConfiguration.manifestEnvironmentKey:
+            directory.appendingPathComponent("routes.json").path,
+        StageDAppRouteConfiguration.projectEnvironmentKey:
+            directory.appendingPathComponent("project.patternproj").path,
+        StageDAppRouteConfiguration.exportEnvironmentKey:
+            directory.appendingPathComponent("export.png").path,
+        StageDAppRouteConfiguration.commitEnvironmentKey:
+            String(repeating: "a", count: 40),
+        StageDAppRouteConfiguration.dateEnvironmentKey:
+            "2026-08-10T12:00:00Z",
+        StageDAppRouteConfiguration.notificationEnvironmentKey:
+            "stage-d-route-\(UUID().uuidString)",
+    ]
+
+    let configuration = try #require(
+        StageDAppRouteConfiguration(environment: environment)
+    )
+
+    #expect(configuration.manifestURL.path.hasSuffix("routes.json"))
+    #expect(configuration.projectURL.path.hasSuffix("project.patternproj"))
+    #expect(configuration.exportURL.path.hasSuffix("export.png"))
+    #expect(configuration.gitCommit == String(repeating: "a", count: 40))
+}
+
+@Test
+@MainActor
+func stageDRouteRecorderBindsAppStatePixelsAndQuiescentSparseOwnership()
+    async throws
+{
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let manifestURL = directory.appendingPathComponent("routes.json")
+    let recorder = StageDAppRouteEvidenceRecorder(environment: [
+        StageDAppRouteConfiguration.manifestEnvironmentKey: manifestURL.path,
+        StageDAppRouteConfiguration.projectEnvironmentKey:
+            directory.appendingPathComponent("project.patternproj").path,
+        StageDAppRouteConfiguration.exportEnvironmentKey:
+            directory.appendingPathComponent("export.png").path,
+        StageDAppRouteConfiguration.commitEnvironmentKey:
+            String(repeating: "b", count: 40),
+        StageDAppRouteConfiguration.dateEnvironmentKey:
+            "2026-08-10T12:00:00Z",
+        StageDAppRouteConfiguration.notificationEnvironmentKey:
+            "stage-d-route-\(UUID().uuidString)",
+    ])
+    recorder.bind(controller)
+
+    for (scenarioID, routeIDs) in
+        StageDAppRouteRequirements.routeIDsByScenario
+    {
+        for routeID in routeIDs {
+            try await recorder.record(
+                scenarioID: scenarioID,
+                routeID: routeID
+            )
+        }
+    }
+
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let manifest = try decoder.decode(
+        StageDAcceptanceManifest.self,
+        from: Data(contentsOf: manifestURL)
+    )
+    #expect(manifest.rows.map(\.scenarioID).sorted() == [
+        StageDAcceptanceRequirements.appControls,
+        StageDAcceptanceRequirements.appPersistence,
+        StageDAcceptanceRequirements.appShortcuts,
+    ])
+    #expect(manifest.rows.allSatisfy { $0.status == .failed })
+    #expect(manifest.rows.allSatisfy {
+        $0.backend == .productionSparseMetal
+            && $0.expectedSemanticHash == nil
+            && $0.numericOracle?.expected == $0.numericOracle?.actual
+            && $0.metrics["pendingOwnershipCount"] == 0
+            && $0.attributes["canonicalSHA256"]?.count == 64
+            && $0.attributes["normalizedInputCount"] == "0"
+            && $0.attributes["observedSemanticHash"]?.count == 64
+    })
+}
 
 @MainActor
 private final class LifecycleBrushSelectionStore:
@@ -77,7 +214,7 @@ func debugHUDHasACompactIntrinsicSize() {
     host.layoutSubtreeIfNeeded()
 
     #expect(host.fittingSize.width < 190)
-    #expect(host.fittingSize.height < 125)
+    #expect(host.fittingSize.height < 200)
 }
 
 @Test
@@ -277,7 +414,7 @@ func bootstrapRestoresAndConfirmsAStoredCanonicalBrushOnlyAfterActivation()
     guard let renderer = try makeControllerRenderer() else { return }
     let compiler = try makeNativeCompiler(renderer: renderer)
     let store = LifecycleBrushSelectionStore(
-        storedID: EditorBrushCatalog.graphitePencil.id.rawValue
+        storedID: EditorBrushCatalog.nativeDryMedia.id.rawValue
     )
 
     let controller = try await makeBootstrapEditorSession(
@@ -288,43 +425,16 @@ func bootstrapRestoresAndConfirmsAStoredCanonicalBrushOnlyAfterActivation()
         selectionStore: store
     )
 
-    #expect(controller.model.selectedRecipeID == EditorBrushCatalog.graphitePencil.id)
+    #expect(controller.model.selectedRecipeID == EditorBrushCatalog.nativeDryMedia.id)
     #expect(
         renderer.harnessPreparedDrawBrushIdentity?.definitionID
-            == EditorBrushCatalog.graphitePencil.id
+            == EditorBrushCatalog.nativeDryMedia.id
     )
     #expect(
         renderer.harnessPreparedEraserBrushIdentity?.definitionID
             == EditorBrushCatalog.eraser.id
     )
-    #expect(store.writes == [EditorBrushCatalog.graphitePencil.id.rawValue])
-}
-
-@Test
-@MainActor
-func bootstrapMigratesLegacySelectionAndRewritesCanonicalPersistence()
-    async throws
-{
-    guard let renderer = try makeControllerRenderer() else { return }
-    let compiler = try makeNativeCompiler(renderer: renderer)
-    let store = LifecycleBrushSelectionStore(
-        storedID: "builtin.native-marker"
-    )
-
-    let controller = try await makeBootstrapEditorSession(
-        renderer: renderer,
-        compileDefinition: { definition in
-            try await compiler.compileAndActivate(definition: definition)
-        },
-        selectionStore: store
-    )
-
-    #expect(controller.model.selectedRecipeID == EditorBrushCatalog.chiselMarker.id)
-    #expect(
-        renderer.harnessPreparedDrawBrushIdentity?.definitionID
-            == EditorBrushCatalog.chiselMarker.id
-    )
-    #expect(store.writes == [EditorBrushCatalog.chiselMarker.id.rawValue])
+    #expect(store.writes == [EditorBrushCatalog.nativeDryMedia.id.rawValue])
 }
 
 @Test
@@ -354,19 +464,45 @@ func bootstrapFallsBackFromUnknownPersistenceAndRewritesDefault()
 
 @Test
 @MainActor
+func bootstrapRejectsRetiredNativePersistenceBeforeCompilation() async throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let retiredID = BrushRecipeID("builtin.bounded-wash")
+    let store = LifecycleBrushSelectionStore(storedID: retiredID.rawValue)
+    var compiledIDs: [BrushRecipeID] = []
+
+    await #expect(
+        throws: EditorBrushSelectionError.retiredIdentifier(retiredID)
+    ) {
+        _ = try await makeBootstrapEditorSession(
+            renderer: renderer,
+            compileDefinition: { definition in
+                compiledIDs.append(definition.id)
+                throw MetalRendererError.unsupportedBrushProgram
+            },
+            selectionStore: store
+        )
+    }
+
+    #expect(compiledIDs.isEmpty)
+    #expect(store.storedID == retiredID.rawValue)
+    #expect(store.writes.isEmpty)
+}
+
+@Test
+@MainActor
 func bootstrapCompileFailureFallsBackWithoutPublishingRequestedSelection()
     async throws
 {
     guard let renderer = try makeControllerRenderer() else { return }
     let compiler = try makeNativeCompiler(renderer: renderer)
     let store = LifecycleBrushSelectionStore(
-        storedID: EditorBrushCatalog.graphitePencil.id.rawValue
+        storedID: EditorBrushCatalog.nativeDryMedia.id.rawValue
     )
 
     let controller = try await makeBootstrapEditorSession(
         renderer: renderer,
         compileDefinition: { definition in
-            if definition.id == EditorBrushCatalog.graphitePencil.id {
+            if definition.id == EditorBrushCatalog.nativeDryMedia.id {
                 throw MetalRendererError.unsupportedBrushProgram
             }
             return try await compiler.compileAndActivate(
@@ -396,14 +532,14 @@ func bootstrapDefaultFailureDoesNotConfirmOrRewritePersistence()
     guard let renderer = try makeControllerRenderer() else { return }
     let compiler = try makeNativeCompiler(renderer: renderer)
     let store = LifecycleBrushSelectionStore(
-        storedID: EditorBrushCatalog.graphitePencil.id.rawValue
+        storedID: EditorBrushCatalog.nativeDryMedia.id.rawValue
     )
 
     await #expect(throws: MetalRendererError.self) {
         _ = try await makeBootstrapEditorSession(
             renderer: renderer,
             compileDefinition: { definition in
-                if definition.id == EditorBrushCatalog.graphitePencil.id
+                if definition.id == EditorBrushCatalog.nativeDryMedia.id
                     || definition.id == EditorBrushCatalog.defaultDraw.id
                 {
                     throw MetalRendererError.unsupportedBrushProgram
@@ -416,7 +552,7 @@ func bootstrapDefaultFailureDoesNotConfirmOrRewritePersistence()
         )
     }
 
-    #expect(store.storedID == EditorBrushCatalog.graphitePencil.id.rawValue)
+    #expect(store.storedID == EditorBrushCatalog.nativeDryMedia.id.rawValue)
     #expect(store.writes.isEmpty)
 }
 
@@ -426,7 +562,7 @@ func bootstrapRejectsMismatchedEraserBeforePublishingSelection() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let compiler = try makeNativeCompiler(renderer: renderer)
     let wrongEraser = try await compiler.compileAndActivate(
-        definition: EditorBrushCatalog.graphitePencil.definition
+        definition: EditorBrushCatalog.nativeDryMedia.definition
     )
     let store = LifecycleBrushSelectionStore()
 

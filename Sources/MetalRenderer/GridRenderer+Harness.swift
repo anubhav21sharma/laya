@@ -5,7 +5,7 @@ import PatternEngine
 
 @MainActor
 extension HarnessLiveFlushResult {
-    func mergingPrecedingSubmissions(
+    package func mergingPrecedingSubmissions(
         _ preceding: [HarnessLiveFlushResult]
     ) -> HarnessLiveFlushResult {
         let results = preceding + [self]
@@ -88,16 +88,16 @@ extension GridRenderer {
     ) throws -> CompiledBrush {
         let definition = try Self.nativeHarnessDefinition(mode: mode)
         let program = try BrushProgramCompiler.compile(definition)
-        let coverage = definition.coverage
+        let component = definition.components[0]
+        let coverage = component.coverage
         let pipelineKey = BrushPipelineKey(
             backend: .deposition,
-            accumulation: definition.material.accumulation,
-            edgeTreatment: definition.material.edgeTreatment,
+            accumulation: component.material.accumulation,
+            edgeTreatment: component.material.edgeTreatment,
             functionConstants: BrushFunctionConstants(
                 usesSecondaryShape: coverage.shapes.count > 1,
                 usesGrain: !coverage.grains.isEmpty,
-                usesSecondaryGrain: coverage.grains.count > 1,
-                usesDestinationSampling: false
+                usesSecondaryGrain: coverage.grains.count > 1
             )
         )
         let depositionKey = DepositionPipelineKey(
@@ -112,10 +112,10 @@ extension GridRenderer {
             library: library
         ).prepareImmediately(for: depositionKey)
         let uniforms = BrushUniformTemplate(
-            placement: definition.placement,
-            coverage: definition.coverage,
-            color: definition.color,
-            material: definition.material
+            placement: component.placement,
+            coverage: component.coverage,
+            color: component.color,
+            material: component.material
         )
         let hash = String(
             repeating: mode == .draw ? "d" : "e",
@@ -141,10 +141,16 @@ extension GridRenderer {
         )
         return CompiledBrush(
             program: program,
+            backendContract: try BrushBackendCompiler(
+                registry: .nativeSchema3
+            ).compile(program: program, forActivation: true),
             renderIdentity: identity,
             pipelineKey: pipelineKey,
             uniformTemplate: uniforms,
             textures: [:],
+            cursorTipProfile: BrushCursorTipProfile(
+                primary: .analyticEllipse
+            ),
             depositionPipeline: pipeline,
             depositionMaterial: try DepositionMaterialBinding(
                 uniformTemplate: uniforms,
@@ -157,7 +163,7 @@ extension GridRenderer {
         )
     }
 
-    nonisolated static func nativeHarnessDefinition(
+    package nonisolated static func nativeHarnessDefinition(
         mode: StrokeCompositeMode
     ) throws -> BrushDefinition {
         let one = BrushMappingDefinition(
@@ -280,7 +286,6 @@ extension GridRenderer {
             ),
             performanceIntent: .realtime120,
             compatibility: BrushCompatibilityMetadata(
-                nativeFeatureVersion: 1,
                 sourceSettingKeys: [],
                 requiredSemanticKeys: []
             )
@@ -309,6 +314,35 @@ extension GridRenderer {
             frame = committedFrame
         }
         return takeHarnessLiveFlushResult(frame: frame)
+    }
+
+    /// Drains all bounded preparation pages accepted for the current input
+    /// event and reports them as one measured harness flush. Preparation-only
+    /// pages must not displace the GPU submission that owns the input receipt.
+    package func flushAcceptedStrokeInputForHarness(
+        outputPixelSize: PixelSize
+    ) async throws -> HarnessLiveFlushResult {
+        let submissions = try await drainPreparedStrokeInputForHarness(
+            outputPixelSize: outputPixelSize
+        )
+        guard let lastSubmission = submissions.last else {
+            return try await flushPendingLiveForHarness()
+        }
+        return lastSubmission.mergingPrecedingSubmissions(
+            Array(submissions.dropLast())
+        )
+    }
+
+    /// Production-trace entry point. Unlike a snapshot flush, this waits until
+    /// all preparation accepted for the current input has either been submitted
+    /// or reached a terminal failure, so latency cannot be attributed to a
+    /// later synthetic frame.
+    public func flushAcceptedStrokeInputForHarness() async throws
+        -> HarnessLiveFlushResult
+    {
+        try await flushAcceptedStrokeInputForHarness(
+            outputPixelSize: pixelSize
+        )
     }
 
     private func takeHarnessLiveFlushResult(
@@ -373,59 +407,14 @@ extension GridRenderer {
     public func finishCommitForHarness() async throws
         -> GPUFrameMetrics
     {
-        var frames: [GPUFrameMetrics] = []
-        let deadline = DispatchTime.now().uptimeNanoseconds
-            &+ 5_000_000_000
-        while DispatchTime.now().uptimeNanoseconds < deadline {
-            try drainCompletedInteractiveOperations()
-            if activeStroke == nil, isIdle { break }
-            if let frame = try await renderCurrentPaintFrameForHarness(
-                width: pixelSize.width,
-                height: pixelSize.height,
-                includeTransient: true
-            ) {
-                frames.append(frame.metrics)
-                continue
-            }
-            try await Task.sleep(nanoseconds: 1_000_000)
-        }
-        guard activeStroke == nil, isIdle else {
-            throw lastError ?? MetalRendererError.commandFailed(
-                "stroke commit exceeded its harness bound"
-            )
-        }
-        return GPUFrameMetrics(
-            cpuEncodeMilliseconds: frames.reduce(0) {
-                $0 + $1.cpuEncodeMilliseconds
-            },
-            gpuMilliseconds: frames.reduce(0) {
-                $0 + $1.gpuMilliseconds
-            },
-            eventToSubmitNanoseconds:
-                frames.map(\.eventToSubmitNanoseconds).max() ?? 0,
-            gpuCompletionNanoseconds: frames.reduce(0) {
-                Self.saturatingAdd(
-                    $0,
-                    $1.gpuCompletionNanoseconds
-                )
-            },
-            encodedDabCount: frames.reduce(0) {
-                $0 + $1.encodedDabCount
-            },
-            encodedInstanceCount: frames.reduce(0) {
-                $0 + $1.encodedInstanceCount
-            },
-            bufferLeaseCount: frames.reduce(0) {
-                $0 + $1.bufferLeaseCount
-            }
-        )
+        try await completePendingInteractiveStrokeAndAwaitIdle()
     }
 
     /// Drains currently accepted actor input while leaving the stroke editable.
     /// Every transient surface is submitted through the same Context display
     /// owner and acknowledged only after its GPU terminal callback.
     @discardableResult
-    func drainPreparedStrokeInputForHarness(
+    package func drainPreparedStrokeInputForHarness(
         outputPixelSize: PixelSize
     ) async throws
         -> [HarnessLiveFlushResult]
@@ -457,16 +446,16 @@ extension GridRenderer {
     }
 
 
-    struct HarnessOffMainDepositionSnapshot: Equatable, Sendable {
-        let logicalDabCount: Int
-        let projectedInstanceCount: Int
-        let authoritativeBacklog: Int
-        let authoritativeBacklogHighWater: Int
-        let encodedInstanceCount: UInt64
-        let surfaceLeaseHighWater: Int
+    package struct HarnessOffMainDepositionSnapshot: Equatable, Sendable {
+        package let logicalDabCount: Int
+        package let projectedInstanceCount: Int
+        package let authoritativeBacklog: Int
+        package let authoritativeBacklogHighWater: Int
+        package let encodedInstanceCount: UInt64
+        package let surfaceLeaseHighWater: Int
     }
 
-    var harnessOffMainDepositionSnapshot:
+    package var harnessOffMainDepositionSnapshot:
         HarnessOffMainDepositionSnapshot?
     {
         guard let surface = offMainSurfaceSnapshotForHarness,
@@ -498,7 +487,7 @@ extension GridRenderer {
     /// Deterministic evidence oracle for records already generated and
     /// encoded by the production actor. This never activates the retired
     /// MainActor scheduler or participates in interactive stroke execution.
-    func projectLogicalDabsForHarness(
+    package func projectLogicalDabsForHarness(
         _ dabs: [LogicalDab]
     ) throws -> [ProjectedDepositionRecord] {
         var records: [ProjectedDepositionRecord] = []
@@ -527,6 +516,7 @@ extension GridRenderer {
                 records.append(
                     ProjectedDepositionRecord(
                         identity: dab.ordinal,
+                        componentOrdinal: dab.componentOrdinal,
                         instance: try PatternDepositionStampInstance(
                             fragment: fragment,
                             dab: dab,
@@ -550,11 +540,8 @@ extension GridRenderer {
     func harnessCell(for screenPoint: ScreenPoint) -> CellIndex {
         tilingStrategy.cell(containing: viewport.screenToWorld(screenPoint))
     }
-    var harnessReservedInstanceBufferCount: Int {
+    package var harnessReservedInstanceBufferCount: Int {
         instancePool.unavailableSlotCount
-    }
-    var harnessInterpolatorSpacing: Float {
-        strokeGenerator?.currentSpacing ?? 0
     }
     var harnessCompositeMode: StrokeCompositeMode? {
         activeStroke?.style.compositeMode
@@ -562,27 +549,22 @@ extension GridRenderer {
     var harnessActiveStrokeStyle: StrokeRenderStyle? {
         activeStroke?.style
     }
-    var harnessPreparedDrawBrushIdentity: BrushRenderIdentity? {
+    package var harnessPreparedDrawBrushIdentity: BrushRenderIdentity? {
         activeDrawBrush?.renderIdentity
     }
-    var harnessPreparedEraserBrushIdentity: BrushRenderIdentity? {
+    package var harnessPreparedEraserBrushIdentity: BrushRenderIdentity? {
         activeEraserBrush?.renderIdentity
     }
-    var harnessCapturedCompiledBrushIdentity: BrushRenderIdentity? {
+    package var harnessCapturedCompiledBrushIdentity: BrushRenderIdentity? {
         activeStroke?.brush.renderIdentity
     }
-    var harnessScheduledAuthoritativeRecords:
+    package var harnessScheduledAuthoritativeRecords:
         [ProjectedDepositionRecord]
     {
         activeStroke?.frozenHarnessScheduler?.authoritativeRecords ?? []
     }
-    var harnessScheduledPredictedRecords: [ProjectedDepositionRecord] {
+    package var harnessScheduledPredictedRecords: [ProjectedDepositionRecord] {
         activeStroke?.frozenHarnessScheduler?.predictedRecords ?? []
-    }
-    var harnessTransientDabArenaSnapshot:
-        TransientStrokeDabArena.DiagnosticSnapshot
-    {
-        transientDabArena.diagnosticSnapshot
     }
     var harnessCompiledIsometryOrdinals: Set<UInt8> {
         Set(tilingStrategy.compiledSymmetry.images.map(\.ordinal))
@@ -595,7 +577,7 @@ extension GridRenderer {
         depositionEncoder = encoder
     }
     @discardableResult
-    func replaceDepositionFrameBudgetForHarness(
+    package func replaceDepositionFrameBudgetForHarness(
         _ budget: DepositionFrameBudget
     ) -> DepositionFrameBudget {
         let previous = depositionFrameBudget
@@ -620,7 +602,7 @@ extension GridRenderer {
     ) {
         activeStroke?.frozenHarnessScheduler = scheduler
     }
-    var harnessPendingInstanceColors: [SIMD4<Float>] {
+    package var harnessPendingInstanceColors: [SIMD4<Float>] {
         activeStroke?.frozenHarnessScheduler?.authoritativeRecords.map(
             \.instance.premultipliedColor
         ) ?? []

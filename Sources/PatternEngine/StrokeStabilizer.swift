@@ -9,14 +9,11 @@ public enum StrokeStabilizerMode: Equatable, Sendable {
 
 public enum StrokeStabilizerError: Error, Equatable, Sendable {
     case invalidDistance
-    case incompatibleMode
 }
 
 /// Deterministic, fixed-capacity position stabilization for one stroke stream.
 ///
-/// The strength initializer and unconditional `process` result are the isolated
-/// schema-v1 exponential adapter. Schema v2 uses a typed mode and the bounded
-/// optional `processV2` result. Callers evaluate prediction from a value copy.
+/// Callers evaluate prediction from a value copy.
 public struct StrokeStabilizer: Equatable, Sendable {
     public struct Snapshot: Equatable, Sendable {
         public let retainedPointCount: Int
@@ -28,32 +25,13 @@ public struct StrokeStabilizer: Equatable, Sendable {
         public let newestRetainedPosition: WorldPoint?
     }
 
-    public let strength: Float
-
-    private var filteredPosition: WorldPoint?
-    private var v2Mode: StrokeStabilizerMode?
+    private var v2Mode: StrokeStabilizerMode
     private var v2ExactHead: WorldStrokeSample?
     private var v2AuthoredDistance: Double
     private var v2LastResampleIndex: UInt64
     private var v2PointStorage: StrokeStabilizerPointStorage
     private var v2OldestPointIndex: Int
     private var v2PointCount: Int
-
-    public init(strength: Float) {
-        precondition(
-            strength.isFinite && strength >= 0 && strength < 1,
-            "Stabilization strength must be finite and in 0..<1"
-        )
-        self.strength = strength
-        filteredPosition = nil
-        v2Mode = nil
-        v2ExactHead = nil
-        v2AuthoredDistance = 0
-        v2LastResampleIndex = 0
-        v2PointStorage = StrokeStabilizerPointStorage()
-        v2OldestPointIndex = 0
-        v2PointCount = 0
-    }
 
     public init(mode: StrokeStabilizerMode) throws {
         switch mode {
@@ -67,8 +45,6 @@ public struct StrokeStabilizer: Equatable, Sendable {
                 throw StrokeStabilizerError.invalidDistance
             }
         }
-        strength = 0
-        filteredPosition = nil
         v2Mode = mode
         v2ExactHead = nil
         v2AuthoredDistance = 0
@@ -101,9 +77,6 @@ public struct StrokeStabilizer: Equatable, Sendable {
     public mutating func processV2(
         _ sample: WorldStrokeSample
     ) throws -> WorldStrokeSample? {
-        guard let v2Mode else {
-            throw StrokeStabilizerError.incompatibleMode
-        }
         if sample.phase == .cancelled {
             resetV2()
             return nil
@@ -176,66 +149,15 @@ public struct StrokeStabilizer: Equatable, Sendable {
         return output
     }
 
-    public mutating func process(
-        _ sample: WorldStrokeSample
-    ) -> WorldStrokeSample {
-        if sample.phase == .cancelled {
-            resetLegacy()
-            return sample
-        }
-
-        if sample.phase == .began {
-            resetLegacy()
-            filteredPosition = sample.position
-            return sample
-        }
-
-        // Preserve the compatibility path bit-for-bit, including signed zero.
-        guard strength > 0 else {
-            if sample.phase == .ended {
-                resetLegacy()
-            } else {
-                filteredPosition = sample.position
-            }
-            return sample
-        }
-
-        guard let previous = filteredPosition else {
-            if sample.phase != .ended {
-                filteredPosition = sample.position
-            }
-            return sample
-        }
-
-        let response = 1 - strength
-        let position = WorldPoint(
-            x: previous.x + (sample.position.x - previous.x) * response,
-            y: previous.y + (sample.position.y - previous.y) * response
-        )
-        let output = sample.replacingPosition(position)
-
-        if sample.phase == .ended {
-            resetLegacy()
-        } else {
-            filteredPosition = position
-        }
-        return output
-    }
-
     public mutating func reset() {
-        resetLegacy()
         resetV2()
-    }
-
-    private mutating func resetLegacy() {
-        filteredPosition = nil
     }
 
     private mutating func resetV2() {
         v2ExactHead = nil
         v2AuthoredDistance = 0
         v2LastResampleIndex = 0
-        v2PointStorage = StrokeStabilizerPointStorage()
+        v2PointStorage.reset()
         v2OldestPointIndex = 0
         v2PointCount = 0
     }
@@ -271,7 +193,7 @@ public struct StrokeStabilizer: Equatable, Sendable {
         {
             firstRetainedNewIndex = finalGridIndex
                 - UInt64(Self.resampledPointCapacity - 1)
-            v2PointStorage = StrokeStabilizerPointStorage()
+            v2PointStorage.reset()
             v2OldestPointIndex = 0
             v2PointCount = 0
         }
@@ -510,6 +432,15 @@ private struct StrokeStabilizerPointStorage: Equatable, Sendable {
     private var x64: Float = 0
     private var y64: Float = 0
     private var distance64: Double = 0
+
+    mutating func reset() {
+        x = SIMD64<Float>(repeating: 0)
+        y = SIMD64<Float>(repeating: 0)
+        distance = SIMD64<Double>(repeating: 0)
+        x64 = 0
+        y64 = 0
+        distance64 = 0
+    }
 
     func point(at index: Int) -> StrokeStabilizerPoint {
         if index < 64 {

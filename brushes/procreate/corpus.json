@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "setName": "FREE Charcoal Set",
+  "archive": {
+    "path": "1_FREE_Charcoal_Set.brushset",
+    "sha256": "efa2a655620844fc3cc0b2c26f81bf28f31d7b9e74677c31933c352cf13156cf",
+    "ownership": "author-supplied-for-laya-corrective-program",
+    "notBundledInRelease": true
+  },
+  "paperSources": [
+    {
+      "path": "DSC_0006.jpg",
+      "sha256": "5ce41606b51036394f841f519b7af45e9316012145d48acbe76cc7a5e43d309f",
+      "ownership": "project-owned"
+    },
+    {
+      "path": "DSC_0175.jpg",
+      "sha256": "929f5c3b301bfcee2acd0367b0147af4c27bc775547f50a347d3dc8c24a172d0",
+      "ownership": "project-owned"
+    }
+  ],
+  "members": [
+    {"id": "C3A956C4-00DB-4CA9-B5A2-6F0199B591EC", "name": "Procreate Pencil - Remake"},
+    {"id": "0DADE934-8FD1-4680-AA5E-66D699CF21A0", "name": "COFE Pencil - F"},
+    {"id": "21AF8C6B-3FB1-4BF8-8F89-F5768271DA35", "name": "C Charcoal Soft", "components": ["root", "sub01"], "target": "secondary"},
+    {"id": "CC70504F-0D16-4D26-88A6-BF47BDA8ADE8", "name": "C Charcoal", "components": ["root", "sub01"], "target": "primary"},
+    {"id": "89185C2C-2746-4934-A9DB-20983D28BEED", "name": "Finger Smudge"},
+    {"id": "ACF77570-AD91-4352-86C7-2C48BF0D7108", "name": "Eraser - Soft"},
+    {"id": "77E04E60-98F7-4849-90E9-3F23C5B303DB", "name": "Eraser - Medium"},
+    {"id": "C430FF39-0164-4E0B-A7E6-B6200BB89F86", "name": "Eraser - Hard"}
+  ],
+  "missingBuiltIns": [
+    "Haggard-Oval.png",
+    "Brush-Preset-Bonobo.png",
+    "Brush-Artery-Charcoal-Corse.jpg"
+  ],
+  "excludedAncillaryFiles": ["1_FREE_Charcoal_Set.key"]
+}

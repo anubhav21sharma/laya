@@ -146,16 +146,26 @@ public struct ForeignBrushDiagnostic: Codable, Equatable, Sendable {
 }
 
 public struct ForeignBrushIR: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion: UInt16 = 1
+    public static let currentSchemaVersion: UInt16 = 2
 
     public let schemaVersion: UInt16
     public let provenance: ForeignBrushProvenance
     public let sourceBrushIdentifier: String
     public let displayName: String
     public let author: String?
-    public let settings: [ForeignBrushSetting]
-    public let resources: [ForeignBrushResourceDescriptor]
-    public let diagnostics: [ForeignBrushDiagnostic]
+    public let components: [ForeignBrushComponent]
+
+    public var settings: [ForeignBrushSetting] {
+        components.flatMap(\.settings)
+    }
+
+    public var resources: [ForeignBrushResourceDescriptor] {
+        components.flatMap(\.resources)
+    }
+
+    public var diagnostics: [ForeignBrushDiagnostic] {
+        components.flatMap(\.diagnostics)
+    }
 
     public init(
         schemaVersion: UInt16 = currentSchemaVersion,
@@ -167,9 +177,48 @@ public struct ForeignBrushIR: Codable, Equatable, Sendable {
         resources: [ForeignBrushResourceDescriptor],
         diagnostics: [ForeignBrushDiagnostic]
     ) throws {
-        guard schemaVersion == Self.currentSchemaVersion else {
+        guard schemaVersion == 1 || schemaVersion == Self.currentSchemaVersion else {
             throw ForeignBrushValidationError.unsupportedSchema(schemaVersion)
         }
+        try ForeignBrushValidator.sortedUnique(
+            settings,
+            field: "ir.settings",
+            key: \.semanticKey
+        )
+        try ForeignBrushValidator.sortedUnique(
+            resources,
+            field: "ir.resources",
+            key: \.id
+        )
+        try ForeignBrushValidator.sortedUnique(
+            diagnostics,
+            field: "ir.diagnostics",
+            key: \.stableIdentity
+        )
+        let root = try ForeignBrushComponent(
+            identifier: "root",
+            ordinal: 0,
+            sourcePath: "Brush.archive",
+            settings: settings,
+            resources: resources,
+            diagnostics: diagnostics
+        )
+        try self.init(
+            provenance: provenance,
+            sourceBrushIdentifier: sourceBrushIdentifier,
+            displayName: displayName,
+            author: author,
+            components: [root]
+        )
+    }
+
+    public init(
+        provenance: ForeignBrushProvenance,
+        sourceBrushIdentifier: String,
+        displayName: String,
+        author: String? = nil,
+        components: [ForeignBrushComponent]
+    ) throws {
         try ForeignBrushValidator.string(
             sourceBrushIdentifier,
             field: "ir.sourceBrushIdentifier"
@@ -180,15 +229,38 @@ public struct ForeignBrushIR: Codable, Equatable, Sendable {
         )
         try ForeignBrushValidator.optionalString(author, field: "ir.author")
         try ForeignBrushValidator.count(
+            components.count,
+            field: "ir.components",
+            maximum: ForeignBrushLimits.maximumComponentsPerBrush,
+            minimum: 1
+        )
+        let identifiers = components.map(\.identifier)
+        if Set(identifiers).count != identifiers.count {
+            let duplicate = identifiers.first { identifier in
+                identifiers.filter { $0 == identifier }.count > 1
+            }!
+            throw ForeignBrushValidationError.duplicate(
+                field: "ir.components.identifier",
+                value: duplicate
+            )
+        }
+        for (index, component) in components.enumerated() {
+            guard component.ordinal == UInt16(index),
+                  (index == 0 && component.identifier == "root")
+                    || (index == 1 && component.identifier == "sub01")
+            else {
+                throw ForeignBrushValidationError.outOfRange(
+                    "ir.components.ordinal"
+                )
+            }
+        }
+        let settings = components.flatMap(\.settings)
+        try ForeignBrushValidator.count(
             settings.count,
             field: "ir.settings",
             maximum: ForeignBrushLimits.maximumSettingsPerBrush
         )
-        try ForeignBrushValidator.sortedUnique(
-            settings,
-            field: "ir.settings",
-            key: \.semanticKey
-        )
+        let resources = components.flatMap(\.resources)
         try ForeignBrushValidator.count(
             resources.count,
             field: "ir.resources",
@@ -240,38 +312,19 @@ public struct ForeignBrushIR: Codable, Equatable, Sendable {
             }
             cumulativeEncodedBytes = nextBytes
         }
+        let diagnostics = components.flatMap(\.diagnostics)
         try ForeignBrushValidator.count(
             diagnostics.count,
             field: "ir.diagnostics",
             maximum: ForeignBrushLimits.maximumDiagnosticsPerBrush
         )
-        try ForeignBrushValidator.sortedUnique(
-            diagnostics,
-            field: "ir.diagnostics",
-            key: \.stableIdentity
-        )
 
-        let resourceIDs = Set(resources.map(\.id))
-        for setting in settings {
-            guard let reference = setting.value.resourceReference else {
-                continue
-            }
-            guard resourceIDs.contains(reference) else {
-                throw ForeignBrushValidationError.danglingResourceReference(
-                    settingKey: setting.semanticKey,
-                    resourceID: reference
-                )
-            }
-        }
-
-        self.schemaVersion = schemaVersion
+        self.schemaVersion = Self.currentSchemaVersion
         self.provenance = provenance
         self.sourceBrushIdentifier = sourceBrushIdentifier
         self.displayName = displayName
         self.author = author
-        self.settings = settings
-        self.resources = resources
-        self.diagnostics = diagnostics
+        self.components = components
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -280,40 +333,81 @@ public struct ForeignBrushIR: Codable, Equatable, Sendable {
         case sourceBrushIdentifier
         case displayName
         case author
+        case components
         case settings
         case resources
         case diagnostics
     }
 
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(Self.currentSchemaVersion, forKey: .schemaVersion)
+        try container.encode(provenance, forKey: .provenance)
+        try container.encode(
+            sourceBrushIdentifier,
+            forKey: .sourceBrushIdentifier
+        )
+        try container.encode(displayName, forKey: .displayName)
+        try container.encodeIfPresent(author, forKey: .author)
+        try container.encode(components, forKey: .components)
+    }
+
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        try self.init(
-            schemaVersion: container.decode(
-                UInt16.self,
-                forKey: .schemaVersion
-            ),
-            provenance: container.decode(
-                ForeignBrushProvenance.self,
-                forKey: .provenance
-            ),
-            sourceBrushIdentifier: container.decode(
-                String.self,
-                forKey: .sourceBrushIdentifier
-            ),
-            displayName: container.decode(String.self, forKey: .displayName),
-            author: container.decodeIfPresent(String.self, forKey: .author),
-            settings: container.decode(
-                [ForeignBrushSetting].self,
-                forKey: .settings
-            ),
-            resources: container.decode(
-                [ForeignBrushResourceDescriptor].self,
-                forKey: .resources
-            ),
-            diagnostics: container.decode(
-                [ForeignBrushDiagnostic].self,
-                forKey: .diagnostics
-            )
+        let schemaVersion = try container.decode(
+            UInt16.self,
+            forKey: .schemaVersion
         )
+        let provenance = try container.decode(
+            ForeignBrushProvenance.self,
+            forKey: .provenance
+        )
+        let sourceBrushIdentifier = try container.decode(
+            String.self,
+            forKey: .sourceBrushIdentifier
+        )
+        let displayName = try container.decode(
+            String.self,
+            forKey: .displayName
+        )
+        let author = try container.decodeIfPresent(
+            String.self,
+            forKey: .author
+        )
+        switch schemaVersion {
+        case 1:
+            try self.init(
+                schemaVersion: 1,
+                provenance: provenance,
+                sourceBrushIdentifier: sourceBrushIdentifier,
+                displayName: displayName,
+                author: author,
+                settings: container.decode(
+                    [ForeignBrushSetting].self,
+                    forKey: .settings
+                ),
+                resources: container.decode(
+                    [ForeignBrushResourceDescriptor].self,
+                    forKey: .resources
+                ),
+                diagnostics: container.decode(
+                    [ForeignBrushDiagnostic].self,
+                    forKey: .diagnostics
+                )
+            )
+        case Self.currentSchemaVersion:
+            try self.init(
+                provenance: provenance,
+                sourceBrushIdentifier: sourceBrushIdentifier,
+                displayName: displayName,
+                author: author,
+                components: container.decode(
+                    [ForeignBrushComponent].self,
+                    forKey: .components
+                )
+            )
+        default:
+            throw ForeignBrushValidationError.unsupportedSchema(schemaVersion)
+        }
     }
 }

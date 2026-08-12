@@ -4,12 +4,13 @@ The design docs (00-15) carry the why at prose altitude. This sheet pins the loa
 
 Everything here is transcribed from the current source (2026-07-13). If a design doc and this sheet disagree, this sheet is the as-built truth (the design docs are pre-/around-implementation intent). Source of record is always the code itself: `Sources/CShaderTypes/include/ShaderTypes.h`, `Sources/EditorCore/`, `Sources/MetalRenderer/SpikeRenderer.swift`, `App/PatternSpike/RenderHarness.swift`, `Package.swift`.
 
-> **Corrective status (2026-08-01):** This sheet records implementation
+> **Candidate status (2026-08-12):** This sheet records implementation
 > constants, not product acceptance. `Technical Ink`, `Graphite Pencil`,
-> `Natural Charcoal`, and `Chisel Marker` are currently laboratory-only with
-> `correctiveRebuildRequired` status. They are excluded from the editor picker;
-> any historic performance-intent labels are not current performance or product
-> claims.
+> `Natural Charcoal`, and `Chisel Marker` are laboratory-only with
+> `engineIntegrated=true`, `softwarePerformancePassed=true`,
+> `manualQualityPassed=false`, `physicalProfilePassed=false`, and
+> `productAccepted=false`. They declare `realtime60`, not `realtime120`, and
+> remain excluded from the editor picker.
 
 ## Module graph (Package.swift, swift-tools 6.0, iOS 17 / macOS 14)
 

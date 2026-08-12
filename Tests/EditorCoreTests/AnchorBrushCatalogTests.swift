@@ -5,7 +5,9 @@ import Testing
 @Test func anchorCatalogPinsSixNativeBuiltInEntries() {
     let entries = AnchorBrushCatalog.all
 
-    #expect(entries.allSatisfy { $0.definition.schemaVersion == 1 })
+    #expect(entries.allSatisfy {
+        $0.definition.schemaVersion == BrushDefinition.currentSchemaVersion
+    })
     #expect(entries.map(\.id.rawValue) == [
         "builtin.native-ink",
         "builtin.native-dry-media",
@@ -33,7 +35,7 @@ func anchorProgramsArePrecompiledNativeDefinitions() throws {
     for entry in AnchorBrushCatalog.all {
         #expect(entry.program.definition == entry.definition)
         #expect(entry.program.requestedBackend == .deposition)
-        #expect(entry.definition.material.interaction == .none)
+        #expect(entry.definition.components[0].material.interaction == .none)
         #expect(entry.definition.performanceIntent == .realtime120)
     }
 }
@@ -68,18 +70,18 @@ func programRenderStylePreservesNativeFields() throws {
 }
 
 @Test func anchorCatalogDefinesApprovedDepositionFamilies() throws {
-    #expect(AnchorBrushCatalog.ink.definition.material.accumulation == .flow)
-    #expect(AnchorBrushCatalog.ink.definition.material.edgeTreatment == .none)
-    #expect(AnchorBrushCatalog.dryMedia.definition.material.accumulation == .flow)
-    #expect(AnchorBrushCatalog.dryMedia.definition.material.edgeTreatment == .dryBreakup)
-    #expect(AnchorBrushCatalog.glaze.definition.material.accumulation == .uniformGlaze)
-    #expect(AnchorBrushCatalog.glaze.definition.material.edgeTreatment == .none)
-    #expect(AnchorBrushCatalog.marker.definition.material.accumulation == .uniformGlaze)
-    #expect(AnchorBrushCatalog.marker.definition.material.edgeTreatment == .markerOverlap)
-    #expect(AnchorBrushCatalog.airbrush.definition.material.accumulation == .flow)
-    #expect(AnchorBrushCatalog.airbrush.definition.material.edgeTreatment == .none)
-    #expect(AnchorBrushCatalog.eraser.definition.material.accumulation == .destinationOut)
-    #expect(AnchorBrushCatalog.eraser.definition.material.edgeTreatment == .none)
+    #expect(AnchorBrushCatalog.ink.definition.components[0].material.accumulation == .flow)
+    #expect(AnchorBrushCatalog.ink.definition.components[0].material.edgeTreatment == .none)
+    #expect(AnchorBrushCatalog.dryMedia.definition.components[0].material.accumulation == .flow)
+    #expect(AnchorBrushCatalog.dryMedia.definition.components[0].material.edgeTreatment == .dryBreakup)
+    #expect(AnchorBrushCatalog.glaze.definition.components[0].material.accumulation == .uniformGlaze)
+    #expect(AnchorBrushCatalog.glaze.definition.components[0].material.edgeTreatment == .none)
+    #expect(AnchorBrushCatalog.marker.definition.components[0].material.accumulation == .uniformGlaze)
+    #expect(AnchorBrushCatalog.marker.definition.components[0].material.edgeTreatment == .markerOverlap)
+    #expect(AnchorBrushCatalog.airbrush.definition.components[0].material.accumulation == .flow)
+    #expect(AnchorBrushCatalog.airbrush.definition.components[0].material.edgeTreatment == .none)
+    #expect(AnchorBrushCatalog.eraser.definition.components[0].material.accumulation == .destinationOut)
+    #expect(AnchorBrushCatalog.eraser.definition.components[0].material.edgeTreatment == .none)
 
     for entry in AnchorBrushCatalog.all {
         #expect(AnchorBrushCatalog.entry(for: entry.id) == entry)
@@ -103,28 +105,29 @@ func programRenderStylePreservesNativeFields() throws {
 
 @Test func dedicatedEraserCanReachFullyTransparentCoverage() {
     let definition = AnchorBrushCatalog.eraser.definition
+    let component = definition.components[0]
 
-    #expect(definition.placement.baseFlow == 1)
-    #expect(definition.placement.strokeOpacity == 1)
-    #expect(definition.placement.baseScatterFraction == 0)
-    #expect(definition.placement.baseJitterFraction == 0)
-    #expect(definition.coverage.baseHardness == 1)
-    #expect(definition.material.strength == 1)
-    #expect(definition.material.accumulationLimit == 1)
+    #expect(component.placement.baseFlow == 1)
+    #expect(component.placement.strokeOpacity == 1)
+    #expect(component.placement.baseScatterFraction == 0)
+    #expect(component.placement.baseJitterFraction == 0)
+    #expect(component.coverage.baseHardness == 1)
+    #expect(component.material.strength == 1)
+    #expect(component.material.accumulationLimit == 1)
 }
 
 @Test func nativeAnchorsUseNominalDiameterWithoutPressureInput() {
     for entry in AnchorBrushCatalog.all {
-        #expect(entry.definition.dynamics.size.missingInputValue == 1)
-        #expect(entry.definition.dynamics.noPressureNeutral == 1)
+        #expect(entry.definition.components[0].dynamics.size.missingInputValue == 1)
+        #expect(entry.definition.components[0].dynamics.noPressureNeutral == 1)
     }
 }
 
 @Test func softAndMarkerAnchorsRetainVisibleNominalFootprints() {
-    #expect(AnchorBrushCatalog.glaze.definition.coverage.baseHardness == 1)
-    #expect(AnchorBrushCatalog.glaze.definition.placement.baseFlow >= 0.5)
-    #expect(AnchorBrushCatalog.airbrush.definition.coverage.baseHardness == 1)
-    #expect(AnchorBrushCatalog.airbrush.definition.placement.baseFlow >= 0.25)
-    #expect(AnchorBrushCatalog.marker.definition.coverage.aspectRatio >= 0.8)
-    #expect(AnchorBrushCatalog.marker.definition.placement.baseFlow >= 0.6)
+    #expect(AnchorBrushCatalog.glaze.definition.components[0].coverage.baseHardness == 1)
+    #expect(AnchorBrushCatalog.glaze.definition.components[0].placement.baseFlow >= 0.5)
+    #expect(AnchorBrushCatalog.airbrush.definition.components[0].coverage.baseHardness == 1)
+    #expect(AnchorBrushCatalog.airbrush.definition.components[0].placement.baseFlow >= 0.25)
+    #expect(AnchorBrushCatalog.marker.definition.components[0].coverage.aspectRatio >= 0.8)
+    #expect(AnchorBrushCatalog.marker.definition.components[0].placement.baseFlow >= 0.6)
 }

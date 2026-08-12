@@ -24,7 +24,6 @@ public enum BrushTerminationDecision: Equatable, Sendable {
     case appendCap
     case appendPressureRelease(maximumWorldLength: Float)
     case replaceBoundedCorrection(ordinalRange: Range<UInt64>)
-    case replaceLegacySchemaV1EndTaper(ordinalRange: Range<UInt64>)
 }
 
 public enum BrushTerminationEvaluationError: Error, Equatable, Sendable {
@@ -94,14 +93,6 @@ public struct BrushTerminationEvaluator: Equatable, Sendable {
             return .replaceBoundedCorrection(
                 ordinalRange: correction.ordinalRange
             )
-        case .legacySchemaV1Cap:
-            return .appendCap
-        case .legacySchemaV1EndTaper:
-            return .replaceLegacySchemaV1EndTaper(
-                ordinalRange: correction.ordinalRange
-            )
-        case .legacySchemaV1Replay:
-            return .appendCap
         }
     }
 }

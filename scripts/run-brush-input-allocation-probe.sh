@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 case "${1:-}" in
-  all|tip-support-spacing|sensor-program|input-derivation|stage-c|stage-c-emission|stage-d-tiles|stage-d-sampling)
+  all|tip-support-spacing|sensor-program|cursor-descriptor|input-derivation|stage-c|stage-c-emission|stage-d-tiles|stage-d-sampling)
     scope=$1
     scratch="$repo_root/.build/brush-input-allocation-probe"
     configuration="${2:-release}"
@@ -58,6 +58,7 @@ case "$scope" in
     run_probe --timed-emitter
     run_probe --tip-support-spacing
     run_probe --sensor-program
+    run_probe --cursor-descriptor
     run_probe --stage-d-tiles
     run_probe --stage-d-sampling
     run_probe --production
@@ -69,6 +70,10 @@ case "$scope" in
   sensor-program)
     run_probe --self-test
     run_probe --sensor-program
+    ;;
+  cursor-descriptor)
+    run_probe --self-test
+    run_probe --cursor-descriptor
     ;;
   input-derivation)
     run_probe --self-test

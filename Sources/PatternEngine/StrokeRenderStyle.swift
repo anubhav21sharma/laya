@@ -40,6 +40,8 @@ public struct StrokeRenderStyle: Equatable, Sendable {
     public let program: BrushProgram
     public let renderIdentity: BrushRenderIdentity
     public let seed: UInt64
+    package let componentRandomNamespaceMode:
+        BrushComponentRandomNamespaceMode
 
     public init(
         color: InkColor,
@@ -49,6 +51,28 @@ public struct StrokeRenderStyle: Equatable, Sendable {
         program: BrushProgram,
         renderIdentity: BrushRenderIdentity,
         seed: UInt64
+    ) {
+        self.init(
+            color: color,
+            diameter: diameter,
+            compositeMode: compositeMode,
+            eraserStrength: eraserStrength,
+            program: program,
+            renderIdentity: renderIdentity,
+            seed: seed,
+            componentRandomNamespaceMode: .isolated
+        )
+    }
+
+    package init(
+        color: InkColor,
+        diameter: Float,
+        compositeMode: StrokeCompositeMode,
+        eraserStrength: Float,
+        program: BrushProgram,
+        renderIdentity: BrushRenderIdentity,
+        seed: UInt64,
+        componentRandomNamespaceMode: BrushComponentRandomNamespaceMode
     ) {
         precondition(diameter.isFinite && diameter > 0)
         precondition(
@@ -66,6 +90,7 @@ public struct StrokeRenderStyle: Equatable, Sendable {
         self.program = program
         self.renderIdentity = renderIdentity
         self.seed = seed
+        self.componentRandomNamespaceMode = componentRandomNamespaceMode
     }
 
 }

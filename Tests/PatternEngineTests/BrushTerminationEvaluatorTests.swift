@@ -109,15 +109,15 @@ func capPointerUpPreservesBodyDabsAndReachesReleasePoint() throws {
         seed: 41
     )
     var dabs: [LogicalDab] = []
-    generator.begin(terminationSample(x: 0, timestamp: 0, phase: .began)) {
+    generator.consumeCurrentSample(terminationSample(x: 0, timestamp: 0, phase: .began)) {
         dabs.append($0)
     }
-    generator.append(terminationSample(x: 12, timestamp: 1, phase: .moved)) {
+    generator.consumeCurrentSample(terminationSample(x: 12, timestamp: 1, phase: .moved)) {
         dabs.append($0)
     }
     let body = dabs
 
-    generator.finish(terminationSample(x: 20, timestamp: 2, phase: .ended)) {
+    generator.consumeCurrentSample(terminationSample(x: 20, timestamp: 2, phase: .ended)) {
         dabs.append($0)
     }
 
@@ -136,61 +136,20 @@ func stabilizedCapFlushesToRawReleasePointWithoutChangingBodyDabs() throws {
         seed: 42
     )
     var dabs: [LogicalDab] = []
-    generator.begin(terminationSample(x: 0, timestamp: 0, phase: .began)) {
+    generator.consumeCurrentSample(terminationSample(x: 0, timestamp: 0, phase: .began)) {
         dabs.append($0)
     }
-    generator.append(terminationSample(x: 100, timestamp: 1, phase: .moved)) {
+    generator.consumeCurrentSample(terminationSample(x: 100, timestamp: 1, phase: .moved)) {
         dabs.append($0)
     }
     let body = dabs
 
-    generator.finish(terminationSample(x: 120, timestamp: 2, phase: .ended)) {
+    generator.consumeCurrentSample(terminationSample(x: 120, timestamp: 2, phase: .ended)) {
         dabs.append($0)
     }
 
     #expect(Array(dabs.prefix(body.count)) == body)
     #expect(dabs.last?.position == WorldPoint(x: 120, y: 0))
-}
-
-@Test
-func schemaV1ReplayKeepsItsFilteredReleaseEndpoint() throws {
-    let recipe = try BrushRecipe(
-        id: BrushRecipeID("test.legacy-filtered-release"),
-        stabilization: 0.5,
-        replayMode: .replayTail,
-        replayLimits: BrushRecipePolicy.replayTailLimits
-    )
-    let definition = try LegacyBrushRecipeAdapter.definition(
-        from: recipe,
-        displayName: "Legacy Filtered Release"
-    )
-    let program = try BrushProgramCompiler.compile(definition)
-    var generator = BrushStrokeGenerator(
-        program: program,
-        nominalDiameter: 20,
-        color: .black,
-        seed: 43
-    )
-    var dabs: [LogicalDab] = []
-
-    generator.begin(terminationSample(x: 0, timestamp: 0, phase: .began)) {
-        dabs.append($0)
-    }
-    generator.append(terminationSample(x: 100, timestamp: 1, phase: .moved)) {
-        dabs.append($0)
-    }
-    generator.finish(terminationSample(x: 120, timestamp: 2, phase: .ended)) {
-        dabs.append($0)
-    }
-
-    #expect(
-        program.termination
-            == .legacySchemaV1Replay(
-                mode: .replayTail,
-                replayLimits: BrushRecipePolicy.replayTailLimits
-            )
-    )
-    #expect(dabs.last?.position == WorldPoint(x: 85, y: 0))
 }
 
 private func causalTerminationProgram(
@@ -200,15 +159,14 @@ private func causalTerminationProgram(
     let base = nativeTestDefinition()
     let definition = try BrushDefinition(
         id: base.id,
-        schemaVersion: base.schemaVersion,
         metadata: base.metadata,
         capabilities: base.capabilities,
-        resources: base.resources,
-        coverage: base.coverage,
-        placement: base.placement,
-        dynamics: base.dynamics,
-        color: base.color,
-        material: base.material,
+        resources: base.components[0].resources,
+        coverage: base.components[0].coverage,
+        placement: base.components[0].placement,
+        dynamics: base.components[0].dynamics,
+        color: base.components[0].color,
+        material: base.components[0].material,
         stabilization: stabilization ?? base.stabilization,
         taper: .none,
         replayMode: .appendOnly,

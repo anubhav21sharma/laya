@@ -110,7 +110,7 @@ public struct BrushLogicalBaseline: Codable, Equatable, Sendable {
 }
 
 /// A future `LogicalDab` uses this exact payload and byte encoder. Keeping it
-/// separate from the legacy renderer types makes the compatibility digest a
+/// separate from renderer-facing types makes the compatibility digest a
 /// stable boundary rather than another renderer representation.
 public struct BrushCharacterizationDigestPayload: Equatable, Sendable {
     public let ordinal: UInt64
@@ -179,16 +179,19 @@ public struct BrushCharacterizationDigestPayload: Equatable, Sendable {
     ///
     /// Runtime bounds include the material halo. Schema v1 predates that
     /// contract and permanently records tip-only bounds, so this factory
-    /// deliberately derives the legacy footprint instead of serializing
+    /// deliberately derives the frozen footprint instead of serializing
     /// `dab.worldBounds`. The definition supplies the soften-pass scalar,
     /// which is not part of `BrushMaterialInputs`.
     public static func logicalDab(
         _ dab: LogicalDab,
         definition: BrushDefinition
     ) -> Self {
+        let componentIndex = Int(dab.componentOrdinal)
+        precondition(componentIndex < definition.components.count)
+        let component = definition.components[componentIndex]
         // Schema v1 encoded the evaluated frame even when the recipe's
         // primary grain was opaque. Reconstructing it here also preserves the
-        // signed-zero bits produced by the legacy trigonometric path.
+        // signed-zero bits produced by the frozen trigonometric path.
         let primaryGrainFrame = dab.primaryGrainToWorld ?? grainFrame(
             scale: dab.grainScale,
             rotation: dab.grainRotation,
@@ -204,7 +207,7 @@ public struct BrushCharacterizationDigestPayload: Equatable, Sendable {
             dab: dab,
             primaryGrainFrame: primaryGrainFrame,
             secondaryGrainFrame: secondaryGrainFrame,
-            hasPrimaryGrain: !definition.coverage.grains.isEmpty,
+            hasPrimaryGrain: !component.coverage.grains.isEmpty,
             hasSecondaryGrain: dab.secondaryGrainToWorld != nil,
             secondaryColorMix: dab.secondaryColorMix,
             // These scalar-derived flags are part of the frozen schema-v1
@@ -216,7 +219,7 @@ public struct BrushCharacterizationDigestPayload: Equatable, Sendable {
             materialWetness: dab.materialInputs.wetness,
             materialBleedRadius: dab.materialInputs.bleedRadius,
             materialSoftenPasses: UInt64(
-                definition.material.softenPasses
+                component.material.softenPasses
             ),
             materialAccumulationLimit: dab.materialInputs.accumulationLimit,
             compatibilityRandom: dab.randomValues.compatibility,
@@ -284,15 +287,28 @@ public enum BrushCharacterizer {
                 )
                 payloads.append(payload)
             }
-            switch worldSample.phase {
-            case .began:
-                generator.begin(worldSample, emit: emit)
-            case .moved:
-                generator.append(worldSample, emit: emit)
-            case .ended:
-                generator.finish(worldSample, emit: emit)
-            case .cancelled:
+            if worldSample.phase == .cancelled {
                 generator.cancel()
+                continue
+            }
+            do {
+                var cursor = try generator.emissionCursor(
+                    for: worldSample,
+                    maximumPathSubdivisionCount: .max
+                )
+                repeat {
+                    _ = try cursor.emitNextPage(emit)
+                } while !cursor.isComplete
+                guard let completed = cursor.completedGenerator else {
+                    preconditionFailure(
+                        "Completed characterization cursor has no generator"
+                    )
+                }
+                generator = completed
+            } catch {
+                preconditionFailure(
+                    "Characterization generation exceeded a trusted bound: \(error)"
+                )
             }
         }
 

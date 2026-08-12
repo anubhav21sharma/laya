@@ -53,7 +53,7 @@ public enum LayabrushConvertCommandRunner {
           layabrush-convert diagnostic synthetic-v1 <dry|wet>
           layabrush-convert probe [--json] <input>...
           layabrush-convert inspect [--json] <input>...
-          layabrush-convert convert [--json] [--replace] [--output <directory>] <input>
+          layabrush-convert convert [--json] [--replace] [--output <directory>] [--brush <identifier> --substitutions <manifest>] <input>
           layabrush-convert batch [--json] [--replace] [--output <directory>] <input>...
         """
         + "\n"
@@ -261,12 +261,96 @@ public enum LayabrushConvertCommandRunner {
             )
         }
 
+        let conversionDocuments: [ForeignBrushDocument]
+        let procreateSubstitutions: ProcreateResourceSubstitutionRegistry?
+        switch selection {
+        case .synthetic:
+            guard invocation.brushIdentifier == nil,
+                  invocation.substitutionManifest == nil
+            else {
+                diagnostics.append(diagnostic(
+                    "options-not-supported-for-format",
+                    input
+                ))
+                return failedInput(
+                    input,
+                    reason: "options-not-supported-for-format",
+                    parserIdentifier: selection.identifier
+                )
+            }
+            conversionDocuments = documents
+            procreateSubstitutions = nil
+        case .procreate:
+            guard let brushIdentifier = invocation.brushIdentifier,
+                  let substitutionManifest = invocation.substitutionManifest
+            else {
+                diagnostics.append(diagnostic(
+                    "procreate-options-required",
+                    input
+                ))
+                return failedInput(
+                    input,
+                    reason: "procreate-options-required",
+                    parserIdentifier: selection.identifier
+                )
+            }
+            guard ProcreateClassicV1BrushMapper.supportedBrushIDs.contains(
+                brushIdentifier
+            ) else {
+                diagnostics.append(diagnostic(
+                    "unsupported-brush",
+                    brushIdentifier
+                ))
+                return failedInput(
+                    input,
+                    reason: "unsupported-brush",
+                    parserIdentifier: selection.identifier
+                )
+            }
+            let matches = documents.filter {
+                $0.ir.sourceBrushIdentifier == brushIdentifier
+            }
+            guard matches.count == 1 else {
+                let reason = matches.isEmpty
+                    ? "brush-not-found"
+                    : "duplicate-brush-identifier"
+                diagnostics.append(diagnostic(reason, brushIdentifier))
+                return failedInput(
+                    input,
+                    reason: reason,
+                    parserIdentifier: selection.identifier
+                )
+            }
+            do {
+                procreateSubstitutions = try .load(
+                    manifestURL: substitutionManifest,
+                    baseURL: URL(
+                        fileURLWithPath:
+                            FileManager.default.currentDirectoryPath,
+                        isDirectory: true
+                    )
+                )
+            } catch {
+                diagnostics.append(diagnostic(
+                    "invalid-substitution-manifest",
+                    substitutionManifest.path
+                ))
+                return failedInput(
+                    input,
+                    reason: "invalid-substitution-manifest",
+                    parserIdentifier: selection.identifier
+                )
+            }
+            conversionDocuments = matches
+        }
+
         var documentResults = [LayabrushConvertDocumentResult]()
-        for document in documents {
+        for document in conversionDocuments {
             documentResults.append(
                 convert(
                     document,
                     selection: selection,
+                    procreateSubstitutions: procreateSubstitutions,
                     input: input,
                     invocation: invocation,
                     diagnostics: &diagnostics,
@@ -292,6 +376,7 @@ public enum LayabrushConvertCommandRunner {
     private static func convert(
         _ document: ForeignBrushDocument,
         selection: ParserSelection,
+        procreateSubstitutions: ProcreateResourceSubstitutionRegistry?,
         input: String,
         invocation: Invocation,
         diagnostics: inout [String],
@@ -299,15 +384,9 @@ public enum LayabrushConvertCommandRunner {
     ) -> LayabrushConvertDocumentResult {
         let mapped: ForeignBrushMappingResult
         do {
-            mapped = try selection.map(document)
-        } catch ParserSelectionError.noVerifiedMapper {
-            diagnostics.append(diagnostic(
-                "no-verified-semantic-mapper",
-                "\(input):\(document.ir.sourceBrushIdentifier)"
-            ))
-            return failedDocument(
+            mapped = try selection.map(
                 document,
-                reason: "no-verified-semantic-mapper"
+                procreateSubstitutions: procreateSubstitutions
             )
         } catch {
             diagnostics.append(diagnostic(
@@ -655,6 +734,8 @@ private struct Invocation {
     let json: Bool
     let replace: Bool
     let outputDirectory: URL
+    let brushIdentifier: String?
+    let substitutionManifest: URL?
     let inputs: [String]
 
     init?(arguments: [String]) {
@@ -666,6 +747,8 @@ private struct Invocation {
         var json = false
         var replace = false
         var outputDirectory: URL?
+        var brushIdentifier: String?
+        var substitutionManifest: URL?
         var inputs = [String]()
         var index = 1
         while index < arguments.count {
@@ -689,6 +772,27 @@ private struct Invocation {
                     fileURLWithPath: arguments[index],
                     isDirectory: true
                 ).standardizedFileURL
+            case "--brush":
+                guard brushIdentifier == nil,
+                      arguments.indices.contains(index + 1),
+                      !arguments[index + 1].hasPrefix("--")
+                else {
+                    return nil
+                }
+                index += 1
+                brushIdentifier = arguments[index]
+            case "--substitutions":
+                guard substitutionManifest == nil,
+                      arguments.indices.contains(index + 1),
+                      !arguments[index + 1].hasPrefix("--")
+                else {
+                    return nil
+                }
+                index += 1
+                substitutionManifest = URL(
+                    fileURLWithPath: arguments[index],
+                    isDirectory: false
+                ).standardizedFileURL
             default:
                 guard !argument.hasPrefix("--") else { return nil }
                 inputs.append(argument)
@@ -698,17 +802,31 @@ private struct Invocation {
         guard !inputs.isEmpty else { return nil }
         switch command {
         case .probe, .inspect:
-            guard !replace, outputDirectory == nil else { return nil }
+            guard !replace,
+                  outputDirectory == nil,
+                  brushIdentifier == nil,
+                  substitutionManifest == nil
+            else {
+                return nil
+            }
         case .convert:
-            guard inputs.count == 1 else { return nil }
+            guard inputs.count == 1,
+                  (brushIdentifier == nil) == (substitutionManifest == nil)
+            else {
+                return nil
+            }
         case .batch:
-            break
+            guard brushIdentifier == nil, substitutionManifest == nil else {
+                return nil
+            }
         }
         self.command = command
         self.json = json
         self.replace = replace
         self.outputDirectory = outputDirectory
             ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        self.brushIdentifier = brushIdentifier
+        self.substitutionManifest = substitutionManifest
         self.inputs = inputs
     }
 }
@@ -736,19 +854,25 @@ private enum ParserSelection {
     }
 
     func map(
-        _ document: ForeignBrushDocument
+        _ document: ForeignBrushDocument,
+        procreateSubstitutions: ProcreateResourceSubstitutionRegistry?
     ) throws -> ForeignBrushMappingResult {
         switch self {
         case .synthetic:
-            try SyntheticV1BrushMapper().map(document)
+            return try SyntheticV1BrushMapper().map(document)
         case .procreate:
-            throw ParserSelectionError.noVerifiedMapper
+            guard let procreateSubstitutions else {
+                throw ParserSelectionError.missingProcreateSubstitutions
+            }
+            return try ProcreateClassicV1BrushMapper(
+                substitutions: procreateSubstitutions
+            ).map(document)
         }
     }
 }
 
 private enum ParserSelectionError: Error {
-    case noVerifiedMapper
+    case missingProcreateSubstitutions
 }
 
 private enum InputReadError: Error {

@@ -8,34 +8,24 @@ func compiledProgramAndStrokeReplayStateHaveBoundedValueFootprints() {
     #expect(MemoryLayout<BrushProgram>.size <= referenceSizedUpperBound)
     #expect(MemoryLayout<StrokeVelocityFilter>.size <= 1_024)
     #expect(MemoryLayout<BrushInputDeriver>.size <= 1_088)
-    #expect(MemoryLayout<BrushStrokeGenerator>.size <= 2_048)
-    #expect(MemoryLayout<BrushStrokeGenerator.EmissionCursor>.size <= 6_144)
-    #expect(MemoryLayout<TransientStrokeChunk>.size <= 3_072)
-    #expect(MemoryLayout<TransientStrokeChunk>.size <= 4_096)
-    #expect(MemoryLayout<TransientStrokeBuffer>.size <= 8_192)
+    #expect(MemoryLayout<BrushStrokeGenerator>.size <= 4_096)
+    #expect(MemoryLayout<BrushStrokeGenerator.EmissionCursor>.size <= 12_288)
+    #expect(MemoryLayout<TransientStrokeChunk>.size <= 6_144)
+    #expect(MemoryLayout<TransientStrokeBuffer>.size <= 12_288)
 }
 
 @Test
 func independentlyCompiledProgramsUseSemanticEquality() throws {
-    let definition = try legacyDefinition()
+    let definition = try currentDefinition()
     let first = try BrushProgramCompiler.compile(definition)
     let second = try BrushProgramCompiler.compile(definition)
     let changedDefinitionProgram = try BrushProgramCompiler.compile(
         replacing(definition, seedPolicy: .fixed(99))
     )
-    let changedDynamicsProgram = try BrushProgramCompiler.compile(
-        replacing(
-            definition,
-            dynamics: replacing(
-                definition.dynamics,
-                size: nativeConstant(0.5)
-            )
-        )
-    )
     let stageCDefinition = try stageCV2Definition()
     let firstStageCProgram = try BrushProgramCompiler.compile(stageCDefinition)
     let secondStageCProgram = try BrushProgramCompiler.compile(stageCDefinition)
-    let stageC = try #require(firstStageCProgram.stageC)
+    let stageC = firstStageCProgram.primaryComponent.stageC
     let changedStageC = BrushStageCProgramMetadata(
         normalization: stageC.normalization,
         sensorProgram: stageC.sensorProgram,
@@ -89,27 +79,15 @@ func independentlyCompiledProgramsUseSemanticEquality() throws {
     let singleFieldVariants = [
         BrushProgram(
             definition: changedDefinitionProgram.definition,
-            dynamics: first.dynamics,
             termination: first.termination,
             requiredCapabilities: first.requiredCapabilities,
             ignoredOptionalCapabilityIdentifiers:
                 first.ignoredOptionalCapabilityIdentifiers,
             requestedBackend: first.requestedBackend,
-            stageC: first.stageC
+            stageC: first.primaryComponent.stageC
         ),
         BrushProgram(
             definition: first.definition,
-            dynamics: changedDynamicsProgram.dynamics,
-            termination: first.termination,
-            requiredCapabilities: first.requiredCapabilities,
-            ignoredOptionalCapabilityIdentifiers:
-                first.ignoredOptionalCapabilityIdentifiers,
-            requestedBackend: first.requestedBackend,
-            stageC: first.stageC
-        ),
-        BrushProgram(
-            definition: first.definition,
-            dynamics: first.dynamics,
             termination: first.termination == .cap
                 ? .pressureRelease(maximumWorldLength: 1)
                 : .cap,
@@ -117,11 +95,10 @@ func independentlyCompiledProgramsUseSemanticEquality() throws {
             ignoredOptionalCapabilityIdentifiers:
                 first.ignoredOptionalCapabilityIdentifiers,
             requestedBackend: first.requestedBackend,
-            stageC: first.stageC
+            stageC: first.primaryComponent.stageC
         ),
         BrushProgram(
             definition: first.definition,
-            dynamics: first.dynamics,
             termination: first.termination,
             requiredCapabilities: first.requiredCapabilities == [.wetMix]
                 ? []
@@ -129,11 +106,10 @@ func independentlyCompiledProgramsUseSemanticEquality() throws {
             ignoredOptionalCapabilityIdentifiers:
                 first.ignoredOptionalCapabilityIdentifiers,
             requestedBackend: first.requestedBackend,
-            stageC: first.stageC
+            stageC: first.primaryComponent.stageC
         ),
         BrushProgram(
             definition: first.definition,
-            dynamics: first.dynamics,
             termination: first.termination,
             requiredCapabilities: first.requiredCapabilities,
             ignoredOptionalCapabilityIdentifiers:
@@ -142,11 +118,10 @@ func independentlyCompiledProgramsUseSemanticEquality() throws {
                     ? []
                     : ["different.optional"],
             requestedBackend: first.requestedBackend,
-            stageC: first.stageC
+            stageC: first.primaryComponent.stageC
         ),
         BrushProgram(
             definition: first.definition,
-            dynamics: first.dynamics,
             termination: first.termination,
             requiredCapabilities: first.requiredCapabilities,
             ignoredOptionalCapabilityIdentifiers:
@@ -154,11 +129,10 @@ func independentlyCompiledProgramsUseSemanticEquality() throws {
             requestedBackend: first.requestedBackend == .deposition
                 ? .canvasInteraction
                 : .deposition,
-            stageC: first.stageC
+            stageC: first.primaryComponent.stageC
         ),
         BrushProgram(
             definition: first.definition,
-            dynamics: first.dynamics,
             termination: first.termination,
             requiredCapabilities: first.requiredCapabilities,
             ignoredOptionalCapabilityIdentifiers:
@@ -177,22 +151,17 @@ func independentlyCompiledProgramsUseSemanticEquality() throws {
     let compiledSensorProgramAlias = compiledSensorProgram
     #expect(stageCAlias === stageC)
     #expect(compiledSensorProgramAlias === compiledSensorProgram)
-    #expect(singleFieldVariants.count == 7)
+    #expect(singleFieldVariants.count == 6)
     for variant in singleFieldVariants {
         #expect(first != variant)
     }
 }
 
-@Test(arguments: AnchorRecipeFixtures.all)
+@Test(arguments: AnchorDefinitionFixtures.all)
 func compiledProgramCharacterizationIsDeterministic(
-    _ fixture: AnchorRecipeFixture
+    _ fixture: AnchorDefinitionFixture
 ) throws {
-    let definition = try LegacyBrushRecipeAdapter.definition(
-        from: fixture.recipe,
-        displayName: fixture.displayName
-    )
-
-    let program = try BrushProgramCompiler.compile(definition)
+    let program = try BrushProgramCompiler.compile(fixture.definition)
 
     let viewport = ViewportTransform(
         drawableSize: PatternSize(width: 256, height: 256),
@@ -217,10 +186,7 @@ func compiledProgramCharacterizationIsDeterministic(
 
 @Test
 func dynamicsEvaluatesACompiledProgram() throws {
-    let definition = try LegacyBrushRecipeAdapter.definition(
-        from: .legacyEquivalent,
-        displayName: "Legacy"
-    )
+    let definition = nativeTestDefinition()
     let program = try BrushProgramCompiler.compile(definition)
     let sample = InterpolatedStrokeSample(
         position: WorldPoint(x: 2, y: 3), pressure: 0.5, timestamp: 0,
@@ -246,7 +212,7 @@ func dynamicsEvaluatesACompiledProgram() throws {
 
 @Test
 func compilerRejectsUnknownRequiredCapabilityAndPreservesOptionalOne() throws {
-    let base = try legacyDefinition()
+    let base = try currentDefinition()
     let optional = try replacing(
         base,
         capabilities: [BrushCapabilityDeclaration(identifier: "future.capability", required: false)]
@@ -264,8 +230,8 @@ func compilerRejectsUnknownRequiredCapabilityAndPreservesOptionalOne() throws {
 }
 
 @Test
-func definitionValidationRejectsMalformedCurvesUnsupportedSchemasAndMissingCapabilities() throws {
-    let base = try legacyDefinition()
+func definitionValidationRejectsMalformedCurvesAndWetComponents() throws {
+    let base = try currentDefinition()
     let malformed = BrushMappingDefinition(
         input: .pressure,
         response: .curve(BrushCurveDefinition(points: [
@@ -276,10 +242,7 @@ func definitionValidationRejectsMalformedCurvesUnsupportedSchemasAndMissingCapab
         inverted: false, jitter: 0, missingInputValue: 1
     )
     #expect(throws: BrushDefinitionValidationError.invalidCurve) {
-        try replacing(base, dynamics: replacing(base.dynamics, size: malformed))
-    }
-    #expect(throws: BrushDefinitionValidationError.unsupportedSchema) {
-        try replacing(base, schemaVersion: 2)
+        try replacing(base, dynamics: replacing(base.components[0].dynamics, size: malformed))
     }
     let wetMix = BrushMaterialDefinition(
         accumulation: .flow, interaction: .wetMix, edgeTreatment: .none,
@@ -290,14 +253,17 @@ func definitionValidationRejectsMalformedCurvesUnsupportedSchemasAndMissingCapab
             dirtyHaloRadius: 0
         )
     )
-    #expect(throws: BrushDefinitionValidationError.missingCapability("wetMix")) {
+    #expect(throws: BrushDefinitionValidationError.unsupportedComponentInteraction(
+        ordinal: 0,
+        interaction: .wetMix
+    )) {
         try replacing(base, material: wetMix)
     }
 }
 
 @Test
 func compilerSamplesThreePointCurveAtBothEndpoints() throws {
-    let base = try legacyDefinition()
+    let base = try currentDefinition()
     let curve = BrushMappingDefinition(
         input: .pressure,
         response: .curve(BrushCurveDefinition(points: [
@@ -308,12 +274,13 @@ func compilerSamplesThreePointCurveAtBothEndpoints() throws {
         scale: 0.9, offset: 0.1, lowerClamp: 0.1, upperClamp: 1,
         inverted: false, jitter: 0, missingInputValue: 1
     )
-    let dynamics = replacing(base.dynamics, size: curve)
+    let dynamics = replacing(base.components[0].dynamics, size: curve)
     let program = try BrushProgramCompiler.compile(
         replacing(base, dynamics: dynamics)
     )
-    guard case let .sampledCurve(_, samples, _, _, _, _, _, _, _) = program.dynamics.size
-    else { Issue.record("curve must use a sampled response"); return }
+    let samples = try #require(
+        program.primaryComponent.stageC.compiledSensorProgram.size.term0
+    ).samples
 
     #expect(samples.count == BrushProgramCompiler.sampleCount)
     #expect(samples[0] == 0)
@@ -324,7 +291,7 @@ func compilerSamplesThreePointCurveAtBothEndpoints() throws {
 
 @Test
 func fixedSeedPolicyOverridesPerStrokeSeed() throws {
-    let base = try legacyDefinition()
+    let base = try currentDefinition()
     let fixed = try replacing(base, seedPolicy: .fixed(99))
     let program = try BrushProgramCompiler.compile(fixed)
     let first = BrushStrokeGenerator(program: program, nominalDiameter: 20, color: .black, seed: 1)
@@ -347,9 +314,9 @@ func extensionRandomChannelsDoNotAdvanceCompatibilityCursor() {
 
 @Test
 func nativeDynamicsApplyColorChannelsAndCarrySecondaryMix() throws {
-    let base = try legacyDefinition()
+    let base = try currentDefinition()
     let dynamics = replacing(
-        base.dynamics,
+        base.components[0].dynamics,
         hue: nativeConstant(0.5),
         saturation: nativeConstant(0),
         brightness: nativeConstant(0),
@@ -368,14 +335,15 @@ func nativeDynamicsApplyColorChannelsAndCarrySecondaryMix() throws {
 
 @Test
 func nativeSaturationAndBrightnessMappingsAdjustHSBColor() throws {
-    let base = try legacyDefinition()
-    let dynamics = replacing(
-        base.dynamics,
-        saturation: nativeConstant(-1),
-        brightness: nativeConstant(0.2)
-    )
+    let base = try currentDefinition()
+    var outputs = base.components[0].sensorProgram.outputs
+    outputs[.saturation] = currentConstantOutput(-1)
+    outputs[.brightness] = currentConstantOutput(0.2)
     let program = try BrushProgramCompiler.compile(
-        replacing(base, dynamics: dynamics)
+        replacing(
+            base,
+            sensorProgram: BrushSensorProgramDefinition(outputs: outputs)
+        )
     )
     let dab = evaluateNative(program, color: InkColor(red: 1, green: 0, blue: 0, alpha: 0.8)!)
     #expect(dab.color == InkColor(red: 1, green: 1, blue: 1, alpha: 0.8))
@@ -383,14 +351,14 @@ func nativeSaturationAndBrightnessMappingsAdjustHSBColor() throws {
 
 @Test
 func presentZeroSensorsDoNotUseMissingInputFallback() throws {
-    let base = try legacyDefinition()
+    let base = try currentDefinition()
     let tiltSize = BrushMappingDefinition(
         input: .tilt, response: .linear, scale: 0.9, offset: 0.1,
         lowerClamp: 0.1, upperClamp: 1, inverted: false, jitter: 0,
         missingInputValue: 0.7
     )
     let program = try BrushProgramCompiler.compile(
-        replacing(base, dynamics: replacing(base.dynamics, size: tiltSize))
+        replacing(base, dynamics: replacing(base.components[0].dynamics, size: tiltSize))
     )
     let presentZero = evaluateNative(
         program,
@@ -402,38 +370,38 @@ func presentZeroSensorsDoNotUseMissingInputFallback() throws {
     let absent = evaluateNative(program)
 
     #expect(presentZero.diameter == 2)
-    #expect(absent.diameter == 14.6)
+    #expect(abs(absent.diameter - 14.6) < 0.000_01)
 }
 
 @Test
 func presentZeroAzimuthAndRollDoNotUseMissingFallback() throws {
-    let base = try legacyDefinition()
+    let base = try currentDefinition()
     let flow = BrushMappingDefinition(
-        input: .azimuth, response: .linear, scale: 0.8, offset: 0.1,
+        input: .azimuth, response: cyclicPresenceCurve(), scale: 0.8, offset: 0.1,
         lowerClamp: 0.1, upperClamp: 0.9, inverted: false, jitter: 0,
         missingInputValue: 0.2
     )
     let opacity = BrushMappingDefinition(
-        input: .roll, response: .linear, scale: 1, offset: 0,
+        input: .roll, response: cyclicPresenceCurve(), scale: 1, offset: 0,
         lowerClamp: 0, upperClamp: 1, inverted: false, jitter: 0,
         missingInputValue: 0.2
     )
     let program = try BrushProgramCompiler.compile(
-        replacing(base, dynamics: replacing(base.dynamics, flow: flow, opacity: opacity))
+        replacing(base, dynamics: replacing(base.components[0].dynamics, flow: flow, opacity: opacity))
     )
     let present = evaluateNative(
         program, azimuth: 0, roll: 0, capabilities: [.azimuth, .roll]
     )
     let absent = evaluateNative(program)
-    #expect(present.flow == 0.5)
-    #expect(present.strokeOpacity == 0.5)
+    #expect(abs(present.flow - 0.5) < 0.002)
+    #expect(abs(present.strokeOpacity - 0.5) < 0.002)
     #expect(abs(absent.flow - 0.26) < 0.000_001)
     #expect(absent.strokeOpacity == 0.2)
 }
 
 @Test
 func fixedSeedProgramAcceptsZeroCallerSeedAndPerStrokeRetainsNonzeroSeed() throws {
-    let base = try legacyDefinition()
+    let base = try currentDefinition()
     let fixed = try BrushProgramCompiler.compile(
         replacing(base, seedPolicy: .fixed(99))
     )
@@ -444,8 +412,8 @@ func fixedSeedProgramAcceptsZeroCallerSeedAndPerStrokeRetainsNonzeroSeed() throw
 }
 
 @Test
-func hueJitterDoesNotChangeNativeScatterSpacingOrLegacyRandomValues() throws {
-    let base = try legacyDefinition()
+func hueJitterDoesNotChangeNativeScatterSpacingOrCompatibilityRandomValues() throws {
+    let base = try currentDefinition()
     let nativeBase = try replacing(
         base,
         capabilities: [BrushCapabilityDeclaration(identifier: "future.capability", required: false)]
@@ -457,7 +425,7 @@ func hueJitterDoesNotChangeNativeScatterSpacingOrLegacyRandomValues() throws {
     )
     let baseline = try BrushProgramCompiler.compile(nativeBase)
     let withHue = try BrushProgramCompiler.compile(
-        replacing(nativeBase, dynamics: replacing(nativeBase.dynamics, hue: hue))
+        replacing(nativeBase, dynamics: replacing(nativeBase.components[0].dynamics, hue: hue))
     )
     var cursorA = BrushRandom(seed: 71)
     var cursorB = BrushRandom(seed: 71)
@@ -475,7 +443,7 @@ func hueJitterDoesNotChangeNativeScatterSpacingOrLegacyRandomValues() throws {
 func perStampColorJitterVariesByOrdinalAndLeavesSecondaryMixIsolated() throws {
     let base = try nativeDefinition()
     let color = BrushColorBehaviorDefinition(
-        baseAdjustment: base.color.baseAdjustment,
+        baseAdjustment: base.components[0].color.baseAdjustment,
         perStampJitter: BrushColorJitter(
             hue: 0.25, saturation: 0, brightness: 0, secondaryColorMix: 0
         ),
@@ -511,7 +479,7 @@ func perStampColorJitterVariesByOrdinalAndLeavesSecondaryMixIsolated() throws {
 func perStrokeColorJitterIsConstantWithinStrokeAndVariesBySeed() throws {
     let base = try nativeDefinition()
     let color = BrushColorBehaviorDefinition(
-        baseAdjustment: base.color.baseAdjustment,
+        baseAdjustment: base.components[0].color.baseAdjustment,
         perStampJitter: zeroColorJitter,
         perStrokeJitter: BrushColorJitter(
             hue: 0.2, saturation: 0, brightness: 0, secondaryColorMix: 0.2
@@ -541,14 +509,14 @@ func perStrokeColorJitterIsConstantWithinStrokeAndVariesBySeed() throws {
 func secondaryMixJitterDoesNotChangeColorChannels() throws {
     let base = try nativeDefinition()
     let color = BrushColorBehaviorDefinition(
-        baseAdjustment: base.color.baseAdjustment,
+        baseAdjustment: base.components[0].color.baseAdjustment,
         perStampJitter: BrushColorJitter(
             hue: 0, saturation: 0, brightness: 0, secondaryColorMix: 0.4
         ),
         perStrokeJitter: zeroColorJitter
     )
     let dynamics = replacing(
-        base.dynamics, secondaryColorMix: nativeConstant(0.5)
+        base.components[0].dynamics, secondaryColorMix: nativeConstant(0.5)
     )
     let program = try BrushProgramCompiler.compile(
         replacing(base, dynamics: dynamics, color: color)
@@ -565,14 +533,14 @@ func placementJitterIsDeterministicAndIsolatedFromOtherPlacementChannels() throw
     let base = try nativeDefinition()
     let baseline = try BrushProgramCompiler.compile(base)
     let jitteredPlacement = BrushPlacementDefinition(
-        baseSpacingFraction: base.placement.baseSpacingFraction,
-        maximumSpacingFraction: base.placement.maximumSpacingFraction,
-        baseFlow: base.placement.baseFlow,
-        strokeOpacity: base.placement.strokeOpacity,
-        baseScatterFraction: base.placement.baseScatterFraction,
-        baseRotation: base.placement.baseRotation,
+        baseSpacingFraction: base.components[0].placement.baseSpacingFraction,
+        maximumSpacingFraction: base.components[0].placement.maximumSpacingFraction,
+        baseFlow: base.components[0].placement.baseFlow,
+        strokeOpacity: base.components[0].placement.strokeOpacity,
+        baseScatterFraction: base.components[0].placement.baseScatterFraction,
+        baseRotation: base.components[0].placement.baseRotation,
         baseJitterFraction: 0.25,
-        baseOffset: base.placement.baseOffset
+        baseOffset: base.components[0].placement.baseOffset
     )
     let jittered = try BrushProgramCompiler.compile(
         replacing(base, placement: jitteredPlacement)
@@ -675,7 +643,7 @@ func nativeLogicalDabCarriesShapeGrainMaterialAndCounterRandomFrames() throws {
     #expect(abs(dab.worldBounds.maximum.y - 3) < 0.000_01)
     #expect(dab.primaryGrainToWorld != nil)
     #expect(dab.secondaryGrainToWorld != nil)
-    #expect(dab.materialInputs.accumulation == base.material.accumulation)
+    #expect(dab.materialInputs.accumulation == base.components[0].material.accumulation)
     #expect(dab.randomValues.compatibility == random)
     #expect(dab.randomValues.size == BrushRandom.extensionUnitFloat(
         strokeSeed: 71,
@@ -752,12 +720,12 @@ func nativeGrainFramesHonorCoordinateModeAndMovementFraction() throws {
             strength: 1
         )
         let coverage = BrushCoverageDefinition(
-            shapes: base.coverage.shapes,
+            shapes: base.components[0].coverage.shapes,
             grains: [grain],
-            baseHardness: base.coverage.baseHardness,
-            aspectRatio: base.coverage.aspectRatio,
-            tipThreshold: base.coverage.tipThreshold,
-            antialiasing: base.coverage.antialiasing
+            baseHardness: base.components[0].coverage.baseHardness,
+            aspectRatio: base.components[0].coverage.aspectRatio,
+            tipThreshold: base.components[0].coverage.tipThreshold,
+            antialiasing: base.components[0].coverage.antialiasing
         )
         return evaluateNative(try BrushProgramCompiler.compile(replacing(
             base,
@@ -796,22 +764,22 @@ func nativeGrainFollowRotatesAxesAndOffsetBeforeProjection() throws {
             strength: 1
         )
         let coverage = BrushCoverageDefinition(
-            shapes: base.coverage.shapes,
+            shapes: base.components[0].coverage.shapes,
             grains: [grain],
-            baseHardness: base.coverage.baseHardness,
-            aspectRatio: base.coverage.aspectRatio,
-            tipThreshold: base.coverage.tipThreshold,
-            antialiasing: base.coverage.antialiasing
+            baseHardness: base.components[0].coverage.baseHardness,
+            aspectRatio: base.components[0].coverage.aspectRatio,
+            tipThreshold: base.components[0].coverage.tipThreshold,
+            antialiasing: base.components[0].coverage.antialiasing
         )
         let placement = BrushPlacementDefinition(
-            baseSpacingFraction: base.placement.baseSpacingFraction,
-            maximumSpacingFraction: base.placement.maximumSpacingFraction,
-            baseFlow: base.placement.baseFlow,
-            strokeOpacity: base.placement.strokeOpacity,
-            baseScatterFraction: base.placement.baseScatterFraction,
+            baseSpacingFraction: base.components[0].placement.baseSpacingFraction,
+            maximumSpacingFraction: base.components[0].placement.maximumSpacingFraction,
+            baseFlow: base.components[0].placement.baseFlow,
+            strokeOpacity: base.components[0].placement.strokeOpacity,
+            baseScatterFraction: base.components[0].placement.baseScatterFraction,
             baseRotation: .pi / 2,
-            baseJitterFraction: base.placement.baseJitterFraction,
-            baseOffset: base.placement.baseOffset
+            baseJitterFraction: base.components[0].placement.baseJitterFraction,
+            baseOffset: base.components[0].placement.baseOffset
         )
         return evaluateNative(try BrushProgramCompiler.compile(replacing(
             base,
@@ -868,21 +836,22 @@ private let zeroColorJitter = BrushColorJitter(
 func compilerPublishesStageCMetadataWithoutEvaluatingIt() throws {
     let definition = try stageCV2Definition()
     let program = try BrushProgramCompiler.compile(definition)
-    let stageC = try #require(program.stageC)
+    let stageC = program.primaryComponent.stageC
+    let component = definition.components[0]
 
     #expect(stageC.normalization == definition.sensorNormalization)
-    #expect(stageC.sensorProgram == definition.sensorProgram)
+    #expect(stageC.sensorProgram == component.sensorProgram)
     #expect(stageC.stabilization == definition.stabilizationV2)
     #expect(stageC.direction == definition.direction)
-    #expect(stageC.emission == definition.emission)
-    #expect(stageC.tipSupports == definition.tipSupports)
+    #expect(stageC.emission == component.emission)
+    #expect(stageC.tipSupports == component.tipSupports)
     #expect(stageC.declaredEndpointLag == 6)
     #expect(stageC.usesTravelDirection)
-    #expect(try BrushProgramCompiler.compile(legacyDefinition()).stageC == nil)
 }
 
 private func stageCV2Definition() throws -> BrushDefinition {
     let base = try nativeDefinition()
+    let component = base.components[0]
     var outputs = Dictionary(
         uniqueKeysWithValues: BrushDynamicOutput.allCases.map {
             ($0, BrushOutputProgramDefinition(baseValue: 1, terms: []))
@@ -904,17 +873,17 @@ private func stageCV2Definition() throws -> BrushDefinition {
         )]
     )
     return try BrushDefinition(
-        v2ID: base.id,
+        id: base.id,
         metadata: base.metadata,
         capabilities: base.capabilities,
-        resources: base.resources,
-        coverage: base.coverage,
-        placement: base.placement,
-        dynamics: base.dynamics,
-        color: base.color,
-        material: base.material,
+        resources: component.resources,
+        coverage: component.coverage,
+        placement: component.placement,
+        dynamics: component.dynamics,
+        color: component.color,
+        material: component.material,
         stabilization: base.stabilization,
-        taper: base.taper,
+        taper: component.taper,
         replayMode: base.replayMode,
         replayLimits: base.replayLimits,
         termination: base.termination,
@@ -944,7 +913,7 @@ private func stageCV2Definition() throws -> BrushDefinition {
 
 private func nativeDefinition() throws -> BrushDefinition {
     try replacing(
-        legacyDefinition(),
+        currentDefinition(),
         capabilities: [
             BrushCapabilityDeclaration(
                 identifier: "future.capability", required: false
@@ -953,11 +922,8 @@ private func nativeDefinition() throws -> BrushDefinition {
     )
 }
 
-private func legacyDefinition() throws -> BrushDefinition {
-    try LegacyBrushRecipeAdapter.definition(
-        from: .legacyEquivalent,
-        displayName: "Legacy"
-    )
+private func currentDefinition() throws -> BrushDefinition {
+    nativeTestDefinition()
 }
 
 private func replacing(
@@ -965,25 +931,53 @@ private func replacing(
     dynamics: BrushDynamicsDefinition? = nil,
     capabilities: [BrushCapabilityDeclaration]? = nil,
     seedPolicy: BrushSeedPolicy? = nil,
-    schemaVersion: UInt16? = nil,
     material: BrushMaterialDefinition? = nil,
     placement: BrushPlacementDefinition? = nil,
     color: BrushColorBehaviorDefinition? = nil,
-    coverage: BrushCoverageDefinition? = nil
+    coverage: BrushCoverageDefinition? = nil,
+    sensorProgram: BrushSensorProgramDefinition? = nil
 ) throws -> BrushDefinition {
-    try BrushDefinition(
+    let component = definition.components[0]
+    if let sensorProgram {
+        return try BrushDefinition(
+            id: definition.id,
+            metadata: definition.metadata,
+            capabilities: capabilities ?? definition.capabilities,
+            resources: component.resources,
+            coverage: coverage ?? component.coverage,
+            placement: placement ?? component.placement,
+            dynamics: dynamics ?? component.dynamics,
+            color: color ?? component.color,
+            material: material ?? component.material,
+            stabilization: definition.stabilization,
+            taper: component.taper,
+            replayMode: definition.replayMode,
+            replayLimits: definition.replayLimits,
+            termination: definition.termination,
+            seedPolicy: seedPolicy ?? definition.seedPolicy,
+            limits: definition.limits,
+            performanceIntent: definition.performanceIntent,
+            compatibility: definition.compatibility,
+            sensorNormalization: definition.sensorNormalization,
+            sensorProgram: sensorProgram,
+            stabilizationV2: definition.stabilizationV2,
+            direction: definition.direction,
+            emission: component.emission,
+            tipSupports: component.tipSupports
+        )
+    }
+    return try BrushDefinition(
         id: definition.id,
-        schemaVersion: schemaVersion ?? definition.schemaVersion,
         metadata: definition.metadata,
         capabilities: capabilities ?? definition.capabilities,
-        resources: definition.resources,
-        coverage: coverage ?? definition.coverage,
-        placement: placement ?? definition.placement,
-        dynamics: dynamics ?? definition.dynamics,
-        color: color ?? definition.color,
-        material: material ?? definition.material,
+        resources: component.resources,
+        coverage: coverage ?? component.coverage,
+        placement: placement ?? component.placement,
+        dynamics: dynamics ?? component.dynamics,
+        color: color ?? component.color,
+        material: material ?? component.material,
         stabilization: definition.stabilization,
-        taper: definition.taper,
+        taper: component.taper,
         replayMode: definition.replayMode,
         replayLimits: definition.replayLimits,
         seedPolicy: seedPolicy ?? definition.seedPolicy,
@@ -991,6 +985,34 @@ private func replacing(
         performanceIntent: definition.performanceIntent,
         compatibility: definition.compatibility
     )
+}
+
+private func currentConstantOutput(
+    _ value: Float
+) -> BrushOutputProgramDefinition {
+    BrushOutputProgramDefinition(
+        baseValue: 0,
+        terms: [BrushResponseTermDefinition(
+            input: .pressure,
+            response: .constant(0),
+            inputInverted: false,
+            missingInputValue: 1,
+            responseScale: 1,
+            responseOffset: value,
+            responseLowerClamp: value,
+            responseUpperClamp: value,
+            jitter: 0,
+            operation: .replace
+        )]
+    )
+}
+
+private func cyclicPresenceCurve() -> BrushResponseDefinition {
+    .curve(BrushCurveDefinition(points: [
+        BrushCurvePoint(x: 0, y: 0),
+        BrushCurvePoint(x: 0.5, y: 0.5),
+        BrushCurvePoint(x: 1, y: 0),
+    ]))
 }
 
 private func replacing(

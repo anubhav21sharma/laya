@@ -2584,22 +2584,6 @@ struct DocumentPaintSurfaceTransactionTests {
             coordinate: coordinate,
             publish: true
         )
-        let fullSurface = RasterRevisionReference(
-            id: published.after.id,
-            pixelSize: published.after.pixelSize,
-            documentPixelSize: published.after.documentPixelSize,
-            regions: published.after.regions,
-            retainedBytes: published.after.retainedBytes,
-            storage: .fullSurfaceBGRA8
-        )
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .restoreReferenceUnavailable) {
-            _ = try fixture.coordinator.prepareRestore(
-                fixture.restoreRequest(
-                    reference: fullSurface
-                )
-            )
-        }
         let forged = RasterRevisionReference(
             id: published.after.id,
             pixelSize: published.after.pixelSize,

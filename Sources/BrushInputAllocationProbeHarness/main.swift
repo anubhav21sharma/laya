@@ -311,6 +311,7 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
     case timedEmitterMissingCursor
     case tipSupportSpacingAllocations(total: UInt64)
     case sensorProgramAllocations(total: UInt64)
+    case cursorDescriptorAllocations(total: UInt64)
     case offMainEstimatedAllocations(total: UInt64, maximum: UInt64)
     case offMainAllocationRegression(String)
     case sparseSamplingAllocationRegression(String)
@@ -363,6 +364,8 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
             "tip support/spacing path allocated \(total) times after warm-up"
         case let .sensorProgramAllocations(total):
             "ordered sensor evaluator allocated \(total) times after warm-up"
+        case let .cursorDescriptorAllocations(total):
+            "brush cursor descriptor allocated \(total) times after warm-up"
         case let .offMainEstimatedAllocations(total, maximum):
             "off-main estimated correction allocated \(total) times; "
                 + "maximum single correction=\(maximum)"
@@ -432,6 +435,8 @@ private struct BrushInputAllocationProbeHarness {
                 try runTipSupportSpacingProbe(probe: probe)
             case "--sensor-program":
                 try runSensorProgramProbe(probe: probe)
+            case "--cursor-descriptor":
+                try runCursorDescriptorProbe(probe: probe)
             case "--stage-d-tiles":
                 try await runStageDTileSurfaceProbe(
                     probe: probe,
@@ -945,11 +950,17 @@ private struct BrushInputAllocationProbeHarness {
         var checksum: UInt64 = 0
         var emittedCount = 0
         for _ in 0..<count {
-            weighted.begin(samples.began) { dab in
+            try consumeStageCGeneratorSample(
+                generator: &weighted,
+                sample: samples.began
+            ) { dab in
                 emittedCount += 1
                 checksum &+= UInt64(dab.rotation.bitPattern)
             }
-            delayed.begin(samples.began) { dab in
+            try consumeStageCGeneratorSample(
+                generator: &delayed,
+                sample: samples.began
+            ) { dab in
                 emittedCount += 1
                 checksum &+= UInt64(dab.position.x.bitPattern)
             }
@@ -976,27 +987,26 @@ private struct BrushInputAllocationProbeHarness {
             )
             let authoritativeBeforePrediction = weighted
             var prediction = weighted
-            let predictionOutcome = try prediction.appendPredictionPrefix(
-                samples.predicted,
-                maximumPathSubdivisionCount: 4_096
+            try consumeStageCGeneratorSample(
+                generator: &prediction,
+                sample: samples.predicted
             ) { dab in
                 emittedCount += 1
                 checksum &+= UInt64(dab.rotation.bitPattern)
                 checksum &+= dab.ordinal
             }
-            precondition(predictionOutcome == .completed)
             precondition(weighted == authoritativeBeforePrediction)
-            try weighted.finish(
-                samples.ended,
-                maximumPathSubdivisionCount: 4_096
+            try consumeStageCGeneratorSample(
+                generator: &weighted,
+                sample: samples.ended
             ) { dab in
                 emittedCount += 1
                 checksum &+= UInt64(dab.rotation.bitPattern)
                 checksum &+= dab.ordinal
             }
-            try delayed.finish(
-                samples.ended,
-                maximumPathSubdivisionCount: 4_096
+            try consumeStageCGeneratorSample(
+                generator: &delayed,
+                sample: samples.ended
             ) { dab in
                 emittedCount += 1
                 checksum &+= UInt64(dab.position.x.bitPattern)
@@ -1015,22 +1025,43 @@ private struct BrushInputAllocationProbeHarness {
         checksum: inout UInt64,
         emittedCount: inout Int
     ) throws {
-        try weighted.append(
-            sample,
-            maximumPathSubdivisionCount: 4_096
+        try consumeStageCGeneratorSample(
+            generator: &weighted,
+            sample: sample
         ) { dab in
             emittedCount += 1
             checksum &+= UInt64(dab.rotation.bitPattern)
             checksum &+= dab.ordinal
         }
-        try delayed.append(
-            sample,
-            maximumPathSubdivisionCount: 4_096
+        try consumeStageCGeneratorSample(
+            generator: &delayed,
+            sample: sample
         ) { dab in
             emittedCount += 1
             checksum &+= UInt64(dab.position.x.bitPattern)
             checksum &+= dab.ordinal
         }
+    }
+
+    @inline(__always)
+    private static func consumeStageCGeneratorSample(
+        generator: inout BrushStrokeGenerator,
+        sample: WorldStrokeSample,
+        emit: (LogicalDab) throws -> Void
+    ) throws {
+        var cursor = try generator.emissionCursor(
+            for: sample,
+            maximumPathSubdivisionCount: 4_096
+        )
+        repeat {
+            _ = try cursor.emitNextPage(emit)
+        } while !cursor.isComplete
+        guard let completed = cursor.completedGenerator else {
+            preconditionFailure(
+                "Completed allocation-probe cursor has no generator"
+            )
+        }
+        generator = completed
     }
 
     private static func makeStageCGeneratorProbeSamples()
@@ -1087,6 +1118,130 @@ private struct BrushInputAllocationProbeHarness {
         )
     }
 
+    private static func makeCurrentProbeBaseDefinition(
+        id: String,
+        replayMode: BrushReplayMode = .appendOnly,
+        replayLimits: BrushReplayLimits? = nil
+    ) throws -> BrushDefinition {
+        func constant(_ value: Float) -> BrushMappingDefinition {
+            BrushMappingDefinition(
+                input: .pressure,
+                response: .constant(value),
+                scale: 1,
+                offset: 0,
+                lowerClamp: value,
+                upperClamp: value,
+                inverted: false,
+                jitter: 0,
+                missingInputValue: 1
+            )
+        }
+        let dynamics = BrushDynamicsDefinition(
+            size: constant(1),
+            flow: constant(1),
+            opacity: constant(1),
+            spacing: constant(1),
+            rotation: constant(0),
+            scatter: constant(1),
+            hardness: constant(1),
+            grain: constant(1),
+            offsetX: constant(0),
+            offsetY: constant(0),
+            hue: constant(0),
+            saturation: constant(0),
+            brightness: constant(0),
+            secondaryColorMix: constant(0),
+            noPressureNeutral: 1,
+            randomization: .none
+        )
+        let termination: BrushTerminationDefinition = switch replayMode {
+        case .appendOnly:
+            .cap
+        case .replayTail:
+            .boundedCorrection(
+                maximumSamples: replayLimits!.maximumSamples,
+                maximumWorldLength: 4_096,
+                maximumDabs: replayLimits!.maximumDabs
+            )
+        }
+        return try BrushDefinition(
+            id: BrushRecipeID(id),
+            metadata: BrushMetadata(displayName: id),
+            capabilities: [],
+            resources: [],
+            coverage: BrushCoverageDefinition(
+                shapes: [BrushShapeLayerDefinition(
+                    shape: .hardRound,
+                    combination: .replace,
+                    scale: 1,
+                    rotation: 0,
+                    offset: .zero
+                )],
+                grains: [],
+                baseHardness: 1,
+                aspectRatio: 1,
+                tipThreshold: 0,
+                antialiasing: true
+            ),
+            placement: BrushPlacementDefinition(
+                baseSpacingFraction: 0.125,
+                maximumSpacingFraction: 0.125,
+                baseFlow: 1,
+                strokeOpacity: 1,
+                baseScatterFraction: 0,
+                baseRotation: 0,
+                baseJitterFraction: 0,
+                baseOffset: .zero
+            ),
+            dynamics: dynamics,
+            color: BrushColorBehaviorDefinition(
+                baseAdjustment: .identity,
+                perStampJitter: BrushColorJitter(
+                    hue: 0,
+                    saturation: 0,
+                    brightness: 0,
+                    secondaryColorMix: 0
+                ),
+                perStrokeJitter: BrushColorJitter(
+                    hue: 0,
+                    saturation: 0,
+                    brightness: 0,
+                    secondaryColorMix: 0
+                )
+            ),
+            material: BrushMaterialDefinition(
+                accumulation: .flow,
+                interaction: .none,
+                edgeTreatment: .none,
+                strength: 1,
+                wetness: 0,
+                bleedRadius: 0,
+                softenPasses: 0,
+                accumulationLimit: 1,
+                interactionParameters: nil
+            ),
+            stabilization: 0,
+            taper: .none,
+            replayMode: replayMode,
+            replayLimits: replayLimits,
+            termination: termination,
+            seedPolicy: .perStroke,
+            limits: BrushDefinitionLimits(
+                minimumDiameter: 0.01,
+                maximumDiameter: 16_384,
+                maximumOpacity: 1,
+                maximumSpacingFraction: 4,
+                maximumResourceDimension: 4_096,
+                maximumResidentBytes: 64 * 1_024 * 1_024
+            ),
+            performanceIntent: .realtime120,
+            compatibility: BrushCompatibilityMetadata(
+                sourceSettingKeys: [],
+                requiredSemanticKeys: []
+            )
+        )
+    }
+
     private static func makeStageCProbeDefinition(
         id: String,
         stabilization: BrushStabilizationDefinition,
@@ -1098,10 +1253,8 @@ private struct BrushInputAllocationProbeHarness {
             timeInterval: nil
         )
     ) throws -> BrushDefinition {
-        let base = try LegacyBrushRecipeAdapter.definition(
-            from: .legacyEquivalent,
-            displayName: id
-        )
+        let base = try makeCurrentProbeBaseDefinition(id: id)
+        let component = base.components[0]
         var outputs: [BrushDynamicOutput: BrushOutputProgramDefinition] = [:]
         for output in BrushDynamicOutput.allCases {
             let baseValue: Float = switch output {
@@ -1133,21 +1286,21 @@ private struct BrushInputAllocationProbeHarness {
                 ]
             )
         }
-        let primaryShape = base.coverage.shapes[0]
+        let primaryShape = component.coverage.shapes[0]
         let coverage: BrushCoverageDefinition
         let tipSupports: [BrushTipSupportDefinition]
         switch footprint {
         case .ellipse:
-            coverage = base.coverage
+            coverage = component.coverage
             tipSupports = [.analyticEllipse]
         case .chisel:
             coverage = BrushCoverageDefinition(
                 shapes: [primaryShape],
-                grains: base.coverage.grains,
-                baseHardness: base.coverage.baseHardness,
+                grains: component.coverage.grains,
+                baseHardness: component.coverage.baseHardness,
                 aspectRatio: 0.2,
-                tipThreshold: base.coverage.tipThreshold,
-                antialiasing: base.coverage.antialiasing
+                tipThreshold: component.coverage.tipThreshold,
+                antialiasing: component.coverage.antialiasing
             )
             tipSupports = [.analyticRectangle]
         case .translatedBounds:
@@ -1159,11 +1312,11 @@ private struct BrushInputAllocationProbeHarness {
                     rotation: .pi / 9,
                     offset: SIMD2(0.6, -0.35)
                 )],
-                grains: base.coverage.grains,
-                baseHardness: base.coverage.baseHardness,
+                grains: component.coverage.grains,
+                baseHardness: component.coverage.baseHardness,
                 aspectRatio: 0.6,
-                tipThreshold: base.coverage.tipThreshold,
-                antialiasing: base.coverage.antialiasing
+                tipThreshold: component.coverage.tipThreshold,
+                antialiasing: component.coverage.antialiasing
             )
             tipSupports = [try .normalizedBounds(
                 minX: -0.7,
@@ -1183,11 +1336,11 @@ private struct BrushInputAllocationProbeHarness {
                         offset: SIMD2(1.4, 0.3)
                     ),
                 ],
-                grains: base.coverage.grains,
-                baseHardness: base.coverage.baseHardness,
+                grains: component.coverage.grains,
+                baseHardness: component.coverage.baseHardness,
                 aspectRatio: 0.7,
-                tipThreshold: base.coverage.tipThreshold,
-                antialiasing: base.coverage.antialiasing
+                tipThreshold: component.coverage.tipThreshold,
+                antialiasing: component.coverage.antialiasing
             )
             tipSupports = [.analyticEllipse, .analyticEllipse]
         }
@@ -1200,27 +1353,27 @@ private struct BrushInputAllocationProbeHarness {
         }
         let replayLimits = BrushRecipePolicy.replayTailLimits
         return try BrushDefinition(
-            v2ID: BrushRecipeID(id),
+            id: BrushRecipeID(id),
             metadata: base.metadata,
             capabilities: capabilities,
-            resources: base.resources,
+            resources: component.resources,
             coverage: coverage,
             placement: BrushPlacementDefinition(
                 baseSpacingFraction: 0.05,
                 maximumSpacingFraction: max(
                     0.05,
-                    base.placement.maximumSpacingFraction
+                    component.placement.maximumSpacingFraction
                 ),
-                baseFlow: base.placement.baseFlow,
-                strokeOpacity: base.placement.strokeOpacity,
+                baseFlow: component.placement.baseFlow,
+                strokeOpacity: component.placement.strokeOpacity,
                 baseScatterFraction: 0,
                 baseRotation: 0,
                 baseJitterFraction: 0,
                 baseOffset: .zero
             ),
-            dynamics: base.dynamics,
-            color: base.color,
-            material: base.material,
+            dynamics: component.dynamics,
+            color: component.color,
+            material: component.material,
             stabilization: base.stabilization,
             taper: .none,
             replayMode: .replayTail,
@@ -1667,11 +1820,152 @@ private struct BrushInputAllocationProbeHarness {
         )
     }
 
-    private static func makeSensorProgramProbe() throws -> BrushProgram {
-        let base = try LegacyBrushRecipeAdapter.definition(
-            from: .legacyEquivalent,
-            displayName: "Sensor Program Allocation Probe"
+    private static func runCursorDescriptorProbe(
+        probe: AllocatorProbe
+    ) throws {
+        let base = try makeCurrentProbeBaseDefinition(
+            id: "Cursor Descriptor Probe"
         )
+        let program = try BrushProgramCompiler.compile(
+            makeCompositeCursorProbeDefinition(from: base)
+        )
+        _ = try runCursorDescriptorUpdates(
+            program: program,
+            startingAt: 0,
+            count: 128
+        )
+
+        probe.arm()
+        let checksum: UInt64
+        do {
+            checksum = try runCursorDescriptorUpdates(
+                program: program,
+                startingAt: 128,
+                count: 1_000_000
+            )
+        } catch {
+            _ = probe.disarm()
+            throw error
+        }
+        let allocations = probe.disarm()
+
+        guard allocations == 0 else {
+            throw ProbeHarnessError.cursorDescriptorAllocations(
+                total: allocations
+            )
+        }
+        print(
+            "ALLOCATOR PROBE CURSOR DESCRIPTOR PASS allocations=0 "
+                + "checksum=\(checksum)"
+        )
+    }
+
+    @inline(never)
+    private static func runCursorDescriptorUpdates(
+        program: BrushProgram,
+        startingAt start: Int,
+        count: Int
+    ) throws -> UInt64 {
+        var checksum: UInt64 = 0
+        for index in start..<(start + count) {
+            let input = try BrushCursorInput(
+                nominalDiameter: 40,
+                pressure: nil,
+                altitude: nil,
+                azimuth: nil,
+                roll: nil,
+                tangentialPressure: nil,
+                direction: Float(index & 255) / 255 * 2 * .pi,
+                deformation: .identity,
+                viewportScale: 2,
+                backingScale: 2
+            )
+            let descriptor = try BrushCursorDescriptor.evaluate(
+                program: program,
+                primaryProfile: BrushCursorTipProfile(
+                    primary: .analyticEllipse
+                ),
+                secondaryProfile: BrushCursorTipProfile(
+                    primary: .analyticRectangle
+                ),
+                input: input
+            )
+            checksum &+= UInt64(descriptor.coreBounds.width.bitPattern)
+            checksum &+= UInt64(descriptor.envelopeBounds.height.bitPattern)
+        }
+        return checksum
+    }
+
+    private static func makeCompositeCursorProbeDefinition(
+        from base: BrushDefinition
+    ) throws -> BrushDefinition {
+        let primary = base.components[0]
+        let secondaryCoverage = BrushCoverageDefinition(
+            shapes: [BrushShapeLayerDefinition(
+                shape: .chisel,
+                combination: .replace,
+                scale: 1,
+                rotation: .pi / 7,
+                offset: .zero
+            )],
+            grains: [],
+            baseHardness: 1,
+            aspectRatio: 0.35,
+            tipThreshold: 0,
+            antialiasing: true
+        )
+        let secondary = BrushComponentDefinition(
+            identifier: BrushComponentIdentifier("cursor-secondary"),
+            ordinal: 1,
+            resources: [],
+            coverage: secondaryCoverage,
+            placement: BrushPlacementDefinition(
+                baseSpacingFraction: max(
+                    0.4,
+                    primary.placement.baseSpacingFraction
+                ),
+                maximumSpacingFraction:
+                    max(0.5, primary.placement.maximumSpacingFraction),
+                baseFlow: primary.placement.baseFlow,
+                strokeOpacity: primary.placement.strokeOpacity,
+                baseScatterFraction: 0,
+                baseRotation: 0,
+                baseJitterFraction: 0,
+                baseOffset: SIMD2(8, -4)
+            ),
+            dynamics: primary.dynamics,
+            color: primary.color,
+            material: primary.material,
+            taper: primary.taper,
+            sensorProgram: primary.sensorProgram,
+            emission: primary.emission,
+            tipSupports: [.analyticRectangle]
+        )
+        return try BrushDefinition(
+            id: base.id,
+            metadata: base.metadata,
+            capabilities: base.capabilities,
+            composition: .orderedSourceOver,
+            components: [primary, secondary],
+            stabilization: base.stabilization,
+            replayMode: .appendOnly,
+            replayLimits: nil,
+            termination: .cap,
+            seedPolicy: base.seedPolicy,
+            limits: base.limits,
+            performanceIntent: .realtime60,
+            compatibility: base.compatibility,
+            sensorNormalization: base.sensorNormalization,
+            stabilizationV2: base.stabilizationV2,
+            direction: base.direction
+        )
+    }
+
+    private static func makeSensorProgramProbe() throws -> BrushProgram {
+        let base = try makeCurrentProbeBaseDefinition(
+            id: "Sensor Program Allocation Probe"
+        )
+        let component = base.components[0]
         var outputs: [BrushDynamicOutput: BrushOutputProgramDefinition] = [:]
         for output in BrushDynamicOutput.allCases {
             let operations: [BrushResponseOperation] = switch output {
@@ -1713,15 +2007,15 @@ private struct BrushInputAllocationProbeHarness {
             )
         }
         let definition = try BrushDefinition(
-            v2ID: BrushRecipeID("probe.stage-c.sensor-program"),
+            id: BrushRecipeID("probe.stage-c.sensor-program"),
             metadata: base.metadata,
             capabilities: base.capabilities,
-            resources: base.resources,
-            coverage: base.coverage,
-            placement: base.placement,
-            dynamics: base.dynamics,
-            color: base.color,
-            material: base.material,
+            resources: component.resources,
+            coverage: component.coverage,
+            placement: component.placement,
+            dynamics: component.dynamics,
+            color: component.color,
+            material: component.material,
             stabilization: base.stabilization,
             taper: .none,
             replayMode: .appendOnly,
@@ -2232,7 +2526,9 @@ private struct BrushInputAllocationProbeHarness {
         let totalSampleCount = 36_000
         let batchSize = 60
         let maximumZeroWorkLeaseCount =
-            (totalSampleCount + batchSize - 1) / batchSize + 1
+            (totalSampleCount + batchSize - 1) / batchSize
+            + BrushRecipePolicy.replayTailLimits.maximumDabs
+            + 1
         let setup = try await makeRendererSetup(
             root: root,
             usesOffMainNativeInk: true
@@ -2302,6 +2598,9 @@ private struct BrushInputAllocationProbeHarness {
               trace.surface.surfaceLeaseHighWater == 1,
               trace.surface.encodedFrameCount > 0,
               trace.surface.encodedInstanceCount > 0,
+              // Every input message may publish one empty acknowledgement.
+              // Finishing bounded replay may additionally publish at most one
+              // continuation per retained dab, followed by the commit.
               trace.zeroWorkLeaseCount <= maximumZeroWorkLeaseCount,
               trace.missedLogicalFrameCount == 0,
               trace.allPreparationAndEncodingOffMain,
@@ -2693,8 +2992,8 @@ private struct BrushInputAllocationProbeHarness {
             renderIdentity: setup.brush.renderIdentity,
             seed: 0xC1_20
         )
-        // Cross both the logical-dab and projected-instance replay-tail
-        // limits so the production settled-prefix transfer performs work.
+        // Cross both logical-dab and projected-instance page limits so the
+        // append-only production settled-prefix transfer performs work.
         let continuationTraceDistance: Float = 2_560
 
         // Exercise every continuation phase once before measuring so arena,
@@ -2798,11 +3097,37 @@ private struct BrushInputAllocationProbeHarness {
         let projectedWork = emittedDabDelta * projectionMultiplicity
         let projectionWorkPages =
             (projectedWork + 4_095) / 4_096
-        // Candidate emission, transient storage and arena commit can each
-        // consume one 512-work page; projection has its own 4,096-instance
-        // ceiling. Sixteen bounds the fixed phase transitions and final ACK.
+        // The composite cursor charges each bounded state-machine step, not
+        // only accepted dabs. Bound the straight fixture's traversal from its
+        // authored component subdivision lengths, then add aggregate dab
+        // storage/commit work and projected-instance pages. This remains a
+        // deterministic input-derived ceiling even when the CPU time slice
+        // yields before a logical-dab page fills.
+        func traversalWork(
+            _ component: BrushComponentProgram
+        ) -> UInt64 {
+            let placement = component.definition.placement
+            let initialSpacing = min(
+                max(
+                    1,
+                    min(8, style.diameter * placement.maximumSpacingFraction)
+                ),
+                max(1, style.diameter * placement.baseSpacingFraction)
+            )
+            let maximumSegmentLength = min(0.5, initialSpacing * 0.2)
+            let subdivisionCount = UInt64(ceil(
+                continuationTraceDistance / maximumSegmentLength
+            ))
+            // A distance-only segment crosses at most path, source setup,
+            // spatial, timed, decision, lifecycle, and two fixed transitions.
+            return subdivisionCount * 8 + 32
+        }
+        let candidateTraversalWork = traversalWork(
+            setup.brush.program.primaryComponent
+        ) + (setup.brush.program.secondaryComponent.map(traversalWork) ?? 0)
         let maximumContinuationEventCount =
-            logicalWorkPages * 3 + projectionWorkPages + 16
+            candidateTraversalWork + emittedDabDelta * 3
+                + projectionWorkPages + 16
 
         probe.arm()
         do {
@@ -2862,7 +3187,8 @@ private struct BrushInputAllocationProbeHarness {
               pageDelta <= maximumContinuationEventCount,
               resumeDelta <= maximumContinuationEventCount,
               settledTransferWork > 0,
-              metricsAfterFinish.phaseHits.isSuperset(of: .fullLifecycle)
+              metricsAfterFinish.phaseHits.isSuperset(of: .candidateLifecycle),
+              !metricsAfterFinish.phaseHits.contains(.retainedProjection)
         else {
             let pageSummary = "\(metricsBefore.pageCount)->"
                 + "\(metricsAfter.pageCount)"
@@ -3066,24 +3392,23 @@ private struct BrushInputAllocationProbeHarness {
                 library: library
             )
         )
-        let definition: BrushDefinition
+        let primaryDefinition: BrushDefinition
         if usesOffMainNativeInk {
-            definition = try makeStageCProbeDefinition(
+            primaryDefinition = try makeStageCProbeDefinition(
                 id: "probe.stage-c.production-weighted",
                 stabilization: .weightedWindow(distance: 8),
                 maximumAngularStep: .pi / 8
             )
         } else {
-            let recipe = try BrushRecipe(
-                id: BrushRecipeID("brush.allocator-probe"),
+            primaryDefinition = try makeCurrentProbeBaseDefinition(
+                id: "brush.allocator-probe",
                 replayMode: .replayTail,
                 replayLimits: BrushRecipePolicy.replayTailLimits
             )
-            definition = try LegacyBrushRecipeAdapter.definition(
-                from: recipe,
-                displayName: recipe.id.rawValue
-            )
         }
+        let definition = try makeCompositeCursorProbeDefinition(
+            from: primaryDefinition
+        )
         let brush = try await compiler.compileAndActivate(
             definition: definition
         )

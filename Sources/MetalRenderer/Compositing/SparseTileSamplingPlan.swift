@@ -1165,6 +1165,22 @@ struct SparseTileSamplingPlanCacheSnapshot: Equatable, Sendable {
     let cachedContentCount: Int
     let activeContentAcquisitionCount: Int
     let pendingRetirementCount: Int
+    let hitCount: UInt64
+    let missCount: UInt64
+
+    init(
+        cachedContentCount: Int,
+        activeContentAcquisitionCount: Int,
+        pendingRetirementCount: Int,
+        hitCount: UInt64 = 0,
+        missCount: UInt64 = 0
+    ) {
+        self.cachedContentCount = cachedContentCount
+        self.activeContentAcquisitionCount = activeContentAcquisitionCount
+        self.pendingRetirementCount = pendingRetirementCount
+        self.hitCount = hitCount
+        self.missCount = missCount
+    }
 }
 
 final class SparseTileSamplingPlanCache: @unchecked Sendable {
@@ -1182,6 +1198,8 @@ final class SparseTileSamplingPlanCache: @unchecked Sendable {
     private var retirements: [SparseTileSlotOwnerID:
         SparseTileLeaseRetirementCoordinator] = [:]
     private var nextSlotOwnerID: UInt64 = 1
+    private var hitCount: UInt64 = 0
+    private var missCount: UInt64 = 0
     private let returnLease: SparseTileLeaseReturner
     private let afterSlotReservation: @Sendable () -> Void
     private let beforePublication: @Sendable () -> Void
@@ -1265,10 +1283,13 @@ final class SparseTileSamplingPlanCache: @unchecked Sendable {
         do {
             cachedBeforeBuild = contents[cacheIdentity]
             if let cachedBeforeBuild {
+                hitCount = Self.saturatingIncrement(hitCount)
                 guard cachedBeforeBuild.sourceFingerprints == sourceFingerprints
                 else {
                     throw SparseTileSamplingPlanError.contentKeyCollision
                 }
+            } else {
+                missCount = Self.saturatingIncrement(missCount)
             }
             reservation = try reserveSlotsLocked(
                 generation: key.documentGeneration,
@@ -1551,8 +1572,14 @@ final class SparseTileSamplingPlanCache: @unchecked Sendable {
         return SparseTileSamplingPlanCacheSnapshot(
             cachedContentCount: contents.count,
             activeContentAcquisitionCount: activeAcquisitionCount,
-            pendingRetirementCount: retirements.count
+            pendingRetirementCount: retirements.count,
+            hitCount: hitCount,
+            missCount: missCount
         )
+    }
+
+    private static func saturatingIncrement(_ value: UInt64) -> UInt64 {
+        value == .max ? .max : value + 1
     }
 
     private func reserveSlotsLocked(

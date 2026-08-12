@@ -5,12 +5,8 @@ import Testing
 @Suite("Synthetic v1 CLI diagnostic")
 struct SyntheticV1DiagnosticTests {
     private let dryJSON =
-        #"{"activation":"supported","adapter":"synthetic-v1","approximated":0,"exact":7,"nativeFeatureVersion":1,"packageRoundTrip":true,"requiredSemanticKeys":[],"resourceResampled":2,"scenario":"dry","sourceSettingCount":9,"unsupported":0}"#
+        #"{"activation":"supported","adapter":"synthetic-v1","approximated":0,"exact":7,"packageRoundTrip":true,"requiredSemanticKeys":[],"resourceResampled":2,"scenario":"dry","sourceSettingCount":9,"unsupported":0}"#
             + "\n"
-    private let wetJSON =
-        #"{"activation":"blocked-required-semantics","adapter":"synthetic-v1","approximated":0,"exact":7,"nativeFeatureVersion":1,"packageRoundTrip":true,"requiredSemanticKeys":["synthetic.v1.wet"],"resourceResampled":2,"scenario":"wet","sourceSettingCount":10,"unsupported":1}"#
-            + "\n"
-
     @Test
     func publicFixtureIsDeterministicAndParseable() throws {
         for includeWet in [false, true] {
@@ -36,21 +32,31 @@ struct SyntheticV1DiagnosticTests {
         }
     }
 
-    @Test(arguments: [
-        (["diagnostic", "synthetic-v1", "dry"], false),
-        (["diagnostic", "synthetic-v1", "wet"], true),
-    ])
-    func commandRunsDeterministically(
-        arguments: [String],
-        includeWet: Bool
-    ) {
+    @Test
+    func dryCommandRunsDeterministically() {
+        let arguments = ["diagnostic", "synthetic-v1", "dry"]
         let first = LayabrushConvertCommandRunner.run(arguments: arguments)
         let second = LayabrushConvertCommandRunner.run(arguments: arguments)
 
         #expect(first == second)
         #expect(first.exitStatus == 0)
         #expect(first.standardError.isEmpty)
-        #expect(first.standardOutput == (includeWet ? wetJSON : dryJSON))
+        #expect(first.standardOutput == dryJSON)
+    }
+
+    @Test
+    func wetCommandReportsTheNativeSchemaThreeMapBoundary() {
+        let arguments = ["diagnostic", "synthetic-v1", "wet"]
+        let first = LayabrushConvertCommandRunner.run(arguments: arguments)
+        let second = LayabrushConvertCommandRunner.run(arguments: arguments)
+
+        #expect(first == second)
+        #expect(first.exitStatus == LayabrushConvertExitStatus.internalFailure)
+        #expect(first.standardOutput.isEmpty)
+        #expect(
+            first.standardError
+                == "layabrush-convert: synthetic-v1 diagnostic failed at map\n"
+        )
     }
 
     @Test(arguments: [
@@ -88,7 +94,12 @@ struct SyntheticV1DiagnosticTests {
         ["probe"],
         ["probe", "--replace", "input"],
         ["inspect", "--output", "output", "input"],
+        ["inspect", "--brush", "id", "input"],
         ["convert", "one", "two"],
+        ["convert", "--brush", "one", "--brush", "two", "input"],
+        ["convert", "--substitutions", "one", "--substitutions", "two", "input"],
+        ["convert", "--brush", "one", "input"],
+        ["convert", "--substitutions", "manifest", "input"],
         ["batch", "--output", "--json", "input"],
         ["batch", "--unknown", "input"],
     ])

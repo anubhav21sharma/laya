@@ -2,6 +2,7 @@ import BrushFormat
 import Foundation
 import Metal
 @testable import MetalRenderer
+@testable import MetalRendererDiagnostics
 import PatternEngine
 import Testing
 

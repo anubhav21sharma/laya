@@ -1,13 +1,40 @@
 import PatternEngine
 
-public enum ProfessionalBrushStatus: Equatable, Sendable {
-    case correctiveRebuildRequired
+public struct ProfessionalBrushStatus: Equatable, Sendable {
+    public let engineIntegrated: Bool
+    public let softwarePerformancePassed: Bool
+    public let manualQualityPassed: Bool
+    public let physicalProfilePassed: Bool
+    public let productAccepted: Bool
+
+    public init(
+        engineIntegrated: Bool,
+        softwarePerformancePassed: Bool,
+        manualQualityPassed: Bool,
+        physicalProfilePassed: Bool,
+        productAccepted: Bool
+    ) {
+        precondition(
+            !productAccepted || (
+                engineIntegrated
+                    && softwarePerformancePassed
+                    && manualQualityPassed
+                    && physicalProfilePassed
+            ),
+            "Product acceptance requires every prerequisite state"
+        )
+        self.engineIntegrated = engineIntegrated
+        self.softwarePerformancePassed = softwarePerformancePassed
+        self.manualQualityPassed = manualQualityPassed
+        self.physicalProfilePassed = physicalProfilePassed
+        self.productAccepted = productAccepted
+    }
 
     public var laboratoryOnlyMessage: String {
-        switch self {
-        case .correctiveRebuildRequired:
-            "Available only in Brush Lab while a corrective rebuild is required."
+        if productAccepted {
+            return "Product accepted."
         }
+        return "Available only in Brush Lab while manual quality and physical profile validation are pending."
     }
 }
 
@@ -38,28 +65,36 @@ public struct ProfessionalBrushEntry: Equatable, Sendable {
 /// Ordered professional preset catalog. Entries are appended only in their
 /// approved family order so persisted identities retain a stable position.
 public enum ProfessionalBrushCatalog {
+    private static let candidateStatus = ProfessionalBrushStatus(
+        engineIntegrated: true,
+        softwarePerformancePassed: true,
+        manualQualityPassed: false,
+        physicalProfilePassed: false,
+        productAccepted: false
+    )
+
     public static let technicalInk = ProfessionalBrushEntry(
         displayName: "Technical Ink",
         definition: ProfessionalBrushDefinitions.technicalInk,
-        status: .correctiveRebuildRequired
+        status: candidateStatus
     )
 
     public static let graphitePencil = ProfessionalBrushEntry(
         displayName: "Graphite Pencil",
         definition: ProfessionalBrushDefinitions.graphitePencil,
-        status: .correctiveRebuildRequired
+        status: candidateStatus
     )
 
     public static let naturalCharcoal = ProfessionalBrushEntry(
         displayName: "Natural Charcoal",
         definition: ProfessionalBrushDefinitions.naturalCharcoal,
-        status: .correctiveRebuildRequired
+        status: candidateStatus
     )
 
     public static let chiselMarker = ProfessionalBrushEntry(
         displayName: "Chisel Marker",
         definition: ProfessionalBrushDefinitions.chiselMarker,
-        status: .correctiveRebuildRequired
+        status: candidateStatus
     )
 
     public static let all = [technicalInk, graphitePencil, naturalCharcoal, chiselMarker]

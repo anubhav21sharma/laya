@@ -49,6 +49,38 @@ public struct BrushRandomValues: Equatable, Sendable {
     )
 }
 
+public enum BrushComponentRandomNamespace {
+    public static func seed(
+        strokeSeed: UInt64,
+        componentOrdinal: UInt8
+    ) -> UInt64 {
+        precondition(strokeSeed != 0, "Brush stroke seed must be nonzero")
+        guard componentOrdinal != 0 else { return strokeSeed }
+        var word = strokeSeed
+            ^ (UInt64(componentOrdinal) &* 0xd1b5_4a32_d192_ed03)
+            ^ 0x6a09_e667_f3bc_c909
+        word = (word ^ (word >> 30)) &* 0xbf58_476d_1ce4_e5b9
+        word = (word ^ (word >> 27)) &* 0x94d0_49bb_1331_11eb
+        let mixed = word ^ (word >> 31)
+        return mixed == 0 ? 0x9e37_79b9_7f4a_7c15 : mixed
+    }
+}
+
+/// Package-scoped fault-injection policy used by production-path evidence.
+/// Product callers always use isolated component ordinals; the shared-primary
+/// case lets the harness prove that an actual generator regression is caught.
+package enum BrushComponentRandomNamespaceMode: Equatable, Sendable {
+    case isolated
+    case sharedPrimary
+
+    func ordinal(for authoredOrdinal: UInt8) -> UInt8 {
+        switch self {
+        case .isolated: authoredOrdinal
+        case .sharedPrimary: 0
+        }
+    }
+}
+
 /// Specified SplitMix64 cursor for one authoritative stroke.
 ///
 /// Every dab consumes exactly seven words in the declaration order used by
@@ -94,8 +126,9 @@ public struct BrushRandom: Equatable, Sendable {
         return copy.nextValues()
     }
 
-    /// Deterministic extension randomness that does not mutate the legacy
-    /// cursor. Each output channel has an independent counter namespace.
+    /// Deterministic extension randomness that does not mutate the seven-word
+    /// compatibility cursor. Each output channel has an independent counter
+    /// namespace.
     public static func extensionUnitFloat(
         strokeSeed: UInt64,
         logicalDabOrdinal: UInt64,

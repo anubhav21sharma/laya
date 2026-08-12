@@ -64,9 +64,10 @@ public enum BrushPackageCodec {
                 from: definitionData,
                 label: "definition"
             )
-        } catch BrushDefinitionValidationError.unsupportedSchema,
-                BrushDefinitionValidationError.unsupportedSchemaVersion {
-            throw BrushPackageError.unsupportedDefinitionSchema
+        } catch let BrushDefinitionValidationError.unsupportedSchemaVersion(
+            schemaVersion
+        ) {
+            throw BrushPackageError.unsupportedDefinitionSchema(schemaVersion)
         } catch is BrushDefinitionValidationError {
             throw BrushPackageError.invalidDefinition
         } catch {
@@ -123,7 +124,6 @@ public enum BrushPackageCodec {
     }
 
     package static func archiveEntries(for package: BrushPackage) throws -> [String: Data] {
-        try BrushPackageValidator.validate(package)
         var entries: [String: Data] = [
             "manifest.json": try encodeJSON(package.manifest, label: "manifest"),
             package.manifest.definitionPath: try encodeJSON(

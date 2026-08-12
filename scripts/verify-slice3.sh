@@ -6,7 +6,7 @@ artifacts="$repo_root/.build/slice3-artifacts"
 scenes="$repo_root/App/PatternSpike/Harness/Scenes"
 derived_data="$repo_root/.build/DerivedData"
 pad_derived_data="$repo_root/.build/DerivedDataPad"
-binary="$derived_data/Build/Products/Debug/PatternSpike.app/Contents/MacOS/PatternSpike"
+binary="$derived_data/Build/Products/Debug/PatternSpikeHarness.app/Contents/MacOS/PatternSpikeHarness"
 git_commit=""
 strict_evidence_log="$repo_root/.build/slice3-strict-evidence.log"
 
@@ -741,7 +741,7 @@ run_gate() {
   fi
   if ! xcodebuild \
     -project App/PatternSpike.xcodeproj \
-    -scheme PatternSpikeMac \
+    -scheme PatternSpikeMacHarness \
     -destination "platform=macOS,arch=$host_arch" \
     -derivedDataPath "$derived_data" \
     build \

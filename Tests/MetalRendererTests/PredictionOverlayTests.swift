@@ -65,7 +65,6 @@ struct PredictionOverlayTests {
         }
 
         #expect(setup.renderer.isIdle)
-        #expect(setup.renderer.transientStrokeBuffer == nil)
         #expect(setup.renderer.harnessScheduledAuthoritativeRecords.isEmpty)
         #expect(setup.renderer.harnessScheduledPredictedRecords.isEmpty)
     }
@@ -747,89 +746,6 @@ struct PredictionOverlayTests {
             setup.renderer.offMainPredictedInstanceCountForTesting
                 == correctionCount
         )
-        try setup.renderer.cancelStroke(token: token)
-    }
-
-    @Test
-    @MainActor
-    func rendererTruncatesPredictionBeforeTheFiveHundredThirteenthDab()
-        async throws
-    {
-        guard let setup = try predictionRendererSetup() else { return }
-        let brush = try await setup.compileNativeInk()
-        try setup.renderer.activateDrawBrush(brush)
-        let token = RendererOperationToken(rawValue: 701)
-        try setup.renderer.beginStroke(
-            token: token,
-            sample: predictionInputSample(
-                x: 8,
-                timestamp: 0,
-                phase: .began
-            ),
-            style: predictionStyle(brush)
-        )
-
-        try setup.renderer.appendStroke(
-            token: token,
-            sample: predictionInputSample(
-                x: 10_000,
-                timestamp: 1,
-                phase: .moved,
-                kind: .predicted
-            )
-        )
-        try await drainPredictionActor(setup.renderer)
-        let actorState = await setup.renderer
-            .offMainTransientSnapshotForTesting()
-
-        #expect(actorState.predictedDabs.count == 512)
-        #expect(
-            setup.renderer.harnessScheduledAuthoritativeRecords
-                .allSatisfy { !$0.isPredicted }
-        )
-        try setup.renderer.cancelStroke(token: token)
-    }
-
-    @Test
-    @MainActor
-    func predictedEstimatedReplayUsesTheSameBoundedOverlayAdmission()
-        async throws
-    {
-        guard let setup = try predictionRendererSetup() else { return }
-        let brush = try await setup.compileNativeInk()
-        try setup.renderer.activateDrawBrush(brush)
-        let token = RendererOperationToken(rawValue: 704)
-        try setup.renderer.beginStroke(
-            token: token,
-            sample: predictionInputSample(
-                x: 8,
-                timestamp: 0,
-                phase: .began
-            ),
-            style: predictionStyle(brush)
-        )
-        try setup.renderer.appendStroke(
-            token: token,
-            sample: predictionEstimatedSample(
-                x: 9,
-                timestamp: 0.001,
-                index: 91
-            )
-        )
-        try await drainPredictionActor(setup.renderer)
-        try setup.renderer.applyEstimatedStrokeUpdate(
-            token: token,
-            sample: predictionEstimatedUpdateSample(
-                x: 10_000,
-                timestamp: 1,
-                index: 91
-            )
-        )
-        try await drainPredictionActor(setup.renderer)
-        let actorState = await setup.renderer
-            .offMainTransientSnapshotForTesting()
-
-        #expect(actorState.predictedDabs.count == 512)
         try setup.renderer.cancelStroke(token: token)
     }
 

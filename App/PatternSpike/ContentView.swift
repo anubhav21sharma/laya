@@ -28,6 +28,20 @@ enum EditorFocusTarget: Hashable {
     case radialReferenceAngle
 }
 
+enum EditorImageExportDisposition: Equatable {
+    case userSelectedDestination
+    case direct(URL)
+}
+
+enum EditorImageExportPolicy {
+    static func disposition(
+        acceptanceDestination: URL?
+    ) -> EditorImageExportDisposition {
+        acceptanceDestination.map(EditorImageExportDisposition.direct)
+            ?? .userSelectedDestination
+    }
+}
+
 @MainActor
 func makeBootstrapEditorSession(
     device: any MTLDevice,
@@ -91,8 +105,9 @@ func makeBootstrapEditorSession(
     let storedID = selectionStore.readSelectedBrushID().map {
         BrushRecipeID($0)
     }
-    let resolvedID = storedID.flatMap(EditorBrushCatalog.resolveSelection)
-        ?? EditorBrushCatalog.defaultDraw.id
+    let resolvedID = try storedID.flatMap {
+        try EditorBrushCatalog.resolveCurrentSelection($0)
+    } ?? EditorBrushCatalog.defaultDraw.id
     let requestedEntry = EditorBrushCatalog.drawEntry(for: resolvedID)
         ?? EditorBrushCatalog.defaultDraw
     let eraser = try await compileDefinition(
@@ -171,8 +186,11 @@ struct ContentView: View {
     @State private var projectIdentity = PatternProjectIdentity.new()
     @State private var fileOperationBusy = false
     @State private var importPresented = false
-    @State private var exportPresented = false
-    @State private var exportURL: URL?
+    @State private var projectExportPresented = false
+    @State private var projectExportURL: URL?
+    @State private var imageExportPresented = false
+    @State private var imageExportURL: URL?
+    @State private var stageDRouteEvidence = StageDAppRouteEvidenceRecorder()
     @State private var pointerCancellationGeneration: UInt = 0
     @FocusState private var focusTarget: EditorFocusTarget?
     #if DEBUG && os(macOS)
@@ -216,13 +234,30 @@ struct ContentView: View {
             handleImportResult($0)
         }
         .fileExporter(
-            isPresented: $exportPresented,
-            item: exportURL,
+            isPresented: $projectExportPresented,
+            item: projectExportURL,
             contentTypes: [.patternProject],
             defaultFilename: defaultProjectFilename
         ) { result in
-            let temporaryURL = exportURL
-            exportURL = nil
+            let temporaryURL = projectExportURL
+            projectExportURL = nil
+            if let temporaryURL {
+                try? FileManager.default.removeItem(
+                    at: temporaryURL.deletingLastPathComponent()
+                )
+            }
+            if case let .failure(error) = result {
+                fileErrorMessage = error.localizedDescription
+            }
+        }
+        .fileExporter(
+            isPresented: $imageExportPresented,
+            item: imageExportURL,
+            contentTypes: [.png],
+            defaultFilename: "Pattern.png"
+        ) { result in
+            let temporaryURL = imageExportURL
+            imageExportURL = nil
             if let temporaryURL {
                 try? FileManager.default.removeItem(
                     at: temporaryURL.deletingLastPathComponent()
@@ -267,6 +302,10 @@ struct ContentView: View {
                 saveProject: {
                     beginSave(controller)
                 },
+                exportImage: {
+                    beginImageExport(controller)
+                },
+                imageExportEnabled: true,
                 fileOperationsEnabled: !fileOperationBusy,
                 reportError: { error in
                     fileErrorMessage = error.localizedDescription
@@ -347,6 +386,7 @@ struct ContentView: View {
             handleKeyPress(press, controller: controller)
         }
         .onAppear {
+            stageDRouteEvidence.bind(controller)
             requestEditorFocus()
             controller.onError = {
                 runtimeError = $0
@@ -362,6 +402,7 @@ struct ContentView: View {
             #endif
         }
         .onDisappear {
+            stageDRouteEvidence.unbind(controller)
             cancelCurrentInteraction(controller)
             controller.onError = nil
             controller.renderer.onError = nil
@@ -415,6 +456,10 @@ struct ContentView: View {
 
     private func beginOpen() {
         guard !fileOperationBusy else { return }
+        if let url = stageDRouteEvidence.projectURL {
+            openProject(at: url, securityScoped: false)
+            return
+        }
         importPresented = true
     }
 
@@ -433,37 +478,57 @@ struct ContentView: View {
                         forInfoDictionaryKey: "CFBundleShortVersionString"
                     ) as? String ?? "0.1.0"
                 )
+                let requestedDestination = stageDRouteEvidence.projectURL
                 let filename = defaultProjectFilename
-                let temporaryURL = try await Task.detached(
+                let writtenURL = try await Task.detached(
                     priority: .utility
                 ) {
-                    let directory = FileManager.default.temporaryDirectory
-                        .appendingPathComponent(
-                            UUID().uuidString,
-                            isDirectory: true
+                    let directory: URL
+                    let destination: URL
+                    let createdTemporaryDirectory: Bool
+                    if let requested = requestedDestination {
+                        directory = requested.deletingLastPathComponent()
+                        createdTemporaryDirectory = false
+                        try FileManager.default.createDirectory(
+                            at: directory,
+                            withIntermediateDirectories: true
                         )
-                    try FileManager.default.createDirectory(
-                        at: directory,
-                        withIntermediateDirectories: false
-                    )
-                    let destination = directory.appendingPathComponent(
-                        filename,
-                        isDirectory: false
-                    )
+                        destination = requested
+                        try? FileManager.default.removeItem(at: destination)
+                    } else {
+                        createdTemporaryDirectory = true
+                        directory = FileManager.default.temporaryDirectory
+                            .appendingPathComponent(
+                                UUID().uuidString,
+                                isDirectory: true
+                            )
+                        try FileManager.default.createDirectory(
+                            at: directory,
+                            withIntermediateDirectories: false
+                        )
+                        destination = directory.appendingPathComponent(
+                            filename,
+                            isDirectory: false
+                        )
+                    }
                     do {
                         try PatternProjectPackageCodec.save(
-                        metadata: captured.metadata,
+                            metadata: captured.metadata,
                             tilePayloadProvider: captured,
                             to: destination
                         )
                         return destination
                     } catch {
-                        try? FileManager.default.removeItem(at: directory)
+                        if createdTemporaryDirectory {
+                            try? FileManager.default.removeItem(at: directory)
+                        }
                         throw error
                     }
                 }.value
-                exportURL = temporaryURL
-                exportPresented = true
+                if requestedDestination == nil {
+                    projectExportURL = writtenURL
+                    projectExportPresented = true
+                }
             } catch {
                 fileErrorMessage = error.localizedDescription
             }
@@ -480,63 +545,136 @@ struct ContentView: View {
             fileErrorMessage = error.localizedDescription
         case let .success(urls):
             guard let url = urls.first else { return }
-            fileOperationBusy = true
-            fileErrorMessage = nil
-            Task {
-                do {
-                    let decoded = try await Task.detached(
-                        priority: .utility
-                    ) {
-                        let accessed =
-                            url.startAccessingSecurityScopedResource()
-                        defer {
-                            if accessed {
-                                url.stopAccessingSecurityScopedResource()
-                            }
+            openProject(at: url, securityScoped: true)
+        }
+    }
+
+    private func openProject(
+        at url: URL,
+        securityScoped: Bool
+    ) {
+        guard !fileOperationBusy else { return }
+        fileOperationBusy = true
+        fileErrorMessage = nil
+        Task {
+            do {
+                let decoded = try await Task.detached(
+                    priority: .utility
+                ) {
+                    let accessed = securityScoped
+                        && url.startAccessingSecurityScopedResource()
+                    defer {
+                        if accessed {
+                            url.stopAccessingSecurityScopedResource()
                         }
-                        return try PatternProjectPackageCodec.open(at: url)
-                    }.value
-                    guard case let .ready(current) = state else {
-                        throw PatternProjectBridgeError
-                            .incompatibleSurface
                     }
-                    let identity = try PatternProjectBridge.identity(
-                        from: decoded
-                    )
-                    let renderer = try await PatternProjectBridge.makeRenderer(
-                        from: decoded,
-                        device: current.renderer.device,
-                        library: current.renderer.library,
-                        drawableSize:
-                            current.renderer.viewport.drawableSize
-                    )
-                    let replacement = try current.replacementSession(
-                        renderer: renderer
-                    )
-                    #if DEBUG && os(macOS)
-                    if debugHUDVisible {
-                        updateDebugPerformanceSampling(
-                            current,
-                            visible: false
-                        )
-                    }
-                    #endif
-                    projectIdentity = identity
-                    state = .ready(replacement)
-                    #if DEBUG && os(macOS)
-                    if debugHUDVisible {
-                        updateDebugPerformanceSampling(
-                            replacement,
-                            visible: true
-                        )
-                    }
-                    #endif
-                    requestEditorFocus()
-                } catch {
-                    fileErrorMessage = error.localizedDescription
+                    return try PatternProjectPackageCodec.open(at: url)
+                }.value
+                guard case let .ready(current) = state else {
+                    throw PatternProjectBridgeError
+                        .incompatibleSurface
                 }
-                fileOperationBusy = false
+                let identity = try PatternProjectBridge.identity(
+                    from: decoded
+                )
+                let renderer = try await PatternProjectBridge.makeRenderer(
+                    from: decoded,
+                    device: current.renderer.device,
+                    library: current.renderer.library,
+                    drawableSize:
+                        current.renderer.viewport.drawableSize
+                )
+                let replacement = try current.replacementSession(
+                    renderer: renderer
+                )
+                #if DEBUG && os(macOS)
+                if debugHUDVisible {
+                    updateDebugPerformanceSampling(
+                        current,
+                        visible: false
+                    )
+                }
+                #endif
+                projectIdentity = identity
+                stageDRouteEvidence.unbind(current)
+                stageDRouteEvidence.bind(replacement)
+                state = .ready(replacement)
+                #if DEBUG && os(macOS)
+                if debugHUDVisible {
+                    updateDebugPerformanceSampling(
+                        replacement,
+                        visible: true
+                    )
+                }
+                #endif
+                requestEditorFocus()
+            } catch {
+                fileErrorMessage = error.localizedDescription
             }
+            fileOperationBusy = false
+        }
+    }
+
+    private func beginImageExport(
+        _ controller: EditorSessionController
+    ) {
+        guard !fileOperationBusy else { return }
+        let disposition = EditorImageExportPolicy.disposition(
+            acceptanceDestination: stageDRouteEvidence.exportURL
+        )
+        fileOperationBusy = true
+        fileErrorMessage = nil
+        Task {
+            do {
+                let output = try await controller.renderer
+                    .exportFlattenedScene(
+                        pixelSize: controller.model.pixelSize,
+                        transparentBackground: true
+                    )
+                let written = try await Task.detached(priority: .utility) {
+                    let destination: URL
+                    let presentsExporter: Bool
+                    switch disposition {
+                    case let .direct(requested):
+                        destination = requested
+                        presentsExporter = false
+                    case .userSelectedDestination:
+                        let temporary = FileManager.default.temporaryDirectory
+                            .appendingPathComponent(
+                                UUID().uuidString,
+                                isDirectory: true
+                            )
+                        try FileManager.default.createDirectory(
+                            at: temporary,
+                            withIntermediateDirectories: false
+                        )
+                        destination = temporary.appendingPathComponent(
+                            "Pattern.png",
+                            isDirectory: false
+                        )
+                        presentsExporter = true
+                    }
+                    let directory = destination.deletingLastPathComponent()
+                    try FileManager.default.createDirectory(
+                        at: directory,
+                        withIntermediateDirectories: true
+                    )
+                    try? FileManager.default.removeItem(at: destination)
+                    try EncodedPNGWriter.writeBGRA(
+                        output.bgra8Bytes,
+                        pixelSize: output.pixelSize,
+                        to: destination
+                    )
+                    return (destination, presentsExporter)
+                }.value
+                if written.1 {
+                    imageExportURL = written.0
+                    imageExportPresented = true
+                }
+            } catch {
+                fileErrorMessage = error.localizedDescription
+            }
+            fileOperationBusy = false
         }
     }
 
@@ -628,6 +766,14 @@ struct ContentView: View {
         debugPerformanceLoggingActive = true
         if startsNewSession {
             monitor.reset()
+            Task { @MainActor in
+                let evidence = await controller.renderer
+                    .stageDAcceptanceEvidence()
+                guard debugPerformanceControllerID == controllerID else {
+                    return
+                }
+                monitor.recordPaintEvidence(evidence)
+            }
             controller.renderer.onStrokeRuntimeSnapshot = { runtime in
                 monitor.recordStrokeRuntimeSnapshot(runtime)
             }
@@ -671,6 +817,14 @@ struct ContentView: View {
                 deposition: controller.renderer
                     .brushLabDiagnosticSnapshot.deposition
             )
+            Task { @MainActor in
+                let evidence = await controller.renderer
+                    .stageDAcceptanceEvidence()
+                guard debugPerformanceControllerID == controllerID else {
+                    return
+                }
+                monitor.recordPaintEvidence(evidence)
+            }
         }
         controller.renderer.onInteractiveFramePresented = {
             timestamp,

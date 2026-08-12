@@ -1,5 +1,11 @@
 # Stage D Color And Sparse Paint Surfaces Implementation Plan
 
+**Execution status (2026-08-12):** Tasks 0 through 7 and the non-UI portions of
+Task 8 are complete. Debug/Release/simulator builds, sustained probes, direct
+production-app evidence, and the hosted non-XCTest route are green. The two
+Xcode-hosted `XCUIApplication` checklist items remain pending while a fresh
+automation authorization request is raised after source-control closeout.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use
@@ -167,24 +173,24 @@ wiring changes:
   executable inventory of every full-canvas paint allocation that Task 6 must
   remove.
 
-- [ ] Add a source/runtime structure gate that inventories every baseline
+- [x] Add a source/runtime structure gate that inventories every baseline
   full-canvas paint allocation and encoded-BGRA deposition route, regardless
   of the concrete type or pixel format. Keep an exact BGRA8 allowlist for
   drawable, export/interchange, capture, and diagnostics. Task 5 proves its
   opt-in tiled seam without changing this production inventory; Task 6 removes
   the legacy routes and inverts the gate.
-- [ ] Add fixtures for empty, translucent, low-flow repeated buildup, erase,
+- [x] Add fixtures for empty, translucent, low-flow repeated buildup, erase,
   periodic seam, and radial pages. Record encoded input bytes and independent
   expected linear reference values; do not bless current blended pixels as
   color truth.
-- [ ] Freeze deterministic schema-4 decode/re-encode behavior and add early
+- [x] Freeze deterministic schema-4 decode/re-encode behavior and add early
   rejection fixtures for schemas 1, 2, 3, and an unknown future version. Delete
   migration fixtures once the current-only decoder lands.
-- [ ] Enumerate the twelve lifecycle transitions above in one table-driven test
+- [x] Enumerate the twelve lifecycle transitions above in one table-driven test
   so every later task adds its new assertions to a named row rather than
   creating a second lifecycle owner.
-- [ ] Run `swift test --filter 'StageDBaselineContractTests|StageDProjectBaselineTests|StageCAcceptance'`.
-- [ ] Commit as `test(raster): freeze stage D contracts`.
+- [x] Run `swift test --filter 'StageDBaselineContractTests|StageDProjectBaselineTests|StageCAcceptance'`.
+- [x] Commit as `test(raster): freeze stage D contracts`.
 
 ### Task 1: Add Typed Linear-Light Color Semantics
 
@@ -216,29 +222,29 @@ wiring changes:
   premultiplies or linearizes UI values.
 - Does not change active production paint textures or display in this task.
 
-- [ ] Write pure RED vectors for black/white, both transfer breakpoints,
+- [x] Write pure RED vectors for black/white, both transfer breakpoints,
   transparent nonzero RGB, alpha 0/0.5/1, 50% source-over, destination-out,
   1/8/64 low-flow buildup, and encoded round trip. Require alpha to remain
   unchanged and RGB round-trip error at most `1 / 255`.
-- [ ] Write a Metal differential RED that renders typed half-float values and
+- [x] Write a Metal differential RED that renders typed half-float values and
   requires absolute linear-channel error at most `2e-3` for conversion,
   source-over, buildup, and erase.
-- [ ] Implement transfer and premultiplication once in `DocumentColor.swift`;
+- [x] Implement transfer and premultiplication once in `DocumentColor.swift`;
   shader helpers must use the same constants but not call UI/CoreGraphics APIs.
-- [ ] Audit `EditorTopBar`'s SwiftUI/AppKit/UIKit `Color` conversion and add an
+- [x] Audit `EditorTopBar`'s SwiftUI/AppKit/UIKit `Color` conversion and add an
   app test proving arbitrary source color spaces become bounded encoded sRGB,
   alpha is preserved, and the UI boundary performs no gamma decode or
   premultiplication. Add the new test file to the explicit Package source list.
-- [ ] Add a tested packing conversion API that Task 6 can call, but leave the
+- [x] Add a tested packing conversion API that Task 6 can call, but leave the
   active `DepositionStampInstance` path byte-identical in this task. Converting
   instance color before the paint/display surface switch would create an
   invalid mixed encoded/linear production state. A route-contract test pins
   UI encoded input -> exactly one Task 1 conversion -> linear-premultiplied
   shader payload; Task 6 activates that route atomically.
-- [ ] Add negative tests that fail on double premultiplication, gamma-encoded
+- [x] Add negative tests that fail on double premultiplication, gamma-encoded
   alpha, encoded-space source-over, and double display encode.
-- [ ] Run `swift test --filter 'DocumentColorTests|DocumentColorPipelineTests|DepositionStampInstanceTests|DepositionShaderSourceTests'`.
-- [ ] Commit as `feat(color): define linear paint contract`.
+- [x] Run `swift test --filter 'DocumentColorTests|DocumentColorPipelineTests|DepositionStampInstanceTests|DepositionShaderSourceTests'`.
+- [x] Commit as `feat(color): define linear paint contract`.
 
 ### Task 2: Build The Sparse Tile And Residency Core
 
@@ -268,22 +274,22 @@ wiring changes:
   enumeration, backing snapshots, and memory-pressure eviction.
 - Does not route production rendering through this store yet.
 
-- [ ] Write RED tests proving one dab on a 4096 × 4096 surface allocates only
+- [x] Write RED tests proving one dab on a 4096 × 4096 surface allocates only
   intersecting tiles, an empty surface allocates zero, and clipped edge tiles
   retain 256 × 256 physical storage.
-- [ ] Add exact tile-coordinate/bounds tests for negative/out-of-range inputs,
+- [x] Add exact tile-coordinate/bounds tests for negative/out-of-range inputs,
   a dab crossing two tiles, and a dab/eraser crossing four corners including
   its one-pixel antialias halo.
-- [ ] Add deterministic LRU, every pin reason, nested lease, stale generation,
+- [x] Add deterministic LRU, every pin reason, nested lease, stale generation,
   budget exhaustion, memory pressure, backing-snapshot, and rollback tests.
-- [ ] Implement the required budget formula with overflow-checked arithmetic;
+- [x] Implement the required budget formula with overflow-checked arithmetic;
   tests cover zero/nonzero device recommendations and macOS/iOS fallbacks.
-- [ ] Add allocation-failure injection at every multi-tile reserve index and
+- [x] Add allocation-failure injection at every multi-tile reserve index and
   assert identical store identity, tile set, bytes, LRU order, and revisions.
-- [ ] Add an accelerated residency trace with flat resident bytes, bounded tile
+- [x] Add an accelerated residency trace with flat resident bytes, bounded tile
   count, and no per-frame growth after warmup.
-- [ ] Run `swift test --filter 'PaintTileDescriptorTests|PaintTileResidencyTests|TiledRasterSurfaceTests'`.
-- [ ] Commit as `feat(raster): add bounded sparse tile store`.
+- [x] Run `swift test --filter 'PaintTileDescriptorTests|PaintTileResidencyTests|TiledRasterSurfaceTests'`.
+- [x] Commit as `feat(raster): add bounded sparse tile store`.
 
 ### Task 3: Add Layer Ownership And Project Schema V4
 
@@ -336,33 +342,33 @@ wiring changes:
   separately requires the surface size to equal the compiled document's exact
   plain/periodic/radial storage geometry.
 
-- [ ] Write LayerStack RED tests for all operations, maximum count, duplicate
+- [x] Write LayerStack RED tests for all operations, maximum count, duplicate
   IDs, invalid opacity/name/order, active deletion fallback, and locked active
   mutation rejection.
-- [ ] Write history RED tests proving reorder and active-layer changes do not
+- [x] Write history RED tests proving reorder and active-layer changes do not
   retarget undo/redo. Prove delete/undo restores descriptor, order, active
   fallback, and exact tile revision; a genuinely missing target or retained
   deletion revision fails before mutation.
-- [ ] Add controller RED tests for command creation, draw/erase/clear/resize
+- [x] Add controller RED tests for command creation, draw/erase/clear/resize
   completion, undo, redo, reorder, deleted-target atomic failure, and history
   cursor preservation when renderer restore fails.
-- [ ] Write v4 wire RED tests for deterministic round trip and each malformed
+- [x] Write v4 wire RED tests for deterministic round trip and each malformed
   tile field. Include empty-surface revision, mixed tile revisions, physical-
   size/compiled-geometry mismatch, archive-wide decoded-byte limits, and path-
   collision tests.
-- [ ] Before Task 6 starts, correct the existing 4,096-only manifest bound and
+- [x] Before Task 6 starts, correct the existing 4,096-only manifest bound and
   run save/decode/save fixtures at the maximum accepted plain/periodic size and
   a compiled radial layout whose atlas dimension exceeds 4,096 and is at most
   16,384. Require identical physical size, surface revision, tile UUIDs,
   payload bytes, and semantic hashes; malformed oversized or noncompiled
   dimensions fail before payload materialization.
-- [ ] Add typed early-rejection fixtures for native schemas 1, 2, 3, and an
+- [x] Add typed early-rejection fixtures for native schemas 1, 2, 3, and an
   unknown future schema; delete successful migration fixtures and migration
   metadata. Current schema-4 archives still enforce the eight-layer bound.
-- [ ] Keep PNG as encoded-sRGB import/export only. The v4 native tile payload is
+- [x] Keep PNG as encoded-sRGB import/export only. The v4 native tile payload is
   lossless little-endian RGBA16F and is not disguised as PNG.
-- [ ] Run `swift test --filter 'LayerStackTests|DocumentHistoryTests|PatternProjectMetadataCodecTests|PatternPaintTileCodecTests|PatternProjectArchiveTests'`.
-- [ ] Commit as `feat(document): add layered tile schema`.
+- [x] Run `swift test --filter 'LayerStackTests|DocumentHistoryTests|PatternProjectMetadataCodecTests|PatternPaintTileCodecTests|PatternProjectArchiveTests'`.
+- [x] Commit as `feat(document): add layered tile schema`.
 
 ### Task 4: Make Raster Revisions Tile-Transactional
 
@@ -397,21 +403,21 @@ wiring changes:
   Task 6 replacement is ready. It is not a supported compatibility mode; Task 6
   deletes it and its tests immediately after the new authority is proven.
 
-- [ ] Write RED tests for 1/2/4-tile capture/restore, empty-before, erase-to-
+- [x] Write RED tests for 1/2/4-tile capture/restore, empty-before, erase-to-
   empty, stale token, wrong layer/generation/format/coordinate, duplicate
   finalize, release while in flight, and byte-budget overflow.
-- [ ] Add failure injection before each buffer allocation, each tile capture,
+- [x] Add failure injection before each buffer allocation, each tile capture,
   command encoding, and completion. Assert no published partial pair and exact
   reusable store state.
-- [ ] Add install-lease RED tests for release/prune while install is in flight,
+- [x] Add install-lease RED tests for release/prune while install is in flight,
   wrong token/layer/generation, duplicate finish, failed destination upload,
   and immediate retry. Retained bytes remain pinned through GPU completion and
   return to the exact pre-install accounting on every outcome.
-- [ ] Prove one stroke spanning many dirty rectangles but the same tile captures
+- [x] Prove one stroke spanning many dirty rectangles but the same tile captures
   that tile once, and that retained bytes equal aligned RGBA16F tile slices.
-- [ ] Add reorder regression using the layer-bound history command from Task 3.
-- [ ] Run `swift test --filter 'TiledRasterRevisionStoreTests|RasterRevisionStoreTests|DocumentHistoryTests'`.
-- [ ] Commit as `refactor(history): snapshot sparse paint tiles`.
+- [x] Add reorder regression using the layer-bound history command from Task 3.
+- [x] Run `swift test --filter 'TiledRasterRevisionStoreTests|RasterRevisionStoreTests|DocumentHistoryTests'`.
+- [x] Commit as `refactor(history): snapshot sparse paint tiles`.
 
 ### Task 5: Prepare Off-Main Tiled Stroke Surfaces
 
@@ -482,42 +488,42 @@ wiring changes:
   no full-canvas paint allocation, while the legacy inventory remains frozen
   until Task 6 removes and inverts it.
 
-- [ ] First write pure partition RED tests for empty, one-tile, seam, corner,
+- [x] First write pure partition RED tests for empty, one-tile, seam, corner,
   deduplication, row-major ordering, long diagonal, clipped support, radial
   logical-page-to-atlas mapping, missing radial page, and checked tile-reference
   overflow. These tests must not require a Metal device.
-- [ ] Then write resource/encoder RED tests proving an untouched 4096 canvas
+- [x] Then write resource/encoder RED tests proving an untouched 4096 canvas
   owns zero tiles, one dab allocates only intersecting tiles, no full-canvas
   texture exists in the tiled backend, and an RGBA16F pipeline binding is used.
-- [ ] Add authoritative append and multi-frame tests proving each actual ordinal
+- [x] Add authoritative append and multi-frame tests proving each actual ordinal
   deposits once per required tile, prior immutable chunks remain reusable,
   per-frame binding-copy work is bounded by the changed chunks rather than total
   stroke tiles, and exact ACK returns every frame pin.
-- [ ] Add shorter, longer, overlapping, multi-page, and empty prediction
+- [x] Add shorter, longer, overlapping, multi-page, and empty prediction
   replacement tests. Prediction enabled/disabled must produce identical
   authoritative candidate tile bytes, and replacement may clear only its prior
   prediction tiles.
-- [ ] Inject failure before tile allocation, partition/reference publication,
+- [x] Inject failure before tile allocation, partition/reference publication,
   command encoding, completion, and lease publication. Cover late completion,
   stale/wrong generation-token-layer ACK, cancel with Main ownership, deferred
   namespace/store retirement, and immediate next-stroke reuse; no partial
   footprint may publish and no borrowed-store entry may outlive final retirement.
-- [ ] At minimum and maximum radial ray counts, preflight projected-image count,
+- [x] At minimum and maximum radial ray counts, preflight projected-image count,
   tile-record references, page slots, binding chunks, upload bytes, and checked
   arithmetic before reserve. Maximum symmetry must either fit the declared
   capacities or fail typed without any store/GPU mutation.
-- [ ] Install the tiled backend only through a scheduler test seam and exercise
+- [x] Install the tiled backend only through a scheduler test seam and exercise
   begin, authoritative append, prediction, estimated replacement, finish,
   cancel, failure, radial pages, and immediate reuse. Run the unchanged Stage C
   lifecycle against the legacy production backend to prove no early switch.
-- [ ] Extend the release allocation probe with explicit warmed
+- [x] Extend the release allocation probe with explicit warmed
   `surfaceTilePartition` and `surfaceTileLease` stages. Prewarm maximum bounded
   storage before arming; application input, partition, lease bookkeeping, ACK,
   cancel, and reuse remain zero-allocation. Report Metal driver allocation
   separately instead of hiding it in application counts.
-- [ ] Run `swift test --filter 'StageDBaselineContractTests|StrokeTileSurfaceEncoderTests|PredictionOverlayTests|StrokeFrameSchedulerTests|StageCAcceptanceLifecycleTests'` and
+- [x] Run `swift test --filter 'StageDBaselineContractTests|StrokeTileSurfaceEncoderTests|PredictionOverlayTests|StrokeFrameSchedulerTests|StageCAcceptanceLifecycleTests'` and
   `scripts/run-brush-input-allocation-probe.sh all`.
-- [ ] Commit as `refactor(render): prepare sparse stroke surfaces`.
+- [x] Commit as `refactor(render): prepare sparse stroke surfaces`.
 
 ### Task 6: Atomically Switch Production Paint To Linear Sparse Tiles
 
@@ -638,48 +644,48 @@ wiring changes:
   are deleted in the same commit. BGRA8 remains only at the exact Task 0
   allowlisted boundaries.
 
-- [ ] Satisfy the Task 4 dependency before production edits: add RED
+- [x] Satisfy the Task 4 dependency before production edits: add RED
   install-lease tests and make retained revision payloads impossible to
   release/prune during destination
   upload, and rerun `TiledRasterRevisionStoreTests`. Task 6 may not compensate
   for a weaker revision-store contract with caller timing assumptions.
-- [ ] Satisfy the Task 3 wire dependency before production edits: land physical-
+- [x] Satisfy the Task 3 wire dependency before production edits: land physical-
   geometry validation, 16,384-bounded radial manifests, manifest-level surface
   revisions, and maximum-layout deterministic round trips. Task 6 must not add
   a second interpretation of v4 `pixelSize`.
-- [ ] Write pure RED tests for the shared registry and physical geometry:
+- [x] Write pure RED tests for the shared registry and physical geometry:
   arbitrary stable layer IDs, one common byte budget, no hidden independent
   stores, plain/periodic/radial storage dimensions, maximum radial layout,
   candidate swap, stale generation, 8-byte radial resident accounting, minimum/
   maximum-ray workspace preflight, and overflow before allocation.
-- [ ] Write CPU sparse-sampler RED tests for missing/clear tiles, clipped edges,
+- [x] Write CPU sparse-sampler RED tests for missing/clear tiles, clipped edges,
   four-neighbor bilinear interpolation, all four tile-corner combinations,
   negative and maximum periodic wrap, radial page/atlas resolution, immutable
   plan identity, deterministic batching, Tier-2/fallback equivalence, and
   cache invalidation only on a dependency change.
-- [ ] Add offscreen Metal differentials for the same sampling cases. Assert
+- [x] Add offscreen Metal differentials for the same sampling cases. Assert
   absolute linear-channel error at most `2e-3`, transparent missing entries,
   no seam discontinuity above that tolerance, and identical Tier-2/fallback
   output. Add behavioral pass-count and allocation evidence rejecting per-tile
   fullscreen passes; do not use a brittle source-text scanner.
-- [ ] Add encoded-premultiplied import/export vectors for alpha 0, 0.5, and 1,
+- [x] Add encoded-premultiplied import/export vectors for alpha 0, 0.5, and 1,
   non-gray translucent edges, low channel values, row padding, and round trip.
   Require at most one encoded channel of PNG error and tests that fail for
   straight-alpha packing, encoded-space blend, double encode, or encoding alpha.
-- [ ] Add opaque old-path versus tiled geometry/support differentials as a
+- [x] Add opaque old-path versus tiled geometry/support differentials as a
   temporary cutover oracle, then delete both the old renderer and those
   compatibility-only differentials in this task. Activate RGBA16F pipeline
   validation, the typed
   stamp packer, shared document store, sparse sampling plans, Task 5 leases,
   Task 4 install leases, and transactional clear/restore/resize/import as one
   production change.
-- [ ] Exercise the generic one-layer route through all twelve lifecycle rows in
+- [x] Exercise the generic one-layer route through all twelve lifecycle rows in
   plain, every periodic family, radial rotation/mirror/mandala, maximum symmetry,
   resize crop/empty-fill, clear, undo/redo, and brush switch. Inject failure at
   reserve, page-in, plan build, command creation/encoding/completion, install,
   prune, candidate swap, resize, and import; every failure must allow an
   immediate successful next stroke.
-- [ ] Invert Task 0: delete the legacy types/symbols, renderer-harness schemas
+- [x] Invert Task 0: delete the legacy types/symbols, renderer-harness schemas
   1 through 5, deprecated factories, compatibility constructors,
   `compatibilityLayerID`, every full-canvas paint-bearing allocation in any
   format, and encoded-BGRA deposition. Accept only the current harness schema
@@ -688,24 +694,24 @@ wiring changes:
   retain the exact BGRA8 boundary inventory plus runtime one-dab 4096
   touched-tile count/resident bytes. Update Task 0/report wording from Task 5
   to Task 6.
-- [ ] Consolidate validation at the Task 6 boundary. Construct trusted
+- [x] Consolidate validation at the Task 6 boundary. Construct trusted
   geometry, sampling, transaction, and ownership values only after checked
   arithmetic, Metal-limit, registry-generation, and resource-ownership
   validation. Downstream render/cache layers consume those types without
   repeating the same range and identity checks. Remove redundant test hooks,
   duplicate invariant tests, and source-shape gates once construction and
   terminal ownership make the invalid state unrepresentable.
-- [ ] Stream stable tiled revisions directly into display/export/interchange
+- [x] Stream stable tiled revisions directly into display/export/interchange
   destinations without assembling a full RGBA16F source. Prove erase-to-empty
   pruning, bounded page-table/argument-buffer bytes, shared-budget pressure,
   viewport/batch-bounded pins, incremental page-table/chunk invalidation, and no
   total-stroke-sized per-event copy or plan rebuild in the accelerated 10-minute
   trace.
-- [ ] Run `swift test --filter 'PatternPaintTileCodecTests|StageDProjectBaselineTests|RadialSectorLayoutTests|SymmetryDescriptorCompilerTests|DocumentColorPipelineTests|DocumentPaintSurfaceStoreTests|SparseTileSamplingPlanTests|SparseTileSamplingPipelineTests|TiledRasterSurfaceTests|TiledRasterRevisionStoreTests|StrokeTileSurfaceEncoderTests|DepositionRendererTests|CommittedDocumentSnapshotTests|RendererResizeTests|StageCAcceptance'`,
+- [x] Run `swift test --filter 'PatternPaintTileCodecTests|StageDProjectBaselineTests|RadialSectorLayoutTests|SymmetryDescriptorCompilerTests|DocumentColorPipelineTests|DocumentPaintSurfaceStoreTests|SparseTileSamplingPlanTests|SparseTileSamplingPipelineTests|TiledRasterSurfaceTests|TiledRasterRevisionStoreTests|StrokeTileSurfaceEncoderTests|DepositionRendererTests|CommittedDocumentSnapshotTests|RendererResizeTests|StageCAcceptance'`,
   `scripts/run-brush-input-allocation-probe.sh all`, and Debug/Release macOS
   builds. No current-output golden may be regenerated; every approved fixture
   change cites an independent vector and semantic reason.
-- [ ] Commit as `refactor(raster): activate linear sparse paint`.
+- [x] Commit as `refactor(raster): activate linear sparse paint`.
 
 ### Task 7: Add The Linear Tile-Based Layer Compositor
 
@@ -827,51 +833,51 @@ than being repeated after minor edits.
   Task 6's boundary packer exactly once; native project tiles never pass through
   PNG or a transfer conversion.
 
-- [ ] Write CPU/GPU RED differentials for normal/multiply/screen, opacity
+- [x] Write CPU/GPU RED differentials for normal/multiply/screen, opacity
   0/0.5/1, hidden and empty layers, translucent colored edges, reordered
   layers, one through eight layers, and missing sparse inputs. Require `2e-3`
   linear error, deterministic order, and identical Tier-2/fallback results.
-- [ ] Write transaction RED tests for add/delete/undo/redo/reorder/visibility/
+- [x] Write transaction RED tests for add/delete/undo/redo/reorder/visibility/
   opacity/lock/active, deletion of active and nonactive layers, exact revision
   restoration, resize crop/empty-fill across all layers, radial layout changes,
   failure at every prepare/upload/swap seam, and rejection while drawing.
-- [ ] Route production paint to the pointer-down layer and prove brush/layer
+- [x] Route production paint to the pointer-down layer and prove brush/layer
   switching, clear, and undo/redo never retarget a command after reorder or
   active-layer change. One completed stroke still publishes exactly one
   history command; cancel/failure publishes none.
-- [ ] Implement streamed v4 capture/save/load and RED malformed-archive tests
+- [x] Implement streamed v4 capture/save/load and RED malformed-archive tests
   for duplicate IDs/coordinates/paths, reordered manifest entries, byte/hash/
   bounds/revision mismatch, excessive layers/entries/bytes, radial map mismatch,
   truncated payload, upload failure, and stale snapshot. Assert save/load/save
   semantic and byte equality with stable persisted tile UUIDs and surface
   revision, including empty surfaces and a maximum accepted radial atlas.
-- [ ] Add SafeArchive provider/consumer RED tests for bounded chunk size,
+- [x] Add SafeArchive provider/consumer RED tests for bounded chunk size,
   declared-size mismatch, checksum failure, duplicate/unsafe path, aggregate
   overflow, provider/consumer throw at every chunk, atomic destination replace,
   snapshot mutation while saving, and exact lease closure. Peak payload memory
   must be measured and bounded by one tile plus fixed archive buffers, not
   inferred from chunked APIs or allowed to scale with archive size.
-- [ ] Add compact schema 1/2/3/future rejection fixtures proving typed failure
+- [x] Add compact schema 1/2/3/future rejection fixtures proving typed failure
   before payload allocation or registry mutation, then delete native migration
   code and successful-migration fixtures. Keep external PNG and external brush
   import coverage separate from the native project codec.
-- [ ] Route display, finite, periodic repeat/baked repeat, flattened PNG, and
+- [x] Route display, finite, periodic repeat/baked repeat, flattened PNG, and
   native project capture through the correct shared snapshot. Compare each
   flattened export against an independent CPU layer/color reference and prove
   native bytes remain lossless linear RGBA16F.
-- [ ] Run fully populated and sparse 2048 × 2048 eight-layer display/export
+- [x] Run fully populated and sparse 2048 × 2048 eight-layer display/export
   traces without requiring all roughly 512 MiB of raw RGBA16F layer content to
   be resident simultaneously. Persistent plus page-in plus in-flight
   composition bytes must remain
   within the checked shared/transient budgets; leases, queues, page tables, and
   binding batches return to their warm baseline after completion or failure.
-- [ ] Enumerate prepare, allocation, upload, metadata, registry swap, GPU
+- [x] Enumerate prepare, allocation, upload, metadata, registry swap, GPU
   completion, persistence provider/consumer, checksum, and atomic file-replace
   failure seams. Every injected failure proves unchanged pixels, metadata,
   history cursor, and generation; zero leaked leases/tokens; and immediate
   successful reuse.
-- [ ] Run `swift test --filter 'LayerStackTests|LayerCompositorTests|LayerSurfaceTransactionTests|PersistedPaintTileIdentityMapTests|EditorSessionControllerTests|SafeArchiveCodecTests|SafeArchiveIOTests|PatternPaintTileCodecTests|PatternProjectArchiveTests|PatternProjectPackageCodecTests|PatternRasterExportCodecTests|PatternProjectBridgeTests'`.
-- [ ] Commit as `feat(layers): compose bounded linear tiles`.
+- [x] Run `swift test --filter 'LayerStackTests|LayerCompositorTests|LayerSurfaceTransactionTests|PersistedPaintTileIdentityMapTests|EditorSessionControllerTests|SafeArchiveCodecTests|SafeArchiveIOTests|PatternPaintTileCodecTests|PatternProjectArchiveTests|PatternProjectPackageCodecTests|PatternRasterExportCodecTests|PatternProjectBridgeTests'`.
+- [x] Commit as `feat(layers): compose bounded linear tiles`.
 
 ### Task 8: Stage D Acceptance Checkpoint
 
@@ -912,14 +918,14 @@ than being repeated after minor edits.
 | Sustained runtime | cold/warm, 10-second wall trace, 36,000-sample no-sleep accelerated trace, allocation/residency pressure, injected failure/reuse | JSONL plus summary: input provenance, replay, queues, prepare/submit/GPU/present p95/p99, allocations, page tables/bindings/leases, resident/high-water bytes |
 | App/UI routes | color selection, draw/erase/clear, size/brush/layer changes, mode/resize, undo/redo, save/open/export, tilde HUD, digit/letter/command shortcuts while canvas vs numeric fields own focus | Xcode-hosted `PatternSpikeMacUITests` `.xcresult` plus app-written route manifest prove real control/key delivery, focus ownership, production sparse route, disabled/rejected states, and matching state/pixels |
 
-- [ ] Implement `StageDAcceptanceProbe` as the manifest aggregator for package
+- [x] Implement `StageDAcceptanceProbe` as the manifest aggregator for package
   harness results, the Xcode-hosted macOS UI `.xcresult`, and the app-written
   production-route evidence manifest. Every row has a stable scenario ID,
   deterministic seed/input trace, expected semantic hash or independent numeric
   oracle, producer kind, and typed result. The shell script rejects missing/
   duplicate rows, an absent/failed required Xcode test identifier, skipped
   software evidence, nonfinite metrics, or any nonproduction backend.
-- [ ] Add mutation/negative controls at genuine boundaries that independently
+- [x] Add mutation/negative controls at genuine boundaries that independently
   invert transfer
   direction, straight/premultiplied handling, alpha, bilinear neighbor/tile
   origin, periodic/radial lookup, LRU/pinning, install atomicity, empty pruning,
@@ -927,13 +933,13 @@ than being repeated after minor edits.
   control to fail exactly its named gate while the unmodified fixture passes.
   Prove obsolete native paths are absent through current-version rejection and
   production behavior rather than brittle source-text inventories.
-- [ ] Strengthen lifecycle/app coverage so every one of the twelve inventory
+- [x] Strengthen lifecycle/app coverage so every one of the twelve inventory
   rows runs through production GridRenderer plus EditorSessionController. Cover
   app commands for color, draw, erase, clear, brush/size/layer/mode/resize,
   undo/redo, save/open/export, text-field focus/keyboard shortcuts, failed
   operation recovery, and immediate next action. Assert visible state,
   canonical bytes, history cursor, layer stack, generation, and pending tokens.
-- [ ] Add production layer controls before claiming any layer UI route. Configure
+- [x] Add production layer controls before claiming any layer UI route. Configure
   deterministic temporary open/save/export URLs at launch so automation never
   depends on a native file-dialog interaction, while still proving the real app
   command, persistence bridge, atomic replacement, and evidence route executed.
@@ -945,17 +951,17 @@ than being repeated after minor edits.
   after canvas refocus, HUD presence, and app-written canonical/layer/history/
   sparse-route evidence after each command. SwiftUI hosting/controller tests
   alone cannot satisfy this row.
-- [ ] Require zero production legacy synchronous-render calls, zero append-only
+- [x] Require zero production legacy synchronous-render calls, zero append-only
   actual replay, zero post-warm input/partition/lease application allocations,
   no dropped actual input, no GPU wait on input/main, all queues and lease/token
   counts at zero after quiescence, resident plus transient bytes within their
   configured budgets, and no per-event page-table rebuild or full-canvas source.
-- [ ] Audit validation and test infrastructure at acceptance: keep untrusted-
+- [x] Audit validation and test infrastructure at acceptance: keep untrusted-
   input, checked-arithmetic/memory/Metal-limit, transactional-publication, and
   GPU/resource-ownership guards. Remove duplicate downstream validation,
   compatibility-only tests, source-text gates, and implausible-state hooks
   whose states are already excluded by trusted construction and access control.
-- [ ] Run two complementary sustained gates: the current production GPU/app
+- [x] Run two complementary sustained gates: the current production GPU/app
   harness, which advances ten logical minutes in roughly ten wall-clock
   seconds, and the existing no-sleep allocation/scheduler probe, which actually
   processes 36,000 accelerated samples. Neither is described as 36,000 physical
@@ -969,7 +975,7 @@ than being repeated after minor edits.
   preparation, event-to-submit, GPU, presentation p95/p99,
   missed-frame fraction, page-in/cache counts, and resident/in-flight high-water;
   do not claim physical 120 Hz performance from this evidence.
-- [ ] Run the focused color/surface/history/layer/persistence/export suite and
+- [x] Run the focused color/surface/history/layer/persistence/export suite and
   every adjacent Stage B/C lifecycle, scheduler, semantic, allocation, and
   telemetry suite, then run `scripts/run-stage-d-acceptance.sh` twice from a
   clean build directory. Both runs must produce identical semantic hashes and
@@ -986,11 +992,11 @@ than being repeated after minor edits.
   Convert its test summary plus the app route manifest into the aggregator
   input and require every named UI scenario above to pass. Never treat a
   successful app build as UI route evidence.
-- [ ] Build `PatternSpikeMac` Debug and Release for `platform=macOS`, and build
+- [x] Build `PatternSpikeMac` Debug and Release for `platform=macOS`, and build
   `PatternSpikePad` Debug and Release for `generic/platform=iOS Simulator`, all
   with `CODE_SIGNING_ALLOWED=NO`. Launch the macOS harness route and require a
   completed production JSONL segment; simulator build is compile evidence only.
-- [ ] Run the broad suite. It must contain only the exact frozen 27 Stage B issue
+- [x] Run the broad suite. It must contain only the exact frozen 27 Stage B issue
   records and no new issue. A resolved frozen record requires independent
   evidence plus an explicit reviewed baseline removal; never regenerate the
   allowlist or golden from current output. Capture the expected nonzero `swift
@@ -998,16 +1004,17 @@ than being repeated after minor edits.
   `scripts/verify-swift-testing-baseline.sh`; a raw nonzero status is not by
   itself a regression and a raw green is not a substitute for allowlist
   verification.
-- [ ] Run a fresh independent review over `ca5dff5..HEAD` against this plan and
+- [x] Run a fresh independent review over `ca5dff5..HEAD` against this plan and
   the parent corrective program. Resolve every Critical/Important finding,
   rerun the complete affected matrix plus broad/build gates, and require the
   final reviewer to report no unresolved Critical/Important issue.
-- [ ] Record commit range, OS/Xcode/Swift/GPU, exact commands and test counts,
+- [x] Record commit range, OS/Xcode/Swift/GPU, exact commands and test counts,
   every scenario/result/hash, CPU/GPU/frame/queue/allocation/residency metrics,
   negative-control proof, broad baseline diff, review disposition, and physical
   iPad/Pencil/Wacom/120 Hz/thermal/memory evidence as pending in the acceptance
   report. The report alone may set Stage D to `accepted` and open Stage E.
-- [ ] Commit as `test(raster): accept stage D surfaces`.
+- [ ] Commit Stage D acceptance after the Xcode-hosted app-route gate passes as
+  `test(raster): accept stage D surfaces`.
 
 ## Completion Boundary
 

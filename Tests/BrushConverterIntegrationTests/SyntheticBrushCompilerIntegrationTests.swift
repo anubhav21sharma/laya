@@ -26,15 +26,17 @@ struct SyntheticBrushCompilerIntegrationTests {
         )
 
         #expect(compiler.activeBrush === compiled)
-        #expect(compiled.pipelineKey.backend == .deposition)
+        #expect(compiled.primaryComponent.pipelineKey.backend == .deposition)
         #expect(compiled.program.definition == reopened.definition)
         #expect(
-            compiled.textures.keys.sorted()
+            compiled.primaryComponent.textures.keys.sorted()
                 == ["grain.synthetic", "shape.synthetic"]
         )
         for id in ["grain.synthetic", "shape.synthetic"] {
             let resource = try #require(resources[id])
-            let texture = try #require(compiled.textures[id])
+            let texture = try #require(
+                compiled.primaryComponent.textures[id]
+            )
             #expect(texture.width == resource.pixelWidth)
             #expect(texture.height == resource.pixelHeight)
             #expect(texture.pixelFormat == .r8Unorm)
@@ -53,32 +55,25 @@ struct SyntheticBrushCompilerIntegrationTests {
     }
 
     @Test
-    func wetPackageFailsBeforeDecodeAndPreservesDryActivation() async throws {
+    func wetIntentFailsBeforePackageCreationAndPreservesDryActivation()
+        async throws
+    {
         guard let compiler = try makeCompiler() else { return }
         let dry = try await compiler.compileAndActivate(
             package: try mappedPackage(includeWet: false)
         )
         let before = compiler.debugCounters
-        let wet = try BrushPackageCodec.decode(
-            BrushPackageCodec.encode(
-                try mappedPackage(includeWet: true)
-            )
-        )
 
-        let failure = try await compilationFailure {
-            _ = try await compiler.compileAndActivate(package: wet)
+        #expect(throws: SyntheticV1MappingError.invalidSetting(
+            key: SyntheticV1SemanticKeys.wet,
+            reason: "unsupported-by-native-schema-3"
+        )) {
+            try mappedPackage(includeWet: true)
         }
         let after = compiler.debugCounters
 
-        #expect(failure.stage == .pipelineSelection)
-        #expect(failure.reason == "unsupportedInteraction")
-        #expect(failure.backend == .canvasInteraction)
         #expect(compiler.activeBrush === dry)
-        #expect(after.packageDecodeCount == before.packageDecodeCount)
-        #expect(after.imageDecodeCount == before.imageDecodeCount)
-        #expect(after.textureUploadCount == before.textureUploadCount)
-        #expect(after.cacheHitCount == before.cacheHitCount)
-        #expect(after.activationCount == before.activationCount)
+        #expect(after == before)
     }
 
     @Test
@@ -122,17 +117,17 @@ struct SyntheticBrushCompilerIntegrationTests {
     private func wetConcentrationPackage() throws -> BrushPackage {
         let dry = try mappedPackage(includeWet: false)
         let definition = dry.definition
-        let material = definition.material
+        let component = definition.components[0]
+        let material = component.material
         let wetDefinition = try BrushDefinition(
             id: definition.id,
-            schemaVersion: definition.schemaVersion,
             metadata: definition.metadata,
             capabilities: definition.capabilities,
-            resources: definition.resources,
-            coverage: definition.coverage,
-            placement: definition.placement,
-            dynamics: definition.dynamics,
-            color: definition.color,
+            resources: component.resources,
+            coverage: component.coverage,
+            placement: component.placement,
+            dynamics: component.dynamics,
+            color: component.color,
             material: BrushMaterialDefinition(
                 accumulation: material.accumulation,
                 interaction: .none,
@@ -145,7 +140,7 @@ struct SyntheticBrushCompilerIntegrationTests {
                 interactionParameters: nil
             ),
             stabilization: definition.stabilization,
-            taper: definition.taper,
+            taper: component.taper,
             replayMode: definition.replayMode,
             replayLimits: definition.replayLimits,
             seedPolicy: definition.seedPolicy,
@@ -154,7 +149,6 @@ struct SyntheticBrushCompilerIntegrationTests {
             compatibility: definition.compatibility
         )
         let manifest = try BrushPackageManifest(
-            schemaVersion: dry.manifest.schemaVersion,
             resources: dry.manifest.resources,
             provenance: dry.manifest.provenance
         )

@@ -12,6 +12,19 @@ import UIKit
 struct EditorTopBarColorBoundaryTests {
     @Test
     @MainActor
+    func productionPresetHasOneDeterministicNondefaultEncodedColor() {
+        let color = EditorInkColorPreset.deepTeal.inkColor
+        #expect(EditorInkColorPreset.deepTeal.displayName == "Deep Teal")
+        #expect(color != .black)
+        #expect(color.red == Float(0x10) / 255)
+        #expect(color.green == Float(0x73) / 255)
+        #expect(color.blue == Float(0x8C) / 255)
+        #expect(color.alpha == 1)
+        #expect(EditorTopBar.rgba8Hex(color) == "10738cff")
+    }
+
+    @Test
+    @MainActor
     func arbitrarySourceSpacesBecomeBoundedEncodedSRGBWithPreservedAlpha() throws {
         #if os(macOS)
         let sourceColors: [(Color, Float)] = [

@@ -28,7 +28,7 @@ private func generatorSample(
     return input.derive(sample, viewport: generatorViewport)
 }
 
-private func legacyGenerator(seed: UInt64 = 1) -> BrushStrokeGenerator {
+private func currentGenerator(seed: UInt64 = 1) -> BrushStrokeGenerator {
     BrushStrokeGenerator(
         program: nativeTestProgram(),
         nominalDiameter: 20,
@@ -80,11 +80,33 @@ private func stageCGenerator(
 @Test
 func manualEqualityInventoryCoversEveryStoredField() {
     let fieldNames = Set(
-        Mirror(reflecting: legacyGenerator()).children.compactMap(\.label)
+        Mirror(reflecting: currentGenerator()).children.compactMap(\.label)
     )
 
     #expect(fieldNames == Set([
         "program",
+        "nominalDiameter",
+        "color",
+        "seed",
+        "currentSpacing",
+        "emittedDabCount",
+        "primaryGenerator",
+        "secondaryGenerator",
+    ]))
+
+    let primary = try? #require(
+        Mirror(reflecting: currentGenerator()).children.first {
+            $0.label == "primaryGenerator"
+        }?.value as? BrushComponentStrokeGenerator
+    )
+    let componentFieldNames = Set(
+        primary.map { generator in
+            Mirror(reflecting: generator).children.compactMap(\.label)
+        } ?? []
+    )
+    #expect(componentFieldNames == Set([
+        "program",
+        "component",
         "nominalDiameter",
         "color",
         "seed",
@@ -123,20 +145,16 @@ func emissionCursorInventoryCoversEveryContinuationOwner() throws {
     )
 
     #expect(fieldNames == Set([
-        "generator",
+        "program",
+        "nominalDiameter",
+        "color",
+        "seed",
+        "emittedDabCount",
         "sample",
-        "operation",
         "maximumPathSubdivisionCount",
         "phase",
-        "attributed",
-        "pathCursor",
-        "pendingPathContinuation",
-        "pendingSegment",
-        "pendingDirection",
-        "pendingSignedTurn",
-        "segmentCursor",
-        "sourceCursor",
-        "sourcePurpose",
+        "activeCursor",
+        "inactiveGenerator",
     ]))
 }
 
@@ -159,13 +177,13 @@ func schemaV2NonePinsExactNonDirectionalTrace() throws {
     var generator = try stageCGenerator(id: "test.generator.v2-none")
     var dabs: [DabAttributes] = []
 
-    generator.begin(
+    generator.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { dabs.append($0) }
-    generator.append(
+    generator.consumeCurrentSample(
         generatorSample(x: 5, timestamp: 1, phase: .moved)
     ) { dabs.append($0) }
-    generator.finish(
+    generator.consumeCurrentSample(
         generatorSample(x: 6, timestamp: 2, phase: .ended)
     ) { dabs.append($0) }
 
@@ -203,10 +221,10 @@ func schemaV2UnionCollapsesExactTimedDistanceTiesBeforeIdentity() throws {
     var unionTrace: [DabAttributes] = []
     var distanceTrace: [DabAttributes] = []
 
-    union.begin(began) { unionTrace.append($0) }
-    union.finish(ended) { unionTrace.append($0) }
-    distanceOnly.begin(began) { distanceTrace.append($0) }
-    distanceOnly.finish(ended) { distanceTrace.append($0) }
+    union.consumeCurrentSample(began) { unionTrace.append($0) }
+    union.consumeCurrentSample(ended) { unionTrace.append($0) }
+    distanceOnly.consumeCurrentSample(began) { distanceTrace.append($0) }
+    distanceOnly.consumeCurrentSample(ended) { distanceTrace.append($0) }
 
     #expect(unionTrace == distanceTrace)
     #expect(unionTrace.map(\.ordinal) == Array(0..<UInt64(unionTrace.count)))
@@ -230,10 +248,10 @@ func schemaV2TimeModeEmitsStationaryRecordedTicksAndOneFinish() throws {
         seed: 0xC1_11_02
     )
     var trace: [DabAttributes] = []
-    generator.begin(
+    generator.consumeCurrentSample(
         generatorSample(x: 7, y: 9, timestamp: 10, phase: .began)
     ) { trace.append($0) }
-    generator.finish(
+    generator.consumeCurrentSample(
         generatorSample(x: 7, y: 9, timestamp: 11, phase: .ended)
     ) { trace.append($0) }
 
@@ -259,13 +277,13 @@ func schemaV2UnionKeepsCornerOrientationsAsDistinctAcceptedIdentities()
         seed: 0xC1_11_03
     )
     var trace: [DabAttributes] = []
-    generator.begin(
+    generator.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { trace.append($0) }
-    generator.append(
+    generator.consumeCurrentSample(
         generatorSample(x: 10, timestamp: 1, phase: .moved)
     ) { trace.append($0) }
-    generator.finish(
+    generator.consumeCurrentSample(
         generatorSample(x: 10, y: 10, timestamp: 2, phase: .ended)
     ) { trace.append($0) }
 
@@ -293,12 +311,12 @@ func schemaV2TimedUnionIsInvariantToAuthoritativeInputPartitions() throws {
             seed: 0xC1_11_04
         )
         var result: [DabAttributes] = []
-        generator.begin(
+        generator.consumeCurrentSample(
             generatorSample(x: 0, timestamp: 0, phase: .began)
         ) { result.append($0) }
         if partitioned {
             for index in 1..<8 {
-                generator.append(
+                generator.consumeCurrentSample(
                     generatorSample(
                         x: Float(index) * 2.5,
                         timestamp: Double(index) * 0.125,
@@ -307,7 +325,7 @@ func schemaV2TimedUnionIsInvariantToAuthoritativeInputPartitions() throws {
                 ) { result.append($0) }
             }
         }
-        generator.finish(
+        generator.consumeCurrentSample(
             generatorSample(x: 20, timestamp: 1, phase: .ended)
         ) { result.append($0) }
         return result
@@ -317,7 +335,7 @@ func schemaV2TimedUnionIsInvariantToAuthoritativeInputPartitions() throws {
 }
 
 @Test
-func schemaV2TimedUnionBatchStreamingAndSinkRetryAreExact() throws {
+func currentTimedUnionCursorSinkRetryIsExact() throws {
     let program = try stageCTestProgram(
         id: "test.generator.emission.batch-retry",
         baseSpacingFraction: 0.125,
@@ -329,21 +347,6 @@ func schemaV2TimedUnionBatchStreamingAndSinkRetryAreExact() throws {
     )
     let began = generatorSample(x: 0, timestamp: 0, phase: .began)
     let ended = generatorSample(x: 20, timestamp: 1, phase: .ended)
-    var streaming = BrushStrokeGenerator(
-        program: program,
-        nominalDiameter: 20,
-        color: .black,
-        seed: 0xC1_11_05
-    )
-    var batched = streaming
-    var streamed: [DabAttributes] = []
-    streaming.begin(began) { streamed.append($0) }
-    streaming.finish(ended) { streamed.append($0) }
-    let batchTrace = try batched.beginBatch(began).dabs
-        + batched.finishBatch(ended).dabs
-    #expect(batchTrace == streamed)
-    #expect(batched == streaming)
-
     enum Rejected: Error { case once }
     var retrying = BrushStrokeGenerator(
         program: program,
@@ -351,11 +354,11 @@ func schemaV2TimedUnionBatchStreamingAndSinkRetryAreExact() throws {
         color: .black,
         seed: 0xC1_11_05
     )
-    retrying.begin(began) { _ in }
+    retrying.consumeCurrentSample(began) { _ in }
     let before = retrying
     var observed = 0
     #expect(throws: Rejected.once) {
-        try retrying.finish(ended) { _ in
+        try retrying.consumeCurrentSample(ended) { _ in
             observed += 1
             if observed == 3 { throw Rejected.once }
         }
@@ -366,12 +369,12 @@ func schemaV2TimedUnionBatchStreamingAndSinkRetryAreExact() throws {
     let collectRetried: (DabAttributes) throws -> Void = {
         retried.append($0)
     }
-    try retrying.finish(ended, emit: collectRetried)
+    try retrying.consumeCurrentSample(ended, emit: collectRetried)
     var expected: [DabAttributes] = []
     let collectExpected: (DabAttributes) throws -> Void = {
         expected.append($0)
     }
-    try baseline.finish(ended, emit: collectExpected)
+    try baseline.consumeCurrentSample(ended, emit: collectExpected)
     #expect(retried == expected)
     #expect(retrying == baseline)
 }
@@ -392,11 +395,11 @@ func schemaV2TimedCancelAndPredictionLeaveRapidReuseAuthoritative() throws {
     }
     let began = generatorSample(x: 0, timestamp: 0, phase: .began)
     var authoritative = generator()
-    authoritative.begin(began) { _ in }
+    authoritative.consumeCurrentSample(began) { _ in }
     let beforePrediction = authoritative
     var prediction = authoritative
     var predicted: [DabAttributes] = []
-    _ = try prediction.appendPredictionPrefix(
+    try prediction.consumeCurrentSample(
         generatorSample(x: 5, timestamp: 0.5, phase: .moved)
             .replacingKindForTest(.predicted),
         maximumPathSubdivisionCount: 4_096
@@ -410,10 +413,10 @@ func schemaV2TimedCancelAndPredictionLeaveRapidReuseAuthoritative() throws {
     let nextEnd = generatorSample(x: 2, timestamp: 4.3, phase: .ended)
     var actual: [DabAttributes] = []
     var expected: [DabAttributes] = []
-    authoritative.begin(nextBegin) { actual.append($0) }
-    authoritative.finish(nextEnd) { actual.append($0) }
-    fresh.begin(nextBegin) { expected.append($0) }
-    fresh.finish(nextEnd) { expected.append($0) }
+    authoritative.consumeCurrentSample(nextBegin) { actual.append($0) }
+    authoritative.consumeCurrentSample(nextEnd) { actual.append($0) }
+    fresh.consumeCurrentSample(nextBegin) { expected.append($0) }
+    fresh.consumeCurrentSample(nextEnd) { expected.append($0) }
     #expect(actual == expected)
     #expect(authoritative == fresh)
 }
@@ -430,7 +433,7 @@ func schemaV2GeneratorAdvancePagesAtTheLogicalDabBoundary(
         ),
         seed: 0xC1_11_10
     )
-    generator.begin(
+    generator.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { _ in }
     var cursor = try generator.emissionCursor(
@@ -467,7 +470,7 @@ func schemaV2HugeTimedGapDoesOnlyOneBoundedGeneratorPage() throws {
         ),
         seed: 0xC1_11_11
     )
-    generator.begin(
+    generator.consumeCurrentSample(
         generatorSample(x: 3, timestamp: 0, phase: .began)
     ) { _ in }
     var cursor = try generator.emissionCursor(
@@ -495,7 +498,7 @@ func schemaV2GeneratorPageRetryResumesAtTheRejectedDab() throws {
         emission: BrushEmissionDefinition(mode: .time, timeInterval: 0.1),
         seed: 0xC1_11_12
     )
-    generator.begin(
+    generator.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { _ in }
     var cursor = try generator.emissionCursor(
@@ -534,7 +537,7 @@ func schemaV2GeneratorPausePreservesExactRejectedCandidateAndRealErrors()
         emission: BrushEmissionDefinition(mode: .time, timeInterval: 0.1),
         seed: 0xC1_11_15
     )
-    generator.begin(
+    generator.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { _ in }
     let startingCursor = try generator.emissionCursor(
@@ -553,7 +556,9 @@ func schemaV2GeneratorPausePreservesExactRejectedCandidateAndRealErrors()
         acceptedBeforePause.append(dab)
         return .accept
     }
-    #expect(pausePage == .init(emittedCount: 3, hasMore: true))
+    #expect(pausePage.emittedCount == 3)
+    #expect(pausePage.workCount >= 4)
+    #expect(pausePage.hasMore)
     #expect(acceptedBeforePause.map(\.ordinal) == [1, 2, 3])
     #expect(rejectedByPause?.ordinal == 4)
 
@@ -621,10 +626,10 @@ func schemaV2PagedGeneratorMatchesCompatibilityTraceAcrossLifecycleAndCorners()
         seed: 0xC1_11_13
     )
     var expected: [DabAttributes] = []
-    compatibility.begin(samples[0]) { expected.append($0) }
-    compatibility.append(samples[1]) { expected.append($0) }
-    compatibility.append(samples[2]) { expected.append($0) }
-    compatibility.finish(samples[3]) { expected.append($0) }
+    compatibility.consumeCurrentSample(samples[0]) { expected.append($0) }
+    compatibility.consumeCurrentSample(samples[1]) { expected.append($0) }
+    compatibility.consumeCurrentSample(samples[2]) { expected.append($0) }
+    compatibility.consumeCurrentSample(samples[3]) { expected.append($0) }
 
     var paged = BrushStrokeGenerator(
         program: program,
@@ -676,11 +681,11 @@ func schemaV2PagedUnionSettlesTimedDistanceDuplicates() throws {
         seed: 1
     )
     var expected: [DabAttributes] = []
-    compatibility.begin(samples[0]) { expected.append($0) }
+    compatibility.consumeCurrentSample(samples[0]) { expected.append($0) }
     for sample in samples.dropFirst().dropLast() {
-        compatibility.append(sample) { expected.append($0) }
+        compatibility.consumeCurrentSample(sample) { expected.append($0) }
     }
-    compatibility.finish(samples[samples.count - 1]) {
+    compatibility.consumeCurrentSample(samples[samples.count - 1]) {
         expected.append($0)
     }
 
@@ -725,11 +730,16 @@ func schemaV2DistanceCursorResumesA513DabPathExactly() throws {
     )
     var ordinals: [UInt64] = []
 
-    let first = try cursor.emitNextPage { ordinals.append($0.ordinal) }
-    let second = try cursor.emitNextPage { ordinals.append($0.ordinal) }
+    var pages: [BrushStrokeGenerator.EmissionPage] = []
+    repeat {
+        let page = try cursor.emitNextPage { ordinals.append($0.ordinal) }
+        pages.append(page)
+        #expect(page.workCount <= LogicalDabBatch.maximumDabCount * 4)
+    } while pages.last?.hasMore == true
 
-    #expect(first == .init(emittedCount: 512, hasMore: true))
-    #expect(second == .init(emittedCount: 1, hasMore: false))
+    #expect(pages.count > 2)
+    #expect(pages.dropLast().allSatisfy { $0.hasMore })
+    #expect(pages.last?.hasMore == false)
     #expect(ordinals == Array(1...513))
     #expect(cursor.completedGenerator != nil)
 }
@@ -744,7 +754,7 @@ func directionalBeginWaitsForFirstTravelWithoutConsumingOrdinalOrRandom()
         seed: 0x51
     )
     var began: [DabAttributes] = []
-    generator.begin(
+    generator.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { began.append($0) }
 
@@ -752,7 +762,7 @@ func directionalBeginWaitsForFirstTravelWithoutConsumingOrdinalOrRandom()
     #expect(generator.emittedDabCount == 0)
 
     var moved: [DabAttributes] = []
-    generator.append(
+    generator.consumeCurrentSample(
         generatorSample(x: 5, timestamp: 1, phase: .moved)
     ) { moved.append($0) }
 
@@ -779,10 +789,10 @@ func stationaryDirectionalTapUsesCompiledFallbackAndEmitsExactlyOneDab()
     )
     var dabs: [DabAttributes] = []
 
-    generator.begin(
+    generator.consumeCurrentSample(
         generatorSample(x: 4, y: 7, timestamp: 0, phase: .began)
     ) { dabs.append($0) }
-    generator.finish(
+    generator.consumeCurrentSample(
         generatorSample(x: 4, y: 7, timestamp: 1, phase: .ended)
     ) { dabs.append($0) }
 
@@ -802,11 +812,11 @@ func weightedFinishAddsOnlyOneCausalEndpointCorrectionAndResetsForNextStroke()
         baseSpacingFraction: 0.05
     )
     var body: [DabAttributes] = []
-    generator.begin(
+    generator.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { body.append($0) }
     for index in 1...8 {
-        generator.append(
+        generator.consumeCurrentSample(
             generatorSample(
                 x: Float(index),
                 timestamp: Double(index),
@@ -817,7 +827,7 @@ func weightedFinishAddsOnlyOneCausalEndpointCorrectionAndResetsForNextStroke()
     let bodyBeforeFinish = body
     #expect((body.last?.position.x ?? 8) < 7)
     var correction: [DabAttributes] = []
-    generator.finish(
+    generator.consumeCurrentSample(
         generatorSample(x: 9, timestamp: 9, phase: .ended)
     ) { correction.append($0) }
 
@@ -826,7 +836,7 @@ func weightedFinishAddsOnlyOneCausalEndpointCorrectionAndResetsForNextStroke()
     #expect(correction.first?.position == WorldPoint(x: 9, y: 0))
 
     var next: [DabAttributes] = []
-    generator.begin(
+    generator.consumeCurrentSample(
         generatorSample(x: 100, timestamp: 10, phase: .began)
     ) { next.append($0) }
     #expect(next.map(\.position) == [WorldPoint(x: 100, y: 0)])
@@ -842,16 +852,16 @@ func delayedFinishPreservesDeclaredLagWithoutFlushingBodyAndTapResets()
         stabilization: .delayed(distance: 4)
     )
     var dabs: [DabAttributes] = []
-    generator.begin(
+    generator.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { dabs.append($0) }
-    generator.append(
+    generator.consumeCurrentSample(
         generatorSample(x: 2, timestamp: 1, phase: .moved)
     ) { dabs.append($0) }
-    generator.append(
+    generator.consumeCurrentSample(
         generatorSample(x: 6, timestamp: 2, phase: .moved)
     ) { dabs.append($0) }
-    generator.finish(
+    generator.consumeCurrentSample(
         generatorSample(x: 10, timestamp: 3, phase: .ended)
     ) { dabs.append($0) }
 
@@ -860,10 +870,10 @@ func delayedFinishPreservesDeclaredLagWithoutFlushingBodyAndTapResets()
     #expect(dabs.allSatisfy { $0.position.x <= 6 })
 
     var tap: [DabAttributes] = []
-    generator.begin(
+    generator.consumeCurrentSample(
         generatorSample(x: 20, timestamp: 4, phase: .began)
     ) { tap.append($0) }
-    generator.finish(
+    generator.consumeCurrentSample(
         generatorSample(x: 20, timestamp: 5, phase: .ended)
     ) { tap.append($0) }
     #expect(tap.count == 1)
@@ -881,23 +891,22 @@ func directionalPredictionRunsFromValueCopyAndLeavesAuthoritativeStateUntouched(
         maximumAngularStep: .pi / 8,
         seed: 0x71
     )
-    authoritative.begin(
+    authoritative.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { _ in }
-    authoritative.append(
+    authoritative.consumeCurrentSample(
         generatorSample(x: 8, timestamp: 1, phase: .moved)
     ) { _ in }
     let beforePrediction = authoritative
 
     var prediction = authoritative
     var predictedDabs: [DabAttributes] = []
-    let outcome = try prediction.appendPredictionPrefix(
+    try prediction.consumeCurrentSample(
         generatorSample(x: 8, y: 8, timestamp: 2, phase: .moved)
             .replacingKindForTest(.predicted),
         maximumPathSubdivisionCount: 4_096
     ) { predictedDabs.append($0) }
 
-    #expect(outcome == .completed)
     #expect(!predictedDabs.isEmpty)
     #expect(authoritative == beforePrediction)
 
@@ -905,8 +914,8 @@ func directionalPredictionRunsFromValueCopyAndLeavesAuthoritativeStateUntouched(
     var afterPrediction: [DabAttributes] = []
     var expected: [DabAttributes] = []
     let actual = generatorSample(x: 8, y: 8, timestamp: 2, phase: .moved)
-    authoritative.append(actual) { afterPrediction.append($0) }
-    baseline.append(actual) { expected.append($0) }
+    authoritative.consumeCurrentSample(actual) { afterPrediction.append($0) }
+    baseline.consumeCurrentSample(actual) { expected.append($0) }
     #expect(afterPrediction == expected)
     #expect(authoritative == baseline)
 }
@@ -921,10 +930,10 @@ func typedCornerCapacityFailurePublishesNothingAndGeneratorRemainsReusable()
         maximumAngularStep: BrushCornerEmitter.minimumAngularStep,
         seed: 0x73
     )
-    generator.begin(
+    generator.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { _ in }
-    try generator.append(
+    try generator.consumeCurrentSample(
         generatorSample(x: 10, timestamp: 1, phase: .moved),
         maximumPathSubdivisionCount: 4_096
     ) { _ in }
@@ -932,7 +941,7 @@ func typedCornerCapacityFailurePublishesNothingAndGeneratorRemainsReusable()
     var rejected: [DabAttributes] = []
 
     #expect(throws: BrushCornerEmitterError.self) {
-        try generator.append(
+        try generator.consumeCurrentSample(
             generatorSample(x: 0, timestamp: 2, phase: .moved),
             maximumPathSubdivisionCount: 4_096
         ) { rejected.append($0) }
@@ -944,11 +953,11 @@ func typedCornerCapacityFailurePublishesNothingAndGeneratorRemainsReusable()
     let recovery = generatorSample(x: 20, timestamp: 3, phase: .moved)
     var actualDabs: [DabAttributes] = []
     var expectedDabs: [DabAttributes] = []
-    try generator.append(
+    try generator.consumeCurrentSample(
         recovery,
         maximumPathSubdivisionCount: 4_096
     ) { actualDabs.append($0) }
-    try baseline.append(
+    try baseline.consumeCurrentSample(
         recovery,
         maximumPathSubdivisionCount: 4_096
     ) { expectedDabs.append($0) }
@@ -989,19 +998,19 @@ func cornerCanonicalKeyBoundaryIsTypedTransactionalAndReusable() throws {
 
     let safeTimestamp: TimeInterval = 2
     var safe = try generator(id: "test.generator.corner-key-safe", seed: 0x74)
-    safe.begin(
+    safe.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { _ in }
-    try safe.append(
+    try safe.consumeCurrentSample(
         generatorSample(x: 10, timestamp: 1, phase: .moved),
         maximumPathSubdivisionCount: 4_096
     ) { _ in }
-    try safe.append(
+    try safe.consumeCurrentSample(
         generatorSample(x: 20, timestamp: safeTimestamp, phase: .moved),
         maximumPathSubdivisionCount: 4_096
     ) { _ in }
     var boundaryDabs: [DabAttributes] = []
-    try safe.append(
+    try safe.consumeCurrentSample(
         generatorSample(
             x: 20,
             y: 10,
@@ -1016,10 +1025,10 @@ func cornerCanonicalKeyBoundaryIsTypedTransactionalAndReusable() throws {
         id: "test.generator.corner-key-overflow",
         seed: 0x75
     )
-    overflowing.begin(
+    overflowing.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { _ in }
-    try overflowing.append(
+    try overflowing.consumeCurrentSample(
         generatorSample(x: 10, timestamp: 1, phase: .moved),
         maximumPathSubdivisionCount: 4_096
     ) { _ in }
@@ -1027,7 +1036,7 @@ func cornerCanonicalKeyBoundaryIsTypedTransactionalAndReusable() throws {
     var rejected: [DabAttributes] = []
 
     #expect(throws: BrushCornerEmitterError.canonicalKeyOverflow) {
-        try overflowing.append(
+        try overflowing.consumeCurrentSample(
             generatorSample(x: 20, timestamp: 10_000_000_000, phase: .moved),
             maximumPathSubdivisionCount: 4_096
         ) { rejected.append($0) }
@@ -1040,17 +1049,17 @@ func cornerCanonicalKeyBoundaryIsTypedTransactionalAndReusable() throws {
     baseline.cancel()
     var actual: [DabAttributes] = []
     var expected: [DabAttributes] = []
-    overflowing.begin(
+    overflowing.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { actual.append($0) }
-    baseline.begin(
+    baseline.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { expected.append($0) }
-    try overflowing.append(
+    try overflowing.consumeCurrentSample(
         generatorSample(x: 10, timestamp: 1, phase: .moved),
         maximumPathSubdivisionCount: 4_096
     ) { actual.append($0) }
-    try baseline.append(
+    try baseline.consumeCurrentSample(
         generatorSample(x: 10, timestamp: 1, phase: .moved),
         maximumPathSubdivisionCount: 4_096
     ) { expected.append($0) }
@@ -1069,18 +1078,18 @@ func exactReversalEmitsBoundedOrderedFanBeforeNumberingAndRandomConsumption()
         maximumAngularStep: .pi / 4,
         seed: seed
     )
-    generator.begin(
+    generator.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { _ in }
     var prefix: [DabAttributes] = []
-    try generator.append(
+    try generator.consumeCurrentSample(
         generatorSample(x: 10, timestamp: 1, phase: .moved),
         maximumPathSubdivisionCount: 4_096
     ) { prefix.append($0) }
     let startingOrdinal = generator.emittedDabCount
 
     var reversal: [DabAttributes] = []
-    try generator.append(
+    try generator.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 2, phase: .moved),
         maximumPathSubdivisionCount: 4_096
     ) { reversal.append($0) }
@@ -1123,13 +1132,13 @@ func cancelClearsHeldBeginDirectionAndCornerStateForRapidNextStroke()
         stationaryDirection: -.pi / 4,
         seed: 0x79
     )
-    cancelled.begin(
+    cancelled.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { _ in }
-    cancelled.append(
+    cancelled.consumeCurrentSample(
         generatorSample(x: 8, timestamp: 1, phase: .moved)
     ) { _ in }
-    cancelled.append(
+    cancelled.consumeCurrentSample(
         generatorSample(x: 8, y: 8, timestamp: 2, phase: .moved)
     ) { _ in }
     cancelled.cancel()
@@ -1149,10 +1158,10 @@ func cancelClearsHeldBeginDirectionAndCornerStateForRapidNextStroke()
     )
     var actual: [DabAttributes] = []
     var expected: [DabAttributes] = []
-    cancelled.begin(nextBegin) { actual.append($0) }
-    cancelled.finish(nextEnd) { actual.append($0) }
-    fresh.begin(nextBegin) { expected.append($0) }
-    fresh.finish(nextEnd) { expected.append($0) }
+    cancelled.consumeCurrentSample(nextBegin) { actual.append($0) }
+    cancelled.consumeCurrentSample(nextEnd) { actual.append($0) }
+    fresh.consumeCurrentSample(nextBegin) { expected.append($0) }
+    fresh.consumeCurrentSample(nextEnd) { expected.append($0) }
 
     #expect(actual == expected)
     #expect(cancelled == fresh)
@@ -1160,10 +1169,7 @@ func cancelClearsHeldBeginDirectionAndCornerStateForRapidNextStroke()
 
 @Test
 func generatorAcceptsAPrecompiledProgram() throws {
-    let definition = try LegacyBrushRecipeAdapter.definition(
-        from: .legacyEquivalent,
-        displayName: "Legacy"
-    )
+    let definition = nativeTestDefinition()
     let program = try BrushProgramCompiler.compile(definition)
     let generator = BrushStrokeGenerator(
         program: program,
@@ -1176,16 +1182,16 @@ func generatorAcceptsAPrecompiledProgram() throws {
 }
 
 @Test
-func generatorPreservesLegacyStraightPlacementAndExactEndpoint() {
-    var generator = legacyGenerator()
+func generatorPreservesStraightPlacementAndExactEndpoint() {
+    var generator = currentGenerator()
     var dabs: [DabAttributes] = []
-    generator.begin(
+    generator.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { dabs.append($0) }
-    generator.append(
+    generator.consumeCurrentSample(
         generatorSample(x: 5, timestamp: 1, phase: .moved)
     ) { dabs.append($0) }
-    generator.finish(
+    generator.consumeCurrentSample(
         generatorSample(x: 6, timestamp: 2, phase: .ended)
     ) { dabs.append($0) }
 
@@ -1206,7 +1212,7 @@ func generatorPreservesLegacyStraightPlacementAndExactEndpoint() {
 
 @Test
 func schemaV2UsesEvaluatedShapeSupportUnionForFollowingCarry() throws {
-    let baseCoverage = nativeTestDefinition().coverage
+    let baseCoverage = nativeTestDefinition().components[0].coverage
     let baseShape = baseCoverage.shapes[0]
     let bounds = try BrushTipSupportDefinition.normalizedBounds(
         minX: -0.25,
@@ -1303,7 +1309,7 @@ func schemaV2UsesEvaluatedShapeSupportUnionForFollowingCarry() throws {
 func schemaV2FootprintCarryIsTranslationInvariantAtLargeWorldCoordinates()
     throws
 {
-    let baseCoverage = nativeTestDefinition().coverage
+    let baseCoverage = nativeTestDefinition().components[0].coverage
     let baseShape = baseCoverage.shapes[0]
     let coverage = footprintCoverage(
         base: baseCoverage,
@@ -1328,7 +1334,7 @@ func schemaV2FootprintCarryIsTranslationInvariantAtLargeWorldCoordinates()
             tipSupports: [.analyticEllipse, .analyticEllipse]
         )
         var dabs: [DabAttributes] = []
-        generator.begin(
+        generator.consumeCurrentSample(
             generatorSample(x: x, timestamp: 0, phase: .began)
         ) { dabs.append($0) }
         return try #require(dabs.first)
@@ -1349,7 +1355,7 @@ func schemaV2FootprintCarryIsTranslationInvariantAtLargeWorldCoordinates()
 
 @Test
 func schemaV2ProjectionModesChangeInstancesButNotLogicalTrace() throws {
-    let baseCoverage = nativeTestDefinition().coverage
+    let baseCoverage = nativeTestDefinition().components[0].coverage
     let coverage = footprintCoverage(
         base: baseCoverage,
         aspectRatio: 0.3,
@@ -1370,8 +1376,8 @@ func schemaV2ProjectionModesChangeInstancesButNotLogicalTrace() throws {
             seed: 0xC1_10
         )
         var dabs: [DabAttributes] = []
-        generator.begin(inputs[0]) { dabs.append($0) }
-        try generator.finish(
+        generator.consumeCurrentSample(inputs[0]) { dabs.append($0) }
+        try generator.consumeCurrentSample(
             inputs[1],
             maximumPathSubdivisionCount: 4_096
         ) { dabs.append($0) }
@@ -1481,12 +1487,12 @@ func schemaV2CurrentPostDynamicsFootprintChangesOnlyTheNextCandidate()
     )
     var constantTrace: [DabAttributes] = []
     var dynamicTrace: [DabAttributes] = []
-    constant.begin(began) { constantTrace.append($0) }
-    dynamic.begin(began) { dynamicTrace.append($0) }
-    constant.append(pressureChange) { constantTrace.append($0) }
-    dynamic.append(pressureChange) { dynamicTrace.append($0) }
-    constant.finish(ended) { constantTrace.append($0) }
-    dynamic.finish(ended) { dynamicTrace.append($0) }
+    constant.consumeCurrentSample(began) { constantTrace.append($0) }
+    dynamic.consumeCurrentSample(began) { dynamicTrace.append($0) }
+    constant.consumeCurrentSample(pressureChange) { constantTrace.append($0) }
+    dynamic.consumeCurrentSample(pressureChange) { dynamicTrace.append($0) }
+    constant.consumeCurrentSample(ended) { constantTrace.append($0) }
+    dynamic.consumeCurrentSample(ended) { dynamicTrace.append($0) }
 
     #expect(constantTrace.prefix(2).map(\.sourceDistance) == [0, 1.25])
     #expect(dynamicTrace.prefix(2).map(\.sourceDistance) == [0, 1.25])
@@ -1510,7 +1516,7 @@ func schemaV2FootprintEnvelopeRejectsBeforePublishingOrMutating() throws {
         seed: 0xA1
     )
     let collectAccepted: (DabAttributes) throws -> Void = { _ in }
-    try accepted.begin(
+    try accepted.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began),
         emit: collectAccepted
     )
@@ -1533,7 +1539,7 @@ func schemaV2FootprintEnvelopeRejectsBeforePublishingOrMutating() throws {
             minimum: limits.minimumDiameter,
             maximum: limits.maximumDiameter
         )) {
-        try outsideDiameter.begin(
+        try outsideDiameter.consumeCurrentSample(
             generatorSample(x: 0, timestamp: 0, phase: .began),
             emit: collectDiameter
         )
@@ -1563,7 +1569,7 @@ func schemaV2FootprintEnvelopeRejectsBeforePublishingOrMutating() throws {
     ))
     #expect(throws: BrushStrokeGeneratorFootprintError
         .worldPositionOutsideFootprintEnvelope) {
-        try outsideWorld.begin(hugeWorld, emit: collectWorld)
+        try outsideWorld.consumeCurrentSample(hugeWorld, emit: collectWorld)
     }
     #expect(worldSink.isEmpty)
     #expect(outsideWorld == beforeWorldRejection)
@@ -1572,7 +1578,7 @@ func schemaV2FootprintEnvelopeRejectsBeforePublishingOrMutating() throws {
 
 @Test
 func schemaV2UnsafeCompiledGeometryRejectsBeforeFirstCallback() throws {
-    let baseCoverage = nativeTestDefinition().coverage
+    let baseCoverage = nativeTestDefinition().components[0].coverage
     let baseShape = baseCoverage.shapes[0]
     let unsafeCoverage = footprintCoverage(
         base: baseCoverage,
@@ -1597,7 +1603,7 @@ func schemaV2UnsafeCompiledGeometryRejectsBeforeFirstCallback() throws {
 
     #expect(throws: BrushStrokeGeneratorFootprintError
         .unsafeCompiledFootprintEnvelope) {
-        try generator.begin(
+        try generator.consumeCurrentSample(
             generatorSample(x: 0, timestamp: 0, phase: .began),
             emit: collect
         )
@@ -1609,7 +1615,7 @@ func schemaV2UnsafeCompiledGeometryRejectsBeforeFirstCallback() throws {
 
 @Test
 func schemaV2CornerFootprintShortensOnlyTheUntraveledRemainder() throws {
-    let baseCoverage = nativeTestDefinition().coverage
+    let baseCoverage = nativeTestDefinition().components[0].coverage
     let directionalButUnrotated = BrushOutputProgramDefinition(
         baseValue: 0,
         terms: [BrushResponseTermDefinition(
@@ -1640,16 +1646,16 @@ func schemaV2CornerFootprintShortensOnlyTheUntraveledRemainder() throws {
         seed: 0xA5
     )
     var trace: [DabAttributes] = []
-    generator.begin(
+    generator.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { trace.append($0) }
-    try generator.append(
+    try generator.consumeCurrentSample(
         generatorSample(x: 12, timestamp: 1, phase: .moved),
         maximumPathSubdivisionCount: 4_096
     ) { trace.append($0) }
     let spacingBeforeTurn = generator.currentSpacing
     var turnDabs: [DabAttributes] = []
-    try generator.append(
+    try generator.consumeCurrentSample(
         generatorSample(x: 12, y: 3, timestamp: 2, phase: .moved),
         maximumPathSubdivisionCount: 4_096
     ) { turnDabs.append($0) }
@@ -1663,7 +1669,7 @@ func schemaV2CornerFootprintShortensOnlyTheUntraveledRemainder() throws {
 
     let cornerTraceIndex = trace.count + turnDabs.count - 1
     trace.append(contentsOf: turnDabs)
-    try generator.append(
+    try generator.consumeCurrentSample(
         generatorSample(x: 12, y: 24, timestamp: 3, phase: .moved),
         maximumPathSubdivisionCount: 4_096
     ) { trace.append($0) }
@@ -1679,7 +1685,7 @@ func schemaV2CornerFootprintShortensOnlyTheUntraveledRemainder() throws {
 
 @Test
 func schemaV2RectangleCarryTracksTangentAndExactReversal() throws {
-    let baseCoverage = nativeTestDefinition().coverage
+    let baseCoverage = nativeTestDefinition().components[0].coverage
     let coverage = footprintCoverage(
         base: baseCoverage,
         aspectRatio: 0.25,
@@ -1697,10 +1703,10 @@ func schemaV2RectangleCarryTracksTangentAndExactReversal() throws {
             tipSupports: [.analyticRectangle]
         )
         var result: [DabAttributes] = []
-        generator.begin(
+        generator.consumeCurrentSample(
             generatorSample(x: 0, timestamp: 0, phase: .began)
         ) { result.append($0) }
-        try generator.finish(
+        try generator.consumeCurrentSample(
             generatorSample(
                 x: end.x,
                 y: end.y,
@@ -1738,7 +1744,7 @@ func schemaV2RectangleCarryTracksTangentAndExactReversal() throws {
 func schemaV2GeneratedTracesPassIndependentRasterGapAndDensityOracle()
     throws
 {
-    let baseCoverage = nativeTestDefinition().coverage
+    let baseCoverage = nativeTestDefinition().components[0].coverage
     let fixtures: [(
         name: String,
         support: BrushTipSupportDefinition,
@@ -1789,10 +1795,10 @@ func schemaV2GeneratedTracesPassIndependentRasterGapAndDensityOracle()
             tipSupports: [fixture.support]
         )
         var trace: [DabAttributes] = []
-        generator.begin(
+        generator.consumeCurrentSample(
             generatorSample(x: 0, timestamp: 0, phase: .began)
         ) { trace.append($0) }
-        try generator.finish(
+        try generator.consumeCurrentSample(
             generatorSample(
                 x: fixture.end.x,
                 y: fixture.end.y,
@@ -1903,7 +1909,7 @@ func schemaV2MaximumCompatibilitySpacingJitterCannotInvalidateCarry()
 func schemaV2FootprintPredictionIsAValueCopyAndActualRetryIsExact()
     throws
 {
-    let baseCoverage = nativeTestDefinition().coverage
+    let baseCoverage = nativeTestDefinition().components[0].coverage
     var authoritative = try stageCGenerator(
         id: "test.generator.footprint.prediction",
         usesTravelDirection: true,
@@ -1918,17 +1924,17 @@ func schemaV2FootprintPredictionIsAValueCopyAndActualRetryIsExact()
         tipSupports: [.analyticRectangle],
         seed: 0xC1_11
     )
-    authoritative.begin(
+    authoritative.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { _ in }
-    try authoritative.append(
+    try authoritative.consumeCurrentSample(
         generatorSample(x: 24, timestamp: 1, phase: .moved),
         maximumPathSubdivisionCount: 4_096
     ) { _ in }
     let beforePrediction = authoritative
     var prediction = authoritative
     var predicted: [DabAttributes] = []
-    let outcome = try prediction.appendPredictionPrefix(
+    try prediction.consumeCurrentSample(
         generatorSample(
             x: 24,
             y: 24,
@@ -1937,7 +1943,6 @@ func schemaV2FootprintPredictionIsAValueCopyAndActualRetryIsExact()
         ).replacingKindForTest(.predicted),
         maximumPathSubdivisionCount: 4_096
     ) { predicted.append($0) }
-    #expect(outcome == .completed)
     #expect(!predicted.isEmpty)
     #expect(authoritative == beforePrediction)
 
@@ -1950,62 +1955,17 @@ func schemaV2FootprintPredictionIsAValueCopyAndActualRetryIsExact()
     )
     var afterPrediction: [DabAttributes] = []
     var expected: [DabAttributes] = []
-    try authoritative.append(
+    try authoritative.consumeCurrentSample(
         actual,
         maximumPathSubdivisionCount: 4_096
     ) { afterPrediction.append($0) }
-    try baseline.append(
+    try baseline.consumeCurrentSample(
         actual,
         maximumPathSubdivisionCount: 4_096
     ) { expected.append($0) }
 
     #expect(afterPrediction == expected)
     #expect(authoritative == baseline)
-}
-
-@Test
-func schemaV2FootprintBatchAndStreamingRoutesAreIdentical() throws {
-    let baseCoverage = nativeTestDefinition().coverage
-    let program = try stageCTestProgram(
-        id: "test.generator.footprint.batch-parity",
-        usesTravelDirection: true,
-        maximumAngularStep: .pi / 8,
-        baseSpacingFraction: 0.25,
-        maximumSpacingFraction: 0.5,
-        coverage: footprintCoverage(
-            base: baseCoverage,
-            aspectRatio: 0.25,
-            shapes: baseCoverage.shapes
-        ),
-        tipSupports: [.analyticRectangle]
-    )
-    var streaming = BrushStrokeGenerator(
-        program: program,
-        nominalDiameter: 20,
-        color: .black,
-        seed: 0xC1_12
-    )
-    var batched = streaming
-    let began = generatorSample(x: 0, timestamp: 0, phase: .began)
-    let moved = generatorSample(x: 24, timestamp: 1, phase: .moved)
-    let ended = generatorSample(
-        x: 24,
-        y: 24,
-        timestamp: 2,
-        phase: .ended
-    )
-    var streamed: [DabAttributes] = []
-    streaming.begin(began) { streamed.append($0) }
-    streaming.append(moved) { streamed.append($0) }
-    streaming.finish(ended) { streamed.append($0) }
-    let batches = [
-        try batched.beginBatch(began),
-        try batched.appendBatch(moved),
-        try batched.finishBatch(ended),
-    ]
-
-    #expect(batches.flatMap(\.dabs) == streamed)
-    #expect(batched == streaming)
 }
 
 @Test
@@ -2023,7 +1983,7 @@ func schemaV2FootprintInputRejectionAfterBeginIsAtomicAndRetryable()
     )
     let began = generatorSample(x: 0, timestamp: 0, phase: .began)
     let beginSink: (DabAttributes) throws -> Void = { _ in }
-    try generator.begin(began, emit: beginSink)
+    try generator.consumeCurrentSample(began, emit: beginSink)
     let beforeRejection = generator
     var rejected: [DabAttributes] = []
     let collectRejected: (DabAttributes) throws -> Void = {
@@ -2039,7 +1999,7 @@ func schemaV2FootprintInputRejectionAfterBeginIsAtomicAndRetryable()
     ))
     #expect(throws: BrushStrokeGeneratorFootprintError
         .worldPositionOutsideFootprintEnvelope) {
-        try generator.append(outside, emit: collectRejected)
+        try generator.consumeCurrentSample(outside, emit: collectRejected)
     }
     #expect(rejected.isEmpty)
     #expect(generator == beforeRejection)
@@ -2052,8 +2012,8 @@ func schemaV2FootprintInputRejectionAfterBeginIsAtomicAndRetryable()
     let collectExpected: (DabAttributes) throws -> Void = {
         expected.append($0)
     }
-    try generator.append(retry, emit: collectActual)
-    try baseline.append(retry, emit: collectExpected)
+    try generator.consumeCurrentSample(retry, emit: collectActual)
+    try baseline.consumeCurrentSample(retry, emit: collectExpected)
 
     #expect(actual == expected)
     #expect(generator == baseline)
@@ -2061,20 +2021,31 @@ func schemaV2FootprintInputRejectionAfterBeginIsAtomicAndRetryable()
 
 @Test
 func generatorCarriesDynamicSpacingAndNeverEmitsCoincidentDabs() throws {
-    let recipe = try BrushRecipe(
+    let definition = nativeTestDefinition(
         id: BrushRecipeID("test.generator.spacing"),
-        baseSpacingFraction: 0.1,
-        maximumSpacingFraction: 0.25,
-        spacingMapping: .linear(input: .pressure, output: 1...2)
+        placement: BrushPlacementDefinition(
+            baseSpacingFraction: 0.1,
+            maximumSpacingFraction: 0.25,
+            baseFlow: 1,
+            strokeOpacity: 1,
+            baseScatterFraction: 0,
+            baseRotation: 0,
+            baseJitterFraction: 0,
+            baseOffset: .zero
+        ),
+        dynamics: nativeTestDynamics(spacing: nativeTestMapping(
+            input: .pressure,
+            output: 1...2
+        ))
     )
     var generator = BrushStrokeGenerator(
-        program: nativeTestProgram(recipe),
+        program: nativeTestProgram(definition),
         nominalDiameter: 20,
         color: .black,
         seed: 7
     )
     var dabs: [DabAttributes] = []
-    generator.begin(
+    generator.consumeCurrentSample(
         generatorSample(
             x: 0,
             pressure: 0,
@@ -2083,7 +2054,7 @@ func generatorCarriesDynamicSpacingAndNeverEmitsCoincidentDabs() throws {
             capabilities: [.pressure]
         )
     ) { dabs.append($0) }
-    generator.append(
+    generator.consumeCurrentSample(
         generatorSample(
             x: 1,
             pressure: 1,
@@ -2092,7 +2063,7 @@ func generatorCarriesDynamicSpacingAndNeverEmitsCoincidentDabs() throws {
             capabilities: [.pressure]
         )
     ) { dabs.append($0) }
-    generator.append(
+    generator.consumeCurrentSample(
         generatorSample(
             x: 1,
             pressure: 1,
@@ -2101,7 +2072,7 @@ func generatorCarriesDynamicSpacingAndNeverEmitsCoincidentDabs() throws {
             capabilities: [.pressure]
         )
     ) { dabs.append($0) }
-    generator.finish(
+    generator.consumeCurrentSample(
         generatorSample(
             x: 8,
             pressure: 1,
@@ -2121,20 +2092,31 @@ func generatorCarriesDynamicSpacingAndNeverEmitsCoincidentDabs() throws {
 
 @Test
 func generatorInterpolatesPressurePerDab() throws {
-    let recipe = try BrushRecipe(
+    let definition = nativeTestDefinition(
         id: BrushRecipeID("test.generator.pressure-per-dab"),
-        baseSpacingFraction: 0.05,
-        maximumSpacingFraction: 0.4,
-        sizeMapping: .linear(input: .pressure, output: 0.5...1)
+        placement: BrushPlacementDefinition(
+            baseSpacingFraction: 0.05,
+            maximumSpacingFraction: 0.4,
+            baseFlow: 1,
+            strokeOpacity: 1,
+            baseScatterFraction: 0,
+            baseRotation: 0,
+            baseJitterFraction: 0,
+            baseOffset: .zero
+        ),
+        dynamics: nativeTestDynamics(size: nativeTestMapping(
+            input: .pressure,
+            output: 0.5...1
+        ))
     )
     var generator = BrushStrokeGenerator(
-        program: nativeTestProgram(recipe),
+        program: nativeTestProgram(definition),
         nominalDiameter: 20,
         color: .black,
         seed: 1
     )
     var dabs: [DabAttributes] = []
-    generator.begin(
+    generator.consumeCurrentSample(
         generatorSample(
             x: 0,
             pressure: 0,
@@ -2143,7 +2125,7 @@ func generatorInterpolatesPressurePerDab() throws {
             capabilities: [.pressure]
         )
     ) { dabs.append($0) }
-    generator.finish(
+    generator.consumeCurrentSample(
         generatorSample(
             x: 10,
             pressure: 1,
@@ -2163,28 +2145,28 @@ func generatorInterpolatesPressurePerDab() throws {
 
 @Test
 func straightGeneratorOutputIsInvariantToEventPartitioning() {
-    var single = legacyGenerator()
-    var partitioned = legacyGenerator()
+    var single = currentGenerator()
+    var partitioned = currentGenerator()
     var singleDabs: [DabAttributes] = []
     var partitionedDabs: [DabAttributes] = []
 
-    single.begin(
+    single.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { singleDabs.append($0) }
-    single.finish(
+    single.consumeCurrentSample(
         generatorSample(x: 10, timestamp: 1, phase: .ended)
     ) { singleDabs.append($0) }
 
-    partitioned.begin(
+    partitioned.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { partitionedDabs.append($0) }
-    partitioned.append(
+    partitioned.consumeCurrentSample(
         generatorSample(x: 3, timestamp: 0.3, phase: .moved)
     ) { partitionedDabs.append($0) }
-    partitioned.append(
+    partitioned.consumeCurrentSample(
         generatorSample(x: 7, timestamp: 0.7, phase: .moved)
     ) { partitionedDabs.append($0) }
-    partitioned.finish(
+    partitioned.consumeCurrentSample(
         generatorSample(x: 10, timestamp: 1, phase: .ended)
     ) { partitionedDabs.append($0) }
 
@@ -2193,24 +2175,24 @@ func straightGeneratorOutputIsInvariantToEventPartitioning() {
 
 @Test
 func clickEmitsOnceAndCancelDropsAllGeneratorCarry() {
-    var generator = legacyGenerator()
+    var generator = currentGenerator()
     var positions: [WorldPoint] = []
-    generator.begin(
+    generator.consumeCurrentSample(
         generatorSample(x: 4, timestamp: 0, phase: .began)
     ) { positions.append($0.position) }
-    generator.finish(
+    generator.consumeCurrentSample(
         generatorSample(x: 4, timestamp: 1, phase: .ended)
     ) { positions.append($0.position) }
     #expect(positions == [WorldPoint(x: 4, y: 0)])
 
-    generator.begin(
+    generator.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 2, phase: .began)
     ) { _ in }
-    generator.append(
+    generator.consumeCurrentSample(
         generatorSample(x: 1, timestamp: 3, phase: .moved)
     ) { _ in }
     generator.cancel()
-    generator.append(
+    generator.consumeCurrentSample(
         generatorSample(x: 40, timestamp: 4, phase: .moved)
     ) { positions.append($0.position) }
 
@@ -2219,30 +2201,52 @@ func clickEmitsOnceAndCancelDropsAllGeneratorCarry() {
 
 @Test
 func transformedFootprintsAreDeterministicForRecipeAndSeed() throws {
-    let recipe = try BrushRecipe(
+    let definition = nativeTestDefinition(
         id: BrushRecipeID("test.generator.transform"),
-        baseScatterFraction: 0.25,
-        aspectRatio: 0.5,
-        randomization: BrushRandomization(
+        coverage: BrushCoverageDefinition(
+            shapes: [BrushShapeLayerDefinition(
+                shape: .hardRound,
+                combination: .replace,
+                scale: 1,
+                rotation: 0,
+                offset: .zero
+            )],
+            grains: [],
+            baseHardness: 1,
+            aspectRatio: 0.5,
+            tipThreshold: 0,
+            antialiasing: true
+        ),
+        placement: BrushPlacementDefinition(
+            baseSpacingFraction: 0.125,
+            maximumSpacingFraction: 0.125,
+            baseFlow: 1,
+            strokeOpacity: 1,
+            baseScatterFraction: 0.25,
+            baseRotation: 0,
+            baseJitterFraction: 0,
+            baseOffset: .zero
+        ),
+        dynamics: nativeTestDynamics(randomization: BrushRandomization(
             spacing: 0,
             scatter: 1,
             rotation: 1,
             grain: 0,
             material: 0
-        )
+        ))
     )
     func output(seed: UInt64) -> [DabAttributes] {
         var generator = BrushStrokeGenerator(
-            program: nativeTestProgram(recipe),
+            program: nativeTestProgram(definition),
             nominalDiameter: 20,
             color: .black,
             seed: seed
         )
         var dabs: [DabAttributes] = []
-        generator.begin(
+        generator.consumeCurrentSample(
             generatorSample(x: 0, timestamp: 0, phase: .began)
         ) { dabs.append($0) }
-        generator.finish(
+        generator.consumeCurrentSample(
             generatorSample(x: 10, timestamp: 1, phase: .ended)
         ) { dabs.append($0) }
         return dabs
@@ -2254,20 +2258,20 @@ func transformedFootprintsAreDeterministicForRecipeAndSeed() throws {
 
 @Test
 func copiedGeneratorPredictionDoesNotAdvanceActualState() {
-    var actual = legacyGenerator(seed: 44)
+    var actual = currentGenerator(seed: 44)
     var actualPrefix: [DabAttributes] = []
-    actual.begin(
+    actual.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { actualPrefix.append($0) }
 
     var predicted = actual
     var predictedDabs: [DabAttributes] = []
-    predicted.append(
+    predicted.consumeCurrentSample(
         generatorSample(x: 10, timestamp: 1, phase: .moved)
     ) { predictedDabs.append($0) }
 
     var actualDabs: [DabAttributes] = []
-    actual.append(
+    actual.consumeCurrentSample(
         generatorSample(x: 10, timestamp: 1, phase: .moved)
     ) { actualDabs.append($0) }
 
@@ -2276,274 +2280,9 @@ func copiedGeneratorPredictionDoesNotAdvanceActualState() {
 }
 
 @Test
-func knownTotalDistanceAppliesStartAndEndTaperDeterministically() throws {
-    let recipe = try BrushRecipe(
-        id: BrushRecipeID("test.generator.taper"),
-        taper: BrushTaperConfiguration(
-            start: .worldPixels(4),
-            end: .worldPixels(4),
-            minimumSize: 0.25,
-            minimumFlow: 0.2,
-            effects: [.size, .flow]
-        ),
-        replayMode: .replayTail,
-        replayLimits: BrushRecipePolicy.replayTailLimits
-    )
-    let program = nativeTestProgram(recipe)
-    var generator = BrushStrokeGenerator(
-        program: program,
-        nominalDiameter: 20,
-        color: .black,
-        seed: 8
-    )
-    var dabs: [DabAttributes] = []
-    generator.begin(
-        generatorSample(x: 0, timestamp: 0, phase: .began)
-    ) { dabs.append($0) }
-    generator.finish(
-        generatorSample(x: 12, timestamp: 1, phase: .ended)
-    ) { dabs.append($0) }
-    let tapered = dabs.map {
-        BrushDynamicsEngine().applyingLegacySchemaV1EndTaper(
-            $0,
-            totalDistance: 12,
-            nominalDiameter: 20,
-            program: program
-        )
-    }
-
-    #expect(tapered.first?.diameter == 5)
-    #expect(tapered.last?.diameter == 5)
-    #expect(tapered.map(\.diameter).max() == 20)
-    #expect(tapered.first?.flow == 0.2)
-    #expect(tapered.last?.flow == 0.2)
-}
-
-@Test
-func clickAndShortStrokeTaperStayFiniteAndBounded() throws {
-    let recipe = try BrushRecipe(
-        id: BrushRecipeID("test.generator.short-taper"),
-        taper: BrushTaperConfiguration(
-            start: .diameterMultiples(2),
-            end: .diameterMultiples(2),
-            minimumSize: 0.1,
-            minimumFlow: 0.15,
-            effects: [.size, .flow]
-        ),
-        replayMode: .replayTail,
-        replayLimits: BrushRecipePolicy.replayTailLimits
-    )
-    let program = nativeTestProgram(recipe)
-    var generator = BrushStrokeGenerator(
-        program: program,
-        nominalDiameter: 20,
-        color: .black,
-        seed: 9
-    )
-    var dabs: [DabAttributes] = []
-    generator.begin(
-        generatorSample(x: 3, timestamp: 0, phase: .began)
-    ) { dabs.append($0) }
-    generator.finish(
-        generatorSample(x: 3, timestamp: 1, phase: .ended)
-    ) { dabs.append($0) }
-    let click = try #require(dabs.first)
-    let tapered = BrushDynamicsEngine().applyingLegacySchemaV1EndTaper(
-        click,
-        totalDistance: 0,
-        nominalDiameter: 20,
-        program: program
-    )
-    #expect(tapered.diameter == 2)
-    #expect(tapered.flow == 0.15)
-    #expect(tapered.brushToWorld.xAxis.x.isFinite)
-}
-
-@Test
-func batchAPIsPreserveCallbackOutputAcrossEmptyBoundaries() {
-    let began = generatorSample(x: 0, timestamp: 0, phase: .began)
-    let moved = generatorSample(x: 0.1, timestamp: 0.5, phase: .moved)
-    let ended = generatorSample(x: 6, timestamp: 1, phase: .ended)
-    var callback = legacyGenerator(seed: 51)
-    var expected: [LogicalDab] = []
-    callback.begin(began) { expected.append($0) }
-    callback.append(moved) { expected.append($0) }
-    callback.finish(ended) { expected.append($0) }
-
-    var batched = legacyGenerator(seed: 51)
-    let batches = batched.beginBatches(began)
-        + batched.appendBatches(moved)
-        + batched.finishBatches(ended)
-
-    #expect(batches.flatMap(\.dabs) == expected)
-    #expect(batches[0].ordinalRange == 0..<1)
-    #expect(batches[1].dabs.isEmpty)
-    #expect(batches[1].ordinalRange == 1..<1)
-    #expect(batches[2].ordinalRange.lowerBound == 1)
-    #expect(batched == callback)
-}
-
-@Test
-func batchBeginResetsOrdinalsForActiveAndProgressedStrokes() throws {
-    let first = generatorSample(x: 0, timestamp: 0, phase: .began)
-    let replacement = generatorSample(x: 40, timestamp: 2, phase: .began)
-
-    var activeCallback = legacyGenerator(seed: 53)
-    activeCallback.begin(first) { _ in }
-    var expectedActiveReset: [LogicalDab] = []
-    activeCallback.begin(replacement) { expectedActiveReset.append($0) }
-
-    var activeSingular = legacyGenerator(seed: 53)
-    _ = try activeSingular.beginBatch(first)
-    let activeSingularReset = try activeSingular.beginBatch(replacement)
-
-    #expect(activeSingularReset.ordinalRange == 0..<1)
-    #expect(activeSingularReset.dabs == expectedActiveReset)
-    #expect(activeSingular == activeCallback)
-
-    var activePlural = legacyGenerator(seed: 53)
-    _ = activePlural.beginBatches(first)
-    let activePluralReset = activePlural.beginBatches(replacement)
-
-    #expect(activePluralReset.map(\.ordinalRange) == [0..<1])
-    #expect(activePluralReset.flatMap(\.dabs) == expectedActiveReset)
-    #expect(activePlural == activeCallback)
-
-    let moved = generatorSample(x: 30, timestamp: 1, phase: .moved)
-    var progressedCallback = legacyGenerator(seed: 55)
-    progressedCallback.begin(first) { _ in }
-    progressedCallback.append(moved) { _ in }
-    #expect(progressedCallback.emittedDabCount > 1)
-    var expectedProgressedReset: [LogicalDab] = []
-    progressedCallback.begin(replacement) { expectedProgressedReset.append($0) }
-
-    var progressedSingular = legacyGenerator(seed: 55)
-    _ = try progressedSingular.beginBatch(first)
-    _ = try progressedSingular.appendBatch(moved)
-    #expect(progressedSingular.emittedDabCount > 1)
-    let progressedSingularReset = try progressedSingular.beginBatch(replacement)
-
-    #expect(progressedSingularReset.ordinalRange == 0..<1)
-    #expect(progressedSingularReset.dabs == expectedProgressedReset)
-    #expect(progressedSingular == progressedCallback)
-
-    var progressedPlural = legacyGenerator(seed: 55)
-    _ = progressedPlural.beginBatches(first)
-    _ = progressedPlural.appendBatches(moved)
-    #expect(progressedPlural.emittedDabCount > 1)
-    let progressedPluralReset = progressedPlural.beginBatches(replacement)
-
-    #expect(progressedPluralReset.map(\.ordinalRange) == [0..<1])
-    #expect(progressedPluralReset.flatMap(\.dabs) == expectedProgressedReset)
-    #expect(progressedPlural == progressedCallback)
-}
-
-@Test
-func pluralBatchesSplitAnEightHundredDabSampleWithoutLoss() throws {
-    let began = generatorSample(x: 0, timestamp: 0, phase: .began)
-    let ended = generatorSample(x: 2_000, timestamp: 1, phase: .ended)
-
-    var callback = legacyGenerator(seed: 57)
-    callback.begin(began) { _ in }
-    var expected: [LogicalDab] = []
-    callback.finish(ended) { expected.append($0) }
-    #expect(expected.count == 800)
-
-    var plural = legacyGenerator(seed: 57)
-    _ = plural.beginBatches(began)
-    let batches = plural.finishBatches(ended)
-
-    #expect(batches.map(\.dabs.count) == [512, 288])
-    #expect(batches.map(\.ordinalRange) == [1..<513, 513..<801])
-    #expect(batches.flatMap(\.dabs) == expected)
-    #expect(plural == callback)
-
-    var singular = legacyGenerator(seed: 57)
-    _ = try singular.beginBatch(began)
-    let beforeRejectedSample = singular
-    #expect(throws: LogicalDabBatchError.tooManyDabs(
-        actual: 800,
-        maximum: LogicalDabBatch.maximumDabCount
-    )) {
-        try singular.finishBatch(ended)
-    }
-    #expect(singular == beforeRejectedSample)
-
-    enum ExpectedFailure: Error, Equatable {
-        case rejectedSecondChunk
-    }
-    var transactional = legacyGenerator(seed: 57)
-    _ = transactional.beginBatches(began)
-    let beforeRejectedChunks = transactional
-    var validationCount = 0
-    #expect(throws: ExpectedFailure.rejectedSecondChunk) {
-        try transactional.validatedBatches(
-            ended,
-            operation: .finish
-        ) { seed, startingOrdinal, isPredicted, dabs in
-            validationCount += 1
-            guard validationCount < 2 else {
-                throw ExpectedFailure.rejectedSecondChunk
-            }
-            return try LogicalDabBatch(
-                seed: seed,
-                startingOrdinal: startingOrdinal,
-                isPredicted: isPredicted,
-                dabs: dabs
-            )
-        }
-    }
-    #expect(validationCount == 2)
-    #expect(transactional == beforeRejectedChunks)
-}
-
-@Test
-func predictionBatchDoesNotAdvanceAuthoritativeDabsOrRandomCursor() throws {
-    let began = generatorSample(x: 0, timestamp: 0, phase: .began)
-    var authoritative = legacyGenerator(seed: 63)
-    _ = try authoritative.beginBatch(began)
-    var predicted = authoritative
-    let predictedBatch = try predicted.finishBatch(
-        generatorSample(
-            x: 9,
-            timestamp: 0.5,
-            phase: .ended
-        ).replacingKindForTest(.predicted)
-    )
-    #expect(!predictedBatch.dabs.isEmpty)
-
-    var withoutPrediction = authoritative
-    let actual = generatorSample(x: 6, timestamp: 1, phase: .ended)
-    let afterPrediction = try authoritative.finishBatch(actual)
-    let baseline = try withoutPrediction.finishBatch(actual)
-
-    #expect(afterPrediction == baseline)
-    #expect(authoritative == withoutPrediction)
-}
-
-@Test
-func failedBatchValidationLeavesGeneratorExactlyUnchanged() {
-    enum ExpectedFailure: Error, Equatable {
-        case rejected
-    }
-    var generator = legacyGenerator(seed: 75)
-    let original = generator
-
-    #expect(throws: ExpectedFailure.rejected) {
-        try generator.validatedBatch(
-            generatorSample(x: 0, timestamp: 0, phase: .began),
-            operation: .begin
-        ) { _, _, _, _ in
-            throw ExpectedFailure.rejected
-        }
-    }
-    #expect(generator == original)
-}
-
-@Test
 func generatedLogicalDabStoresConsumedNativeRandomValues() throws {
-    var generator = legacyGenerator(seed: 81)
-    let batch = try generator.beginBatch(
+    var generator = currentGenerator(seed: 81)
+    let dabs = try generator.currentSampleDabs(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     )
     var random = BrushRandom(seed: 81)
@@ -2567,57 +2306,14 @@ func generatedLogicalDabStoresConsumedNativeRandomValues() throws {
         )
     }
 
-    #expect(batch.dabs.first?.randomValues.compatibility == expected)
-    #expect(batch.dabs.first?.randomValues.extensionValues == expectedExtension)
-}
-
-@Test
-func retroactiveTaperPreservesAppendedLogicalDabInputs() throws {
-    let recipe = try BrushRecipe(
-        id: BrushRecipeID("test.generator.logical-taper"),
-        taper: BrushTaperConfiguration(
-            start: .worldPixels(4),
-            end: .worldPixels(4),
-            minimumSize: 0.25,
-            minimumFlow: 0.2,
-            effects: [.size, .flow]
-        ),
-        replayMode: .replayTail,
-        replayLimits: BrushRecipePolicy.replayTailLimits
-    )
-    let program = nativeTestProgram(recipe)
-    var generator = BrushStrokeGenerator(
-        program: program,
-        nominalDiameter: 20,
-        color: .black,
-        seed: 91
-    )
-    _ = try generator.beginBatch(
-        generatorSample(x: 0, timestamp: 0, phase: .began)
-    )
-    let original = try #require(
-        try generator.finishBatch(
-            generatorSample(x: 12, timestamp: 1, phase: .ended)
-        ).dabs.last
-    )
-    let tapered = BrushDynamicsEngine().applyingLegacySchemaV1EndTaper(
-        original,
-        totalDistance: 12,
-        nominalDiameter: 20,
-        program: program
-    )
-
-    #expect(tapered.materialInputs == original.materialInputs)
-    #expect(tapered.randomValues == original.randomValues)
-    #expect(tapered.primaryGrainToWorld == original.primaryGrainToWorld)
-    #expect(tapered.secondaryGrainToWorld == original.secondaryGrainToWorld)
-    #expect(tapered.worldBounds != original.worldBounds)
+    #expect(dabs.first?.randomValues.compatibility == expected)
+    #expect(dabs.first?.randomValues.extensionValues == expectedExtension)
 }
 
 @Test
 func truncatedPredictionFinishDoesNotAdvanceOrSynthesizeEndpoint() throws {
-    var generator = legacyGenerator(seed: 93)
-    generator.begin(
+    var generator = currentGenerator(seed: 93)
+    generator.consumeCurrentSample(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { _ in }
     let before = generator
@@ -2626,16 +2322,15 @@ func truncatedPredictionFinishDoesNotAdvanceOrSynthesizeEndpoint() throws {
         timestamp: 1,
         phase: .ended
     ).replacingKindForTest(.predicted)
-    var emitted: [DabAttributes] = []
-
-    let outcome = try generator.finishPredictionPrefix(
-        terminal,
+    var cursor = try generator.emissionCursor(
+        for: terminal,
         maximumPathSubdivisionCount: 16
-    ) { emitted.append($0) }
-
-    #expect(outcome == .truncated)
-    #expect(!emitted.isEmpty)
-    #expect(emitted.last?.position != terminal.position)
+    )
+    #expect(throws: StrokePathInterpolationError.self) {
+        while !cursor.isComplete {
+            _ = try cursor.emitNextPage { _ in }
+        }
+    }
     #expect(generator == before)
 }
 
@@ -2685,14 +2380,14 @@ private func straightTrace(
 ) throws -> [DabAttributes] {
     let capabilities: StrokeInputCapabilities = [.pressure]
     var trace: [DabAttributes] = []
-    generator.begin(generatorSample(
+    generator.consumeCurrentSample(generatorSample(
         x: 0,
         pressure: pressure,
         timestamp: 0,
         phase: .began,
         capabilities: capabilities
     )) { trace.append($0) }
-    try generator.finish(
+    try generator.consumeCurrentSample(
         generatorSample(
             x: length,
             pressure: pressure,

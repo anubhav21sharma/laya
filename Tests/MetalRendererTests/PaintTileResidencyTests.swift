@@ -376,6 +376,59 @@ struct PaintTileResidencyTests {
         try store.release(lease, surfaceID: surfaceID, currentGeneration: 3)
     }
 
+    @Test
+    func pressureIncludesOutstandingCoverageReservationLiability() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let coverageBytes = try #require(
+            DepositionComponentCoverage.residentByteCount(
+                width: PaintTileDescriptor.side,
+                height: PaintTileDescriptor.side
+            )
+        )
+        let store = PaintTileStore(
+            device: device,
+            byteBudget: bytes * 3
+        )
+        let surface = TiledRasterSurface(
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 256, height: 256)
+        )
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        let lease = try surface.reserveSortedUniqueTiles(
+            at: [coordinate],
+            pinReasons: [.inFlight]
+        )
+        let provisional = try surface.makeProvisionalBindings(
+            for: lease,
+            coordinates: [coordinate],
+            workspace: PaintTileProvisionalWorkspace(
+                maximumBindingCount: 1
+            )
+        )
+
+        #expect(try store.applyMemoryPressure(
+            targetResidentBytes: bytes
+        ) == .unsatisfied(
+            targetBytes: bytes,
+            remainingResidentBytes: bytes + coverageBytes,
+            pinnedBytes: bytes + coverageBytes,
+            backingByteCount: 0,
+            evictedIdentities: []
+        ))
+        #expect(store.snapshot().residentByteCount == bytes)
+
+        try surface.cancelProvisionalBindings(provisional)
+        #expect(try store.applyMemoryPressure(
+            targetResidentBytes: bytes
+        ) == .satisfied(
+            evictedIdentities: [],
+            residentByteCount: bytes,
+            backingByteCount: 0
+        ))
+        try surface.returnLease(lease)
+    }
+
     private func identity(
         layer: UUID,
         x: Int,

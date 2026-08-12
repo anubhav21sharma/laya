@@ -25,8 +25,12 @@ public enum EditorBrushSelectionResolution: Equatable, Sendable {
     case laboratoryOnly(ProfessionalBrushEntry)
 }
 
+public enum EditorBrushSelectionError: Error, Equatable, Sendable {
+    case retiredIdentifier(BrushRecipeID)
+}
+
 /// The user-facing editor catalog. Professional definitions remain isolated in
-/// Brush Lab while their corrective rebuild is pending.
+/// Brush Lab while manual quality and physical profile validation are pending.
 public enum EditorBrushCatalog {
     public static let nativeInk = EditorBrushEntry(
         displayName: AnchorBrushCatalog.ink.displayName,
@@ -49,14 +53,6 @@ public enum EditorBrushCatalog {
         definition: AnchorBrushCatalog.airbrush.definition
     )
 
-    /// Source-compatible names for the former product picker entries. These
-    /// resolve to the vetted native anchors; professional definitions live only
-    /// in `ProfessionalBrushCatalog` for Brush Lab.
-    public static var technicalInk: EditorBrushEntry { nativeInk }
-    public static var graphitePencil: EditorBrushEntry { nativeDryMedia }
-    public static var naturalCharcoal: EditorBrushEntry { nativeDryMedia }
-    public static var chiselMarker: EditorBrushEntry { nativeMarker }
-
     public static let drawEntries = [
         nativeInk,
         nativeDryMedia,
@@ -71,29 +67,21 @@ public enum EditorBrushCatalog {
         drawEntries.first { $0.id == id }
     }
 
-    /// Resolves current editor IDs and their retained legacy aliases. The
-    /// professional IDs deliberately remain unresolved for product selection.
+    /// Resolves only current editor IDs. Professional IDs remain unresolved
+    /// for product selection.
     public static func resolveSelection(_ id: BrushRecipeID) -> BrushRecipeID? {
-        switch id.rawValue {
-        case nativeInk.id.rawValue,
-             nativeDryMedia.id.rawValue,
-             nativeMarker.id.rawValue,
-             nativeGlaze.id.rawValue,
-             nativeAirbrush.id.rawValue:
-            id
-        case "builtin.native-ink", "builtin.technical-ink":
-            nativeInk.id
-        case "builtin.native-dry-media", "builtin.dry-pencil":
-            nativeDryMedia.id
-        case "builtin.native-marker", "builtin.glaze-marker":
-            nativeMarker.id
-        case "builtin.native-glaze":
-            nativeGlaze.id
-        case "builtin.native-airbrush":
-            nativeAirbrush.id
-        default:
-            nil
+        drawEntry(for: id) == nil ? nil : id
+    }
+
+    /// Resolves a persisted or otherwise external selection without reviving
+    /// retired native aliases. Unknown IDs retain the caller's recovery policy.
+    public static func resolveCurrentSelection(
+        _ id: BrushRecipeID
+    ) throws -> BrushRecipeID? {
+        if id.rawValue == "builtin.bounded-wash" {
+            throw EditorBrushSelectionError.retiredIdentifier(id)
         }
+        return resolveSelection(id)
     }
 
     /// Keeps persisted professional IDs explicit: they resolve only to their

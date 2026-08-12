@@ -292,10 +292,10 @@ final class BrushLabSession {
 
     var settingGroups: [BrushLabSettingGroup] {
         guard let definition = package?.definition else { return [] }
-        let shapeNames = definition.coverage.shapes.map {
+        let shapeNames = definition.components[0].coverage.shapes.map {
             String(describing: $0.shape)
         }.joined(separator: ", ")
-        let grainNames = definition.coverage.grains.map {
+        let grainNames = definition.components[0].coverage.grains.map {
             String(describing: $0.grain)
         }.joined(separator: ", ")
         let capabilityNames = definition.capabilities.map {
@@ -330,11 +330,11 @@ final class BrushLabSession {
                     ),
                     .init(
                         name: "Hardness",
-                        value: Self.number(definition.coverage.baseHardness)
+                        value: Self.number(definition.components[0].coverage.baseHardness)
                     ),
                     .init(
                         name: "Aspect",
-                        value: Self.number(definition.coverage.aspectRatio)
+                        value: Self.number(definition.components[0].coverage.aspectRatio)
                     ),
                 ]
             ),
@@ -344,28 +344,28 @@ final class BrushLabSession {
                     .init(
                         name: "Spacing",
                         value: Self.number(
-                            definition.placement.baseSpacingFraction
+                            definition.components[0].placement.baseSpacingFraction
                         )
                     ),
                     .init(
                         name: "Flow",
-                        value: Self.number(definition.placement.baseFlow)
+                        value: Self.number(definition.components[0].placement.baseFlow)
                     ),
                     .init(
                         name: "Opacity",
                         value: Self.number(
-                            definition.placement.strokeOpacity
+                            definition.components[0].placement.strokeOpacity
                         )
                     ),
                     .init(
                         name: "Scatter",
                         value: Self.number(
-                            definition.placement.baseScatterFraction
+                            definition.components[0].placement.baseScatterFraction
                         )
                     ),
                     .init(
                         name: "Rotation",
-                        value: Self.number(definition.placement.baseRotation)
+                        value: Self.number(definition.components[0].placement.baseRotation)
                     ),
                 ]
             ),
@@ -374,23 +374,23 @@ final class BrushLabSession {
                 items: [
                     .init(
                         name: "Size",
-                        value: Self.mapping(definition.dynamics.size)
+                        value: Self.mapping(definition.components[0].dynamics.size)
                     ),
                     .init(
                         name: "Flow",
-                        value: Self.mapping(definition.dynamics.flow)
+                        value: Self.mapping(definition.components[0].dynamics.flow)
                     ),
                     .init(
                         name: "Spacing",
-                        value: Self.mapping(definition.dynamics.spacing)
+                        value: Self.mapping(definition.components[0].dynamics.spacing)
                     ),
                     .init(
                         name: "Rotation",
-                        value: Self.mapping(definition.dynamics.rotation)
+                        value: Self.mapping(definition.components[0].dynamics.rotation)
                     ),
                     .init(
                         name: "Scatter",
-                        value: Self.mapping(definition.dynamics.scatter)
+                        value: Self.mapping(definition.components[0].dynamics.scatter)
                     ),
                 ]
             ),
@@ -399,23 +399,23 @@ final class BrushLabSession {
                 items: [
                     .init(
                         name: "Accumulation",
-                        value: definition.material.accumulation.rawValue
+                        value: definition.components[0].material.accumulation.rawValue
                     ),
                     .init(
                         name: "Interaction",
-                        value: definition.material.interaction.rawValue
+                        value: definition.components[0].material.interaction.rawValue
                     ),
                     .init(
                         name: "Edge",
-                        value: definition.material.edgeTreatment.rawValue
+                        value: definition.components[0].material.edgeTreatment.rawValue
                     ),
                     .init(
                         name: "Strength",
-                        value: Self.number(definition.material.strength)
+                        value: Self.number(definition.components[0].material.strength)
                     ),
                     .init(
                         name: "Wetness",
-                        value: Self.number(definition.material.wetness)
+                        value: Self.number(definition.components[0].material.wetness)
                     ),
                 ]
             ),
@@ -526,10 +526,13 @@ final class BrushLabSession {
         do {
             let contentHash = try package.contentHash
             packageContentHash = contentHash
-            if package.definition.material.interaction != .none {
+            if let unsupportedInteraction = package.definition.components
+                .map(\.material.interaction)
+                .first(where: { $0 != .none })
+            {
                 compilationReport = try compiler.inspectionReport(for: package)
                 drawingAvailability = .unsupportedInteraction(
-                    package.definition.material.interaction
+                    unsupportedInteraction
                 )
                 return
             }
@@ -913,7 +916,7 @@ final class BrushLabSession {
             semanticHash: compiledBrush.renderIdentity.semanticHash,
             pipelineKey: Self.pipelineKey(compiledBrush),
             abiVersion:
-                compiledBrush.depositionPipeline.key.abiVersion,
+                compiledBrush.primaryComponent.depositionPipeline.key.abiVersion,
             diagnostics: makeDiagnostics(),
             professionalPasses: []
         )
@@ -1089,7 +1092,7 @@ final class BrushLabSession {
             semanticHash: compiledBrush.renderIdentity.semanticHash,
             pipelineKey: Self.pipelineKey(compiledBrush),
             abiVersion:
-                compiledBrush.depositionPipeline.key.abiVersion,
+                compiledBrush.primaryComponent.depositionPipeline.key.abiVersion,
             diagnostics: makeDiagnostics(),
             professionalPasses: professionalPassRecords
         )
@@ -1395,13 +1398,15 @@ final class BrushLabSession {
                 return .init(
                     packageContentHash: report.packageContentHash,
                     backend: report.backend.rawValue,
-                    pipelineAccumulation: $0.pipelineKey.accumulation.rawValue,
+                    pipelineAccumulation: $0.primaryComponent.pipelineKey.accumulation.rawValue,
                     pipelineEdgeTreatment:
-                        $0.pipelineKey.edgeTreatment.rawValue,
-                    textureCount: $0.textures.count,
-                    usesDestinationSampling:
-                        $0.pipelineKey.functionConstants
-                            .usesDestinationSampling,
+                        $0.primaryComponent.pipelineKey.edgeTreatment.rawValue,
+                    textureCount: Set(
+                        $0.primaryComponent.textures.keys
+                            + ($0.secondaryComponent.map {
+                                Array($0.textures.keys)
+                            } ?? [])
+                    ).count,
                     performanceTier: report.performance.tier.rawValue,
                     performanceBasis: report.performance.basis.rawValue,
                     performanceReason: report.performance.reason,
@@ -1668,19 +1673,23 @@ final class BrushLabSession {
     private func makeDiagnostics() -> BrushLabDiagnostics {
         let renderer = controller.renderer.brushLabDiagnosticSnapshot
         let deposition = renderer.deposition
-        let textures = compiledBrush?.textures.map {
+        var compiledTextures = compiledBrush?.primaryComponent.textures ?? [:]
+        if let secondaryTextures = compiledBrush?.secondaryComponent?.textures {
+            compiledTextures.merge(secondaryTextures) { current, _ in current }
+        }
+        let textures = compiledTextures.map {
             BrushLabDiagnostics.Texture(
                 id: $0.key,
                 mipmapLevels: $0.value.mipmapLevelCount,
                 residentBytes: $0.value.allocatedSize
             )
-        }.sorted { $0.id < $1.id } ?? []
+        }.sorted { $0.id < $1.id }
         return BrushLabDiagnostics(
             schemaVersion: 1,
             definitionHash: compiledBrush?.renderIdentity.semanticHash,
             packageHash: packageContentHash,
             pipelineKey: compiledBrush.map(Self.pipelineKey),
-            abiVersion: compiledBrush?.depositionPipeline.key.abiVersion,
+            abiVersion: compiledBrush?.primaryComponent.depositionPipeline.key.abiVersion,
             textures: textures,
             residentResourceBytes:
                 compiledBrush?.report.residentResourceBytes ?? 0,
@@ -1706,7 +1715,7 @@ final class BrushLabSession {
     }
 
     private static func pipelineKey(_ brush: CompiledBrush) -> String {
-        let key = brush.depositionPipeline.key
+        let key = brush.primaryComponent.depositionPipeline.key
         let constants = key.brush.functionConstants
         return [
             key.brush.backend.rawValue,
@@ -1715,7 +1724,6 @@ final class BrushLabSession {
             "shape2=\(constants.usesSecondaryShape)",
             "grain=\(constants.usesGrain)",
             "grain2=\(constants.usesSecondaryGrain)",
-            "destination=\(constants.usesDestinationSampling)",
             "abi=\(key.abiVersion)",
             "format=\(key.colorPixelFormatRawValue)",
             "samples=\(key.sampleCount)",
@@ -1792,9 +1800,9 @@ final class BrushLabSession {
             ),
         ]
         let base = anchor.definition
+        let baseComponent = base.components[0]
         let definition = try BrushDefinition(
             id: base.id,
-            schemaVersion: base.schemaVersion,
             metadata: base.metadata,
             capabilities: base.capabilities,
             resources: references,
@@ -1822,17 +1830,17 @@ final class BrushLabSession {
                         strength: 0.68
                     ),
                 ],
-                baseHardness: base.coverage.baseHardness,
+                baseHardness: baseComponent.coverage.baseHardness,
                 aspectRatio: 0.63,
-                tipThreshold: base.coverage.tipThreshold,
-                antialiasing: base.coverage.antialiasing
+                tipThreshold: baseComponent.coverage.tipThreshold,
+                antialiasing: baseComponent.coverage.antialiasing
             ),
-            placement: base.placement,
-            dynamics: base.dynamics,
-            color: base.color,
-            material: base.material,
+            placement: baseComponent.placement,
+            dynamics: baseComponent.dynamics,
+            color: baseComponent.color,
+            material: baseComponent.material,
             stabilization: base.stabilization,
-            taper: base.taper,
+            taper: baseComponent.taper,
             replayMode: base.replayMode,
             replayLimits: base.replayLimits,
             seedPolicy: base.seedPolicy,
@@ -2179,7 +2187,6 @@ private struct BrushLabEvidenceBundle: Encodable {
         let pipelineAccumulation: String
         let pipelineEdgeTreatment: String
         let textureCount: Int
-        let usesDestinationSampling: Bool
         let performanceTier: String
         let performanceBasis: String
         let performanceReason: String
@@ -2250,6 +2257,15 @@ private struct BrushLabEvidenceBundle: Encodable {
         let rasterRevisionResidentBytes: Int
         let builtInTextureCount: Int
         let assetFallbackCount: Int
+        let rendererEventPendingCount: Int
+        let rendererEventPendingHighWater: Int
+        let rendererEventStaleGenerationDiscardCount: UInt64
+        let rendererEventScheduledContinuationCount: UInt64
+        let viewportDrawableWidth: Float
+        let viewportDrawableHeight: Float
+        let viewportWorldCenterX: Float
+        let viewportWorldCenterY: Float
+        let viewportZoom: Float
 
         init(_ snapshot: BrushLabRendererDiagnosticSnapshot) {
             totalDabsThisStroke = snapshot.totalDabsThisStroke
@@ -2263,6 +2279,19 @@ private struct BrushLabEvidenceBundle: Encodable {
                 snapshot.rasterRevisionResidentBytes
             builtInTextureCount = snapshot.builtInTextureCount
             assetFallbackCount = snapshot.assetFallbackCount
+            rendererEventPendingCount =
+                snapshot.rendererEvents.pendingEventCount
+            rendererEventPendingHighWater =
+                snapshot.rendererEvents.pendingHighWater
+            rendererEventStaleGenerationDiscardCount =
+                snapshot.rendererEvents.staleGenerationDiscardCount
+            rendererEventScheduledContinuationCount =
+                snapshot.rendererEvents.scheduledContinuationCount
+            viewportDrawableWidth = snapshot.viewportDrawableSize.width
+            viewportDrawableHeight = snapshot.viewportDrawableSize.height
+            viewportWorldCenterX = snapshot.viewportWorldCenter.x
+            viewportWorldCenterY = snapshot.viewportWorldCenter.y
+            viewportZoom = snapshot.viewportZoom
         }
     }
 

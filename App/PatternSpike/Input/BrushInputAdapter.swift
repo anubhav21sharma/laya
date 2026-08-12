@@ -248,6 +248,21 @@ struct BrushInputAdapter {
         ])
     }
 
+    func cursorSample(
+        for event: NSEvent,
+        position: ScreenPoint
+    ) -> StrokeSample? {
+        cursorSample(nativeSample(
+            for: event,
+            phase: .moved,
+            position: position
+        ))
+    }
+
+    func cursorSample(_ native: NativeSample) -> StrokeSample? {
+        normalizedSample(native)
+    }
+
     /// Produces a stable chronological batch. Equal timestamps retain native
     /// delivery order, which is significant for lifecycle samples.
     func orderedSamples(

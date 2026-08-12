@@ -48,10 +48,8 @@ struct StrokeRenderStyleTests {
     }
 
     private func styleProgram() throws -> BrushProgram {
-        let recipe = try BrushRecipe(id: BrushRecipeID("style.identity"))
-        let definition = try LegacyBrushRecipeAdapter.definition(
-            from: recipe,
-            displayName: "Style Identity"
+        let definition = nativeTestDefinition(
+            id: BrushRecipeID("style.identity")
         )
         return try BrushProgramCompiler.compile(definition)
     }

@@ -23,12 +23,8 @@ enum StrokePrivateSurfaceEncodingError: Error, Equatable, Sendable {
 struct StrokeMetalResourceDescriptor: @unchecked Sendable {
     let surfaces: StrokeTileSurfaceResources
     let brushRenderIdentity: BrushRenderIdentity
-    let pipelineState: any MTLRenderPipelineState
-    let materialUniforms: PatternDepositionMaterialUniforms
-    let primaryShape: (any MTLTexture)?
-    let secondaryShape: (any MTLTexture)?
-    let primaryGrain: (any MTLTexture)?
-    let secondaryGrain: (any MTLTexture)?
+    let primaryComponent: StrokeTileComponentEncodingBinding
+    let secondaryComponent: StrokeTileComponentEncodingBinding?
     let frameUniforms: PatternGridFrameUniforms
     let radialLayout: RadialSectorLayout?
     let forceCommandFailure: Bool
@@ -41,16 +37,20 @@ struct StrokeMetalResourceDescriptor: @unchecked Sendable {
         radialLayout: RadialSectorLayout? = nil,
         forceCommandFailure: Bool
     ) {
-        let compiledResources = brush.resources
-        let textures = compiledResources.depositionMaterial.textures
         self.surfaces = surfaces
         brushRenderIdentity = brush.renderIdentity
-        pipelineState = surfaces.pipeline.state
-        materialUniforms = compiledResources.depositionMaterial.uniforms
-        primaryShape = textures[.primaryShape]
-        secondaryShape = textures[.secondaryShape]
-        primaryGrain = textures[.primaryGrain]
-        secondaryGrain = textures[.secondaryGrain]
+        primaryComponent = StrokeTileComponentEncodingBinding(
+            ordinal: brush.primaryComponent.ordinal,
+            pipeline: brush.primaryComponent.depositionPipeline,
+            material: brush.primaryComponent.depositionMaterial
+        )
+        secondaryComponent = brush.secondaryComponent.map {
+            StrokeTileComponentEncodingBinding(
+                ordinal: $0.ordinal,
+                pipeline: $0.depositionPipeline,
+                material: $0.depositionMaterial
+            )
+        }
         self.frameUniforms = frameUniforms
         self.radialLayout = radialLayout
         self.forceCommandFailure = forceCommandFailure
@@ -141,11 +141,8 @@ final class StrokePrivateSurfaceEncoder: @unchecked Sendable {
         try tileEncoder.configure(
             StrokeTileEncodingConfiguration(
                 resources: resources,
-                materialUniforms: configuration.materialUniforms,
-                primaryShape: configuration.primaryShape,
-                secondaryShape: configuration.secondaryShape,
-                primaryGrain: configuration.primaryGrain,
-                secondaryGrain: configuration.secondaryGrain,
+                primaryComponent: configuration.primaryComponent,
+                secondaryComponent: configuration.secondaryComponent,
                 frameUniforms: configuration.frameUniforms,
                 radialLayout: configuration.radialLayout,
                 forceCommandFailure: configuration.forceCommandFailure

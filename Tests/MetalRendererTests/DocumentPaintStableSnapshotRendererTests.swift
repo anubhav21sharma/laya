@@ -1487,7 +1487,9 @@ struct DocumentPaintStableSnapshotRendererTests {
         #expect(planCache.snapshot() == SparseTileSamplingPlanCacheSnapshot(
             cachedContentCount: 0,
             activeContentAcquisitionCount: 0,
-            pendingRetirementCount: 0
+            pendingRetirementCount: 0,
+            hitCount: 0,
+            missCount: 1
         ))
         #expect(snapshot.activeChildSelectionCount == 0)
 

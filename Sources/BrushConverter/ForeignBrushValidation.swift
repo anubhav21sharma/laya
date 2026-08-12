@@ -9,6 +9,7 @@ public enum ForeignBrushLimits {
     public static let maximumVectorComponents = 16
     public static let maximumResourcesPerBrush = 64
     public static let maximumDiagnosticsPerBrush = 4_096
+    public static let maximumComponentsPerBrush = 2
     public static let maximumDiagnosticCodeUTF8Bytes = 256
     public static let maximumDiagnosticMessageUTF8Bytes = 4_096
     public static let maximumSourceImageDimension = 16_384

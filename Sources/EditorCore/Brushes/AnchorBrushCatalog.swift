@@ -34,11 +34,6 @@ public enum AnchorBrushCatalog {
     public static let all = drawAnchors + [eraser]
     public static let defaultDraw = ink
 
-    @available(*, deprecated, renamed: "ink") public static let technicalInk = ink
-    @available(*, deprecated, renamed: "dryMedia") public static let dryPencil = dryMedia
-    @available(*, deprecated, renamed: "marker") public static let glazeMarker = marker
-    @available(*, deprecated, renamed: "eraser") public static let hardRoundEraser = eraser
-
     public static func entry(for id: BrushRecipeID) -> AnchorBrushEntry? {
         all.first { $0.id == id }
     }

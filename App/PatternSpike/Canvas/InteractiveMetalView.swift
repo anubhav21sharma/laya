@@ -6,27 +6,124 @@ import PatternEngine
 
 @MainActor
 private final class BrushCursorView: NSView {
+    static let strokeInset: CGFloat = 1.5
+
     override var isOpaque: Bool { false }
+    override var isFlipped: Bool { true }
+
+    private var descriptor: BrushCursorDescriptor?
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         nil
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let extent = min(bounds.width, bounds.height)
-        guard extent > 0 else { return }
-
-        let outerWidth = min(3, extent)
-        let path = NSBezierPath(
-            ovalIn: bounds.insetBy(
-                dx: outerWidth * 0.5,
-                dy: outerWidth * 0.5
-            )
+        guard let descriptor, bounds.width > 0, bounds.height > 0 else {
+            return
+        }
+        let offset = SIMD2(
+            Float(Self.strokeInset) - descriptor.envelopeBounds.minimum.x,
+            Float(Self.strokeInset) - descriptor.envelopeBounds.minimum.y
         )
+        if descriptor.envelopeBounds != descriptor.coreBounds {
+            let envelope = NSBezierPath(rect: CGRect(
+                x: CGFloat(
+                    descriptor.envelopeBounds.minimum.x + offset.x
+                ),
+                y: CGFloat(
+                    descriptor.envelopeBounds.minimum.y + offset.y
+                ),
+                width: CGFloat(descriptor.envelopeBounds.width),
+                height: CGFloat(descriptor.envelopeBounds.height)
+            ))
+            envelope.lineWidth = 1
+            envelope.setLineDash([4, 3], count: 2, phase: 0)
+            NSColor.black.withAlphaComponent(0.55).setStroke()
+            envelope.stroke()
+        }
+
+        stroke(component: descriptor.primaryComponent, offset: offset)
+        if let secondary = descriptor.secondaryComponent {
+            stroke(component: secondary, offset: offset)
+        }
+    }
+
+    func update(descriptor: BrushCursorDescriptor) {
+        self.descriptor = descriptor
+        needsDisplay = true
+    }
+
+    var renderedLayerCountForTesting: Int {
+        guard let descriptor else { return 0 }
+        return layerCount(descriptor.primaryComponent)
+            + (descriptor.secondaryComponent.map(layerCount) ?? 0)
+    }
+
+    private func stroke(
+        component: BrushCursorComponentDescriptor,
+        offset: SIMD2<Float>
+    ) {
+        if let secondary = component.secondary {
+            switch component.secondaryCombination {
+            case .replace:
+                stroke(path(for: secondary, offset: offset))
+            case .multiply, .minimum, .maximum, nil:
+                stroke(path(for: component.primary, offset: offset))
+                stroke(path(for: secondary, offset: offset))
+            }
+        } else {
+            stroke(path(for: component.primary, offset: offset))
+        }
+    }
+
+    private func layerCount(
+        _ component: BrushCursorComponentDescriptor
+    ) -> Int {
+        guard component.secondary != nil else { return 1 }
+        return component.secondaryCombination == .replace ? 1 : 2
+    }
+
+    private func path(
+        for layer: BrushCursorLayerDescriptor,
+        offset: SIMD2<Float>
+    ) -> NSBezierPath {
+        let path: NSBezierPath
+        switch layer.shape {
+        case .analyticEllipse:
+            path = NSBezierPath(ovalIn: CGRect(x: -1, y: -1, width: 2, height: 2))
+        case .analyticRectangle:
+            path = NSBezierPath(rect: CGRect(x: -1, y: -1, width: 2, height: 2))
+        case let .contour(points):
+            path = NSBezierPath()
+            if let first = points.first {
+                path.move(to: CGPoint(x: CGFloat(first.x), y: CGFloat(first.y)))
+                for point in points.dropFirst() {
+                    path.line(to: CGPoint(
+                        x: CGFloat(point.x),
+                        y: CGFloat(point.y)
+                    ))
+                }
+                path.close()
+            }
+        }
+        let transform = layer.normalizedTipToLogical
+        path.transform(using: AffineTransform(
+            m11: CGFloat(transform.xAxis.x),
+            m12: CGFloat(transform.xAxis.y),
+            m21: CGFloat(transform.yAxis.x),
+            m22: CGFloat(transform.yAxis.y),
+            tX: CGFloat(transform.translation.x + offset.x),
+            tY: CGFloat(transform.translation.y + offset.y)
+        ))
+        return path
+    }
+
+    private func stroke(_ path: NSBezierPath) {
+        let extent = min(bounds.width, bounds.height)
+        let outerWidth = min(3, extent)
         path.lineWidth = outerWidth
         NSColor.black.withAlphaComponent(0.78).setStroke()
         path.stroke()
-
         path.lineWidth = min(1, outerWidth * 0.5)
         NSColor.white.withAlphaComponent(0.95).setStroke()
         path.stroke()
@@ -51,6 +148,10 @@ final class InteractiveMetalView: MTKView {
     private let brushCursorView = BrushCursorView(frame: .zero)
     private var brushDiameter: Float = 20
     private var brushCursorLocation: CGPoint?
+    private var brushCursorSample: StrokeSample?
+    private var brushCursorDirection: Float = 0
+    private var brushCursorDescriptor: BrushCursorDescriptor?
+    private var brushCursorSupportFrame: CGRect = .zero
     private var brushTrackingArea: NSTrackingArea?
 
     private static let invisibleCursor: NSCursor = {
@@ -130,6 +231,7 @@ final class InteractiveMetalView: MTKView {
         }
         guard let window else { return }
         updateRefreshRate(for: window)
+        updateBrushCursorFrame()
         window.invalidateCursorRects(for: self)
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didChangeScreenNotification,
@@ -139,8 +241,14 @@ final class InteractiveMetalView: MTKView {
             MainActor.assumeIsolated {
                 guard let self, let window else { return }
                 self.updateRefreshRate(for: window)
+                self.updateBrushCursorFrame()
             }
         }
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        updateBrushCursorFrame()
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -302,6 +410,7 @@ final class InteractiveMetalView: MTKView {
 
     override func mouseExited(with event: NSEvent) {
         brushCursorLocation = nil
+        brushCursorSample = nil
         brushCursorView.isHidden = true
     }
 
@@ -311,9 +420,6 @@ final class InteractiveMetalView: MTKView {
             return
         }
         brushDiameter = diameter
-        brushCursorView.setAccessibilityValue(
-            "\(Int(diameter.rounded())) px"
-        )
         updateBrushCursorFrame()
     }
 
@@ -334,6 +440,10 @@ final class InteractiveMetalView: MTKView {
     }
 
     var brushCursorFrameForTesting: CGRect {
+        brushCursorSupportFrame
+    }
+
+    var brushCursorDrawingFrameForTesting: CGRect {
         brushCursorView.frame
     }
 
@@ -345,6 +455,18 @@ final class InteractiveMetalView: MTKView {
         brushDiameter
     }
 
+    var brushCursorDescriptorForTesting: BrushCursorDescriptor? {
+        brushCursorDescriptor
+    }
+
+    var brushCursorRenderedLayerCountForTesting: Int {
+        brushCursorView.renderedLayerCountForTesting
+    }
+
+    var brushCursorAccessibilityValueForTesting: String? {
+        brushCursorView.accessibilityValue() as? String
+    }
+
     private func localPoint(_ event: NSEvent) -> ScreenPoint {
         let local = convert(event.locationInWindow, from: nil)
         return ScreenPoint(x: Float(local.x), y: Float(local.y))
@@ -352,9 +474,22 @@ final class InteractiveMetalView: MTKView {
 
     private func updateBrushCursorLocation(with event: NSEvent) {
         let point = localPoint(event)
+        if let previous = brushCursorLocation {
+            let delta = SIMD2(
+                point.x - Float(previous.x),
+                point.y - Float(previous.y)
+            )
+            if hypot(delta.x, delta.y) > 0.001 {
+                brushCursorDirection = atan2(delta.y, delta.x)
+            }
+        }
         brushCursorLocation = CGPoint(
             x: CGFloat(point.x),
             y: CGFloat(point.y)
+        )
+        brushCursorSample = brushInputAdapter.cursorSample(
+            for: event,
+            position: point
         )
         brushCursorView.isHidden = false
         updateBrushCursorFrame()
@@ -373,15 +508,59 @@ final class InteractiveMetalView: MTKView {
         let contentScale = (scaleX + scaleY) * 0.5
         guard contentScale.isFinite, contentScale > 0 else { return }
 
-        let diameter = CGFloat(brushDiameter * gridRenderer.viewport.zoom)
-            / contentScale
-        brushCursorView.frame = CGRect(
-            x: brushCursorLocation.x - diameter * 0.5,
-            y: brushCursorLocation.y - diameter * 0.5,
-            width: diameter,
-            height: diameter
+        guard let brush = gridRenderer.preparedBrush(for: .draw) else {
+            brushCursorView.isHidden = true
+            brushCursorDescriptor = nil
+            return
+        }
+        let sample = brushCursorSample
+        let capabilities = sample?.capabilities ?? []
+        guard let input = try? BrushCursorInput(
+            nominalDiameter: brushDiameter,
+            pressure: capabilities.contains(.pressure)
+                ? sample?.pressure
+                : nil,
+            altitude: capabilities.contains(.altitude)
+                ? sample?.altitude
+                : nil,
+            azimuth: capabilities.contains(.azimuth)
+                ? sample?.azimuth
+                : nil,
+            roll: capabilities.contains(.roll) ? sample?.roll : nil,
+            tangentialPressure: capabilities.contains(.tangentialPressure)
+                ? sample?.tangentialPressure
+                : nil,
+            direction: brushCursorDirection,
+            deformation: .identity,
+            viewportScale: gridRenderer.viewport.zoom,
+            backingScale: Float(contentScale)
+        ) else {
+            brushCursorView.isHidden = true
+            brushCursorDescriptor = nil
+            return
+        }
+        guard let descriptor = try? brush.cursorDescriptor(input: input) else {
+            brushCursorView.isHidden = true
+            brushCursorDescriptor = nil
+            return
+        }
+        brushCursorDescriptor = descriptor
+        let cursorBounds = descriptor.envelopeBounds
+        brushCursorSupportFrame = CGRect(
+            x: brushCursorLocation.x + CGFloat(cursorBounds.minimum.x),
+            y: brushCursorLocation.y + CGFloat(cursorBounds.minimum.y),
+            width: CGFloat(cursorBounds.width),
+            height: CGFloat(cursorBounds.height)
         )
-        brushCursorView.needsDisplay = true
+        brushCursorView.frame = brushCursorSupportFrame.insetBy(
+            dx: -BrushCursorView.strokeInset,
+            dy: -BrushCursorView.strokeInset
+        )
+        brushCursorView.setAccessibilityValue(
+            "\(Int(cursorBounds.width.rounded())) × "
+                + "\(Int(cursorBounds.height.rounded())) px"
+        )
+        brushCursorView.update(descriptor: descriptor)
     }
 
     private var coordinateTransform: DrawableCoordinateTransform? {

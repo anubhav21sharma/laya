@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 @testable import MetalRenderer
+@testable import MetalRendererDiagnostics
 import PatternEngine
 import Testing
 

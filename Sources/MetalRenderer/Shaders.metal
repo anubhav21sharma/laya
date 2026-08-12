@@ -558,14 +558,31 @@ static float patternDepositionShapeSample(
             radius + 0.5 - length(shapeLocal * radius)
         );
     }
+    if (kind == PatternDepositionShapeKindSoftRound) {
+        return patternDepositionClamp01(1.0 - length(shapeLocal));
+    }
+    if (kind == PatternDepositionShapeKindRectangle) {
+        return patternDepositionClamp01(
+            radius + 0.5 - max(
+                abs(shapeLocal.x * radius),
+                abs(shapeLocal.y * radius)
+            )
+        );
+    }
     return texture.sample(
         shapeSampler,
         shapeLocal * 0.5 + 0.5
     ).r;
 }
 
-fragment float4 patternDepositionFragment(
+struct PatternDepositionFragmentOutput {
+    float4 color [[color(0)]];
+    float2 componentCoverage [[color(1)]];
+};
+
+fragment PatternDepositionFragmentOutput patternDepositionFragment(
     PatternProjectedDepositionOut input [[stage_in]],
+    float2 currentComponentCoverage [[color(1)]],
     constant PatternDepositionMaterialUniforms& material
         [[buffer(PatternBufferIndexBrushMaterial)]],
     texture2d<float> primaryShapeTexture
@@ -633,6 +650,7 @@ fragment float4 patternDepositionFragment(
         : 1.0;
     const float signedTipEdgeDistance = input.radius * (
         material.options.z == PatternDepositionShapeKindHardRound
+                || material.options.z == PatternDepositionShapeKindSoftRound
             ? 1.0 - length(input.tipLocal)
             : 1.0 - max(abs(input.tipLocal.x), abs(input.tipLocal.y))
     );
@@ -652,31 +670,50 @@ fragment float4 patternDepositionFragment(
     const float flowCoverage = patternDepositionClamp01(
         baseCoverage * patternDepositionClamp01(input.coverageInputs.y)
     );
-    float depositedCoverage;
-    switch (patternDepositionAccumulationMode) {
-    case PatternDepositionAccumulationOpaque:
-        depositedCoverage = baseCoverage;
-        break;
-    case PatternDepositionAccumulationIntenseGlaze:
-        depositedCoverage =
-            1.0 - (1.0 - flowCoverage) * (1.0 - flowCoverage);
-        break;
-    default:
-        depositedCoverage = flowCoverage;
-        break;
-    }
-    depositedCoverage = min(
-        patternDepositionClamp01(material.coverageParameters.w),
-        patternDepositionClamp01(depositedCoverage)
+    const uint componentOrdinal = min(
+        uint(round(material.edgeParameters.y)),
+        1u
     );
+    const float currentCoverage = patternDepositionClamp01(
+        currentComponentCoverage[componentOrdinal]
+    );
+    const float accumulatedCoverage = patternDepositionAccumulatedAlpha(
+        currentCoverage,
+        baseCoverage,
+        flowCoverage,
+        patternDepositionAccumulationMode,
+        material.coverageParameters.w
+    );
+    float depositedCoverage;
+    if (
+        patternDepositionAccumulationMode
+            == PatternDepositionAccumulationUniformGlaze
+    ) {
+        // The uniform-glaze color pipeline uses max blending, so its source
+        // remains the authored component-local cumulative value.
+        depositedCoverage = accumulatedCoverage;
+    } else {
+        // Source-over blending computes d + s(1-d). Solve for the source
+        // coverage that reaches this component's authored cumulative result.
+        const float remaining = max(1.0 - currentCoverage, FLT_EPSILON);
+        depositedCoverage = patternDepositionClamp01(
+            (accumulatedCoverage - currentCoverage) / remaining
+        );
+    }
 
+    float2 nextComponentCoverage = currentComponentCoverage;
+    nextComponentCoverage[componentOrdinal] = accumulatedCoverage;
+    PatternDepositionFragmentOutput output;
+    output.componentCoverage = nextComponentCoverage;
     if (
         patternDepositionAccumulationMode
             == PatternDepositionAccumulationDestinationOut
     ) {
-        return float4(0.0, 0.0, 0.0, depositedCoverage);
+        output.color = float4(0.0, 0.0, 0.0, depositedCoverage);
+    } else {
+        output.color = input.premultipliedColor * depositedCoverage;
     }
-    return input.premultipliedColor * depositedCoverage;
+    return output;
 }
 
 vertex PatternFullscreenOut patternFullscreenVertex(

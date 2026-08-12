@@ -23,29 +23,32 @@ func editorModelDefaultsToGrid() {
 
 @MainActor
 @Test
-func editorModelConfirmsOnlyCatalogDrawRecipes() {
+func editorModelConfirmsOnlyCatalogDrawRecipes() throws {
     let model = EditorModel()
 
-    model.confirmRecipe(AnchorBrushCatalog.dryMedia.id)
-    #expect(model.selectedRecipeID == EditorBrushCatalog.graphitePencil.id)
-    #expect(model.selectedProgram == EditorBrushCatalog.graphitePencil.program)
+    try model.confirmRecipe(AnchorBrushCatalog.dryMedia.id)
+    #expect(model.selectedRecipeID == EditorBrushCatalog.nativeDryMedia.id)
+    #expect(model.selectedProgram == EditorBrushCatalog.nativeDryMedia.program)
 
-    model.confirmRecipe(AnchorBrushCatalog.eraser.id)
-    #expect(model.selectedRecipeID == EditorBrushCatalog.graphitePencil.id)
+    try model.confirmRecipe(AnchorBrushCatalog.eraser.id)
+    #expect(model.selectedRecipeID == EditorBrushCatalog.nativeDryMedia.id)
 
-    model.confirmRecipe(BrushRecipeID("missing.recipe"))
-    #expect(model.selectedRecipeID == EditorBrushCatalog.graphitePencil.id)
+    try model.confirmRecipe(BrushRecipeID("missing.recipe"))
+    #expect(model.selectedRecipeID == EditorBrushCatalog.nativeDryMedia.id)
 }
 
 @MainActor
 @Test
-func editorModelResetsStaleBoundedWashSelectionToNativeInk() {
+func editorModelRejectsRetiredBoundedWashWithoutChangingSelection() throws {
     let model = EditorModel()
+    try model.confirmRecipe(AnchorBrushCatalog.dryMedia.id)
+    let retiredID = BrushRecipeID("builtin.bounded-wash")
 
-    model.confirmRecipe(BrushRecipeID("builtin.bounded-wash"))
+    #expect(throws: EditorBrushSelectionError.retiredIdentifier(retiredID)) {
+        try model.confirmRecipe(retiredID)
+    }
 
-    #expect(model.selectedRecipeID == EditorBrushCatalog.defaultDraw.id)
-    #expect(model.lastBrushSelectionDiagnostic == "staleBuiltinBoundedWash")
+    #expect(model.selectedRecipeID == EditorBrushCatalog.nativeDryMedia.id)
 }
 
 @MainActor

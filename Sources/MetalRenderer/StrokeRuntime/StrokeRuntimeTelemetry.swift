@@ -1,4 +1,792 @@
 import Foundation
+import PatternEngine
+
+public enum StageDAcceptanceProducerKind: String, Codable, Sendable {
+    case packageHarness
+    case xcodeUITest
+    case applicationRoute
+    case productionRuntime
+    case allocationProbe
+    case independentReview
+    case acceptanceComparison
+}
+
+public enum StageDAcceptanceStatus: String, Codable, Sendable {
+    case passed
+    case failed
+    case skipped
+}
+
+public enum StageDAcceptanceBackend: String, Codable, Sendable {
+    case productionSparseMetal
+    case softwareReference
+    case nonproduction
+}
+
+public struct StageDAcceptanceNumericOracle:
+    Codable, Equatable, Sendable
+{
+    public let expected: Double
+    public let actual: Double
+    public let tolerance: Double
+
+    public init(expected: Double, actual: Double, tolerance: Double) {
+        self.expected = expected
+        self.actual = actual
+        self.tolerance = tolerance
+    }
+}
+
+public struct StageDAcceptanceRow: Codable, Equatable, Sendable {
+    public let scenarioID: String
+    public let producer: StageDAcceptanceProducerKind
+    public let seed: UInt64
+    public let inputTrace: String
+    public let expectedSemanticHash: String?
+    public let numericOracle: StageDAcceptanceNumericOracle?
+    public let status: StageDAcceptanceStatus
+    public let backend: StageDAcceptanceBackend
+    public let metrics: [String: Double]
+    public let attributes: [String: String]
+
+    public init(
+        scenarioID: String,
+        producer: StageDAcceptanceProducerKind,
+        seed: UInt64,
+        inputTrace: String,
+        expectedSemanticHash: String?,
+        numericOracle: StageDAcceptanceNumericOracle?,
+        status: StageDAcceptanceStatus,
+        backend: StageDAcceptanceBackend,
+        metrics: [String: Double],
+        attributes: [String: String] = [:]
+    ) {
+        self.scenarioID = scenarioID
+        self.producer = producer
+        self.seed = seed
+        self.inputTrace = inputTrace
+        self.expectedSemanticHash = expectedSemanticHash
+        self.numericOracle = numericOracle
+        self.status = status
+        self.backend = backend
+        self.metrics = metrics
+        self.attributes = attributes
+    }
+}
+
+public struct StageDAcceptanceManifest: Codable, Equatable, Sendable {
+    public static let schemaVersion = 1
+
+    public let schemaVersion: Int
+    public let generatedAt: Date
+    public let gitCommit: String
+    public let rows: [StageDAcceptanceRow]
+
+    public init(
+        generatedAt: Date,
+        gitCommit: String,
+        rows: [StageDAcceptanceRow]
+    ) {
+        schemaVersion = Self.schemaVersion
+        self.generatedAt = generatedAt
+        self.gitCommit = gitCommit
+        self.rows = rows
+    }
+}
+
+public struct StageDAcceptanceSuiteCounts: Equatable, Sendable {
+    public let testCount: Int
+    public let suiteCount: Int
+
+    public init(testCount: Int, suiteCount: Int) {
+        self.testCount = testCount
+        self.suiteCount = suiteCount
+    }
+}
+
+public enum StageDAcceptanceSuiteLogValidationError:
+    Error, Equatable, Sendable
+{
+    case missingPositivePassingSummary
+    case runRecordedIssueOrFailure
+    case unexpectedCounts(
+        expected: StageDAcceptanceSuiteCounts,
+        actual: StageDAcceptanceSuiteCounts
+    )
+}
+
+public enum StageDAcceptanceSuiteLogValidator {
+    public static func validate(
+        _ log: String
+    ) throws -> StageDAcceptanceSuiteCounts {
+        guard !log.contains("recorded an issue"),
+              !log.contains("failed after")
+        else {
+            throw StageDAcceptanceSuiteLogValidationError
+                .runRecordedIssueOrFailure
+        }
+
+        var passingSummaries: [StageDAcceptanceSuiteCounts] = []
+        for line in log.split(whereSeparator: \.isNewline) {
+            let tokens = line.split(whereSeparator: \.isWhitespace)
+            guard let start = tokens.indices.first(where: {
+                tokens[$0] == "Test"
+            }),
+            start + 9 < tokens.endIndex,
+            tokens[start + 1] == "run",
+            tokens[start + 2] == "with",
+            let testCount = Int(tokens[start + 3]),
+            tokens[start + 4].hasPrefix("test"),
+            tokens[start + 5] == "in",
+            let suiteCount = Int(tokens[start + 6]),
+            tokens[start + 7].hasPrefix("suite"),
+            tokens[start + 8] == "passed",
+            tokens[start + 9] == "after",
+            testCount > 0,
+            suiteCount > 0
+            else { continue }
+            passingSummaries.append(.init(
+                testCount: testCount,
+                suiteCount: suiteCount
+            ))
+        }
+        guard passingSummaries.count == 1,
+              let counts = passingSummaries.first
+        else {
+            throw StageDAcceptanceSuiteLogValidationError
+                .missingPositivePassingSummary
+        }
+        return counts
+    }
+
+    public static func validate(
+        _ log: String,
+        expected: StageDAcceptanceSuiteCounts
+    ) throws -> StageDAcceptanceSuiteCounts {
+        let actual = try validate(log)
+        guard actual == expected else {
+            throw StageDAcceptanceSuiteLogValidationError.unexpectedCounts(
+                expected: expected,
+                actual: actual
+            )
+        }
+        return actual
+    }
+}
+
+public enum StageDAcceptanceBroadSuiteValidationError:
+    Error, Equatable, Sendable
+{
+    case missingCompleteSummary
+    case unexpectedCounts(
+        expected: StageDAcceptanceSuiteCounts,
+        actual: StageDAcceptanceSuiteCounts
+    )
+    case baselineVerifierDidNotApprove(expectedIssueCount: Int)
+}
+
+public enum StageDAcceptanceBroadSuiteEvidenceValidator {
+    public static func validate(
+        suiteLog: String,
+        baselineVerifierLog: String,
+        expectedCounts: StageDAcceptanceSuiteCounts,
+        expectedIssueCount: Int
+    ) throws -> StageDAcceptanceSuiteCounts {
+        var summaries: [StageDAcceptanceSuiteCounts] = []
+        for line in suiteLog.split(whereSeparator: \.isNewline) {
+            let tokens = line.split(whereSeparator: \.isWhitespace)
+            guard let start = tokens.indices.first(where: {
+                tokens[$0] == "Test"
+            }),
+            start + 8 < tokens.endIndex,
+            tokens[start + 1] == "run",
+            tokens[start + 2] == "with",
+            let testCount = Int(tokens[start + 3].replacingOccurrences(
+                of: ",",
+                with: ""
+            )),
+            tokens[start + 4].hasPrefix("test"),
+            tokens[start + 5] == "in",
+            let suiteCount = Int(tokens[start + 6].replacingOccurrences(
+                of: ",",
+                with: ""
+            )),
+            tokens[start + 7].hasPrefix("suite"),
+            tokens[start + 8] == "failed" || tokens[start + 8] == "passed",
+            testCount > 0,
+            suiteCount > 0
+            else { continue }
+            summaries.append(.init(
+                testCount: testCount,
+                suiteCount: suiteCount
+            ))
+        }
+        guard summaries.count == 1, let actual = summaries.first else {
+            throw StageDAcceptanceBroadSuiteValidationError
+                .missingCompleteSummary
+        }
+        guard actual == expectedCounts else {
+            throw StageDAcceptanceBroadSuiteValidationError.unexpectedCounts(
+                expected: expectedCounts,
+                actual: actual
+            )
+        }
+        let expectedApproval = "Swift Testing baseline verified: "
+            + "\(expectedIssueCount) complete issue records."
+        guard baselineVerifierLog.split(whereSeparator: \.isNewline)
+            .contains(where: { $0 == expectedApproval })
+        else {
+            throw StageDAcceptanceBroadSuiteValidationError
+                .baselineVerifierDidNotApprove(
+                    expectedIssueCount: expectedIssueCount
+                )
+        }
+        return actual
+    }
+}
+
+public struct StageDAcceptanceReviewDisposition:
+    Codable, Equatable, Sendable
+{
+    public let schemaVersion: Int
+    public let baseRevision: String
+    public let gitCommit: String
+    public let reviewer: String
+    public let criticalFindingCount: Int
+    public let importantFindingCount: Int
+
+    public init(
+        schemaVersion: Int,
+        baseRevision: String,
+        gitCommit: String,
+        reviewer: String,
+        criticalFindingCount: Int,
+        importantFindingCount: Int
+    ) {
+        self.schemaVersion = schemaVersion
+        self.baseRevision = baseRevision
+        self.gitCommit = gitCommit
+        self.reviewer = reviewer
+        self.criticalFindingCount = criticalFindingCount
+        self.importantFindingCount = importantFindingCount
+    }
+}
+
+public enum StageDAcceptanceReviewValidationError:
+    Error, Equatable, Sendable
+{
+    case unsupportedSchema(Int)
+    case baseRevisionMismatch
+    case gitCommitMismatch
+    case missingReviewer
+    case invalidFindingCount
+    case unresolvedFindings(critical: Int, important: Int)
+}
+
+public enum StageDAcceptanceReviewDispositionValidator {
+    public static func validate(
+        _ disposition: StageDAcceptanceReviewDisposition,
+        expectedBaseRevision: String,
+        expectedGitCommit: String
+    ) throws -> StageDAcceptanceReviewDisposition {
+        guard disposition.schemaVersion == 1 else {
+            throw StageDAcceptanceReviewValidationError.unsupportedSchema(
+                disposition.schemaVersion
+            )
+        }
+        guard disposition.baseRevision == expectedBaseRevision else {
+            throw StageDAcceptanceReviewValidationError.baseRevisionMismatch
+        }
+        guard disposition.gitCommit == expectedGitCommit else {
+            throw StageDAcceptanceReviewValidationError.gitCommitMismatch
+        }
+        guard !disposition.reviewer.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).isEmpty else {
+            throw StageDAcceptanceReviewValidationError.missingReviewer
+        }
+        guard disposition.criticalFindingCount >= 0,
+              disposition.importantFindingCount >= 0
+        else {
+            throw StageDAcceptanceReviewValidationError.invalidFindingCount
+        }
+        guard disposition.criticalFindingCount == 0,
+              disposition.importantFindingCount == 0
+        else {
+            throw StageDAcceptanceReviewValidationError.unresolvedFindings(
+                critical: disposition.criticalFindingCount,
+                important: disposition.importantFindingCount
+            )
+        }
+        return disposition
+    }
+}
+
+public enum StageDAcceptanceRequirements {
+    public static let color = "stage-d.color"
+    public static let sparseSampling = "stage-d.sparse-sampling"
+    public static let strokeLifecycle = "stage-d.stroke-lifecycle"
+    public static let modes = "stage-d.modes"
+    public static let layers = "stage-d.layers"
+    public static let persistenceExport = "stage-d.persistence-export"
+    public static let runtimeWall = "stage-d.runtime.wall"
+    public static let runtimeAccelerated = "stage-d.runtime.accelerated"
+    public static let allocation = "stage-d.allocation"
+    public static let negativeControls = "stage-d.negative-controls"
+    public static let appControls = "stage-d.app.controls"
+    public static let appShortcuts = "stage-d.app.shortcuts"
+    public static let appPersistence = "stage-d.app.persistence"
+    public static let appXcodeHosted = "stage-d.app.xcode-hosted"
+    public static let broadRegression = "stage-d.broad-regression"
+    public static let independentReview = "stage-d.independent-review"
+    public static let repeatability = "stage-d.repeatability"
+
+    public static let requiredScenarioIDs = [
+        color,
+        sparseSampling,
+        strokeLifecycle,
+        modes,
+        layers,
+        persistenceExport,
+        runtimeWall,
+        runtimeAccelerated,
+        allocation,
+        negativeControls,
+        appControls,
+        appShortcuts,
+        appPersistence,
+        appXcodeHosted,
+        broadRegression,
+        independentReview,
+        repeatability,
+    ]
+
+    public static func producer(
+        for scenarioID: String
+    ) -> StageDAcceptanceProducerKind {
+        switch scenarioID {
+        case runtimeWall, runtimeAccelerated:
+            .productionRuntime
+        case allocation:
+            .allocationProbe
+        case appXcodeHosted:
+            .xcodeUITest
+        case independentReview:
+            .independentReview
+        case repeatability:
+            .acceptanceComparison
+        case appControls, appShortcuts, appPersistence:
+            .applicationRoute
+        default:
+            .packageHarness
+        }
+    }
+}
+
+public enum StageDAcceptanceRunRequirements {
+    public static let requiredScenarioIDs =
+        StageDAcceptanceRequirements.requiredScenarioIDs.filter {
+            $0 != StageDAcceptanceRequirements.repeatability
+        }
+
+    public static let semanticScenarioIDs = [
+        StageDAcceptanceRequirements.runtimeWall,
+        StageDAcceptanceRequirements.runtimeAccelerated,
+        StageDAcceptanceRequirements.appControls,
+        StageDAcceptanceRequirements.appShortcuts,
+        StageDAcceptanceRequirements.appPersistence,
+    ]
+
+    fileprivate static let resourceMetricsByScenario: [String: [String]] = [
+        StageDAcceptanceRequirements.runtimeWall: [
+            "residentMemoryHighWaterBytes",
+            "authoritativeQueueHighWater",
+            "predictedQueueHighWater",
+            "cacheMissCount",
+        ],
+        StageDAcceptanceRequirements.runtimeAccelerated: [
+            "residentMemoryHighWaterBytes",
+            "authoritativeQueueHighWater",
+            "predictedQueueHighWater",
+            "cacheMissCount",
+        ],
+        StageDAcceptanceRequirements.appControls: [
+            "residentTileHighWaterBytes",
+            "revisionResidentBytes",
+            "tileIndexEntryCount",
+            "cpuCachedPlanCount",
+            "gpuCachedPlanCount",
+            "cachedPlanMetalBufferBytes",
+        ],
+        StageDAcceptanceRequirements.appShortcuts: [
+            "residentTileHighWaterBytes",
+            "revisionResidentBytes",
+            "tileIndexEntryCount",
+            "cpuCachedPlanCount",
+            "gpuCachedPlanCount",
+            "cachedPlanMetalBufferBytes",
+        ],
+        StageDAcceptanceRequirements.appPersistence: [
+            "residentTileHighWaterBytes",
+            "revisionResidentBytes",
+            "tileIndexEntryCount",
+            "cpuCachedPlanCount",
+            "gpuCachedPlanCount",
+            "cachedPlanMetalBufferBytes",
+        ],
+    ]
+}
+
+public enum StageDAcceptancePackageSuiteRequirements {
+    public static let expectedCountsByScenario: [
+        String: StageDAcceptanceSuiteCounts
+    ] = [
+        StageDAcceptanceRequirements.color:
+            .init(testCount: 26, suiteCount: 3),
+        StageDAcceptanceRequirements.sparseSampling:
+            .init(testCount: 220, suiteCount: 5),
+        StageDAcceptanceRequirements.strokeLifecycle:
+            .init(testCount: 176, suiteCount: 3),
+        StageDAcceptanceRequirements.modes:
+            .init(testCount: 49, suiteCount: 3),
+        StageDAcceptanceRequirements.layers:
+            .init(testCount: 32, suiteCount: 2),
+        StageDAcceptanceRequirements.persistenceExport:
+            .init(testCount: 36, suiteCount: 4),
+        StageDAcceptanceRequirements.negativeControls:
+            .init(testCount: 98, suiteCount: 4),
+    ]
+
+    public static let broadCounts = StageDAcceptanceSuiteCounts(
+        testCount: 2_134,
+        suiteCount: 110
+    )
+    public static let broadKnownIssueCount = 5
+}
+
+public struct StageDAcceptanceRepeatabilityResult:
+    Equatable, Sendable
+{
+    public let comparedSemanticHashCount: Int
+    public let comparedResourceMetricCount: Int
+}
+
+public enum StageDAcceptanceRepeatabilityError:
+    Error, Equatable, Sendable
+{
+    case gitCommitMismatch
+    case incompleteRun
+    case duplicateScenarioID(String)
+    case scenarioDidNotPass(String)
+    case missingSemanticHash(String)
+    case semanticHashMismatch(String)
+    case missingResourceMetric(scenarioID: String, metric: String)
+    case resourceGrowth(
+        scenarioID: String,
+        metric: String,
+        reference: Double,
+        candidate: Double
+    )
+}
+
+public enum StageDAcceptanceRepeatabilityValidator {
+    public static func validate(
+        reference: StageDAcceptanceManifest,
+        candidate: StageDAcceptanceManifest
+    ) throws -> StageDAcceptanceRepeatabilityResult {
+        _ = try StageDAcceptanceManifestValidator.validateRun(reference)
+        _ = try StageDAcceptanceManifestValidator.validateRun(candidate)
+        guard reference.gitCommit == candidate.gitCommit else {
+            throw StageDAcceptanceRepeatabilityError.gitCommitMismatch
+        }
+        let referenceRows = try rowsByID(reference)
+        let candidateRows = try rowsByID(candidate)
+        let required = Set(StageDAcceptanceRunRequirements.requiredScenarioIDs)
+        guard Set(referenceRows.keys) == required,
+              Set(candidateRows.keys) == required
+        else {
+            throw StageDAcceptanceRepeatabilityError.incompleteRun
+        }
+
+        var semanticCount = 0
+        for scenarioID in StageDAcceptanceRunRequirements.semanticScenarioIDs {
+            guard let first = referenceRows[scenarioID]?.attributes[
+                "observedSemanticHash"
+            ],
+            let second = candidateRows[scenarioID]?.attributes[
+                "observedSemanticHash"
+            ],
+            Self.isSHA256(first),
+            Self.isSHA256(second)
+            else {
+                throw StageDAcceptanceRepeatabilityError
+                    .missingSemanticHash(scenarioID)
+            }
+            guard first.lowercased() == second.lowercased() else {
+                throw StageDAcceptanceRepeatabilityError
+                    .semanticHashMismatch(scenarioID)
+            }
+            semanticCount += 1
+        }
+
+        var resourceCount = 0
+        for (scenarioID, metricNames) in
+            StageDAcceptanceRunRequirements.resourceMetricsByScenario
+        {
+            for metric in metricNames {
+                guard let first = referenceRows[scenarioID]?.metrics[metric],
+                      let second = candidateRows[scenarioID]?.metrics[metric]
+                else {
+                    throw StageDAcceptanceRepeatabilityError
+                        .missingResourceMetric(
+                            scenarioID: scenarioID,
+                            metric: metric
+                        )
+                }
+                guard second <= first else {
+                    throw StageDAcceptanceRepeatabilityError.resourceGrowth(
+                        scenarioID: scenarioID,
+                        metric: metric,
+                        reference: first,
+                        candidate: second
+                    )
+                }
+                resourceCount += 1
+            }
+        }
+        return StageDAcceptanceRepeatabilityResult(
+            comparedSemanticHashCount: semanticCount,
+            comparedResourceMetricCount: resourceCount
+        )
+    }
+
+    private static func rowsByID(
+        _ manifest: StageDAcceptanceManifest
+    ) throws -> [String: StageDAcceptanceRow] {
+        var rows: [String: StageDAcceptanceRow] = [:]
+        for row in manifest.rows {
+            guard rows[row.scenarioID] == nil else {
+                throw StageDAcceptanceRepeatabilityError
+                    .duplicateScenarioID(row.scenarioID)
+            }
+            guard row.status == .passed,
+                  row.backend == .productionSparseMetal,
+                  row.producer == StageDAcceptanceRequirements.producer(
+                    for: row.scenarioID
+                  )
+            else {
+                throw StageDAcceptanceRepeatabilityError
+                    .scenarioDidNotPass(row.scenarioID)
+            }
+            rows[row.scenarioID] = row
+        }
+        return rows
+    }
+
+    private static func isSHA256(_ value: String) -> Bool {
+        value.count == 64 && value.utf8.allSatisfy {
+            (48...57).contains($0) || (65...70).contains($0)
+                || (97...102).contains($0)
+        }
+    }
+}
+
+public enum StageDAcceptanceValidationError: Error, Equatable, Sendable {
+    case unsupportedSchema(Int)
+    case invalidGitCommit
+    case duplicateScenarioID(String)
+    case unexpectedScenarioID(String)
+    case missingRequiredScenarioID(String)
+    case unexpectedProducer(String)
+    case invalidSeed(String)
+    case missingInputTrace(String)
+    case missingOracle(String)
+    case ambiguousOracle(String)
+    case invalidSemanticHash(String)
+    case invalidNumericOracle(String)
+    case numericOracleMismatch(String)
+    case scenarioDidNotPass(String, StageDAcceptanceStatus)
+    case nonproductionBackend(String)
+    case nonfiniteMetric(String, String)
+}
+
+public enum StageDAcceptanceManifestValidator {
+    public static func validate(
+        _ manifest: StageDAcceptanceManifest
+    ) throws -> StageDAcceptanceManifest {
+        try validate(
+            manifest,
+            requiredScenarioIDs:
+                StageDAcceptanceRequirements.requiredScenarioIDs
+        )
+    }
+
+    public static func validateRun(
+        _ manifest: StageDAcceptanceManifest
+    ) throws -> StageDAcceptanceManifest {
+        try validate(
+            manifest,
+            requiredScenarioIDs:
+                StageDAcceptanceRunRequirements.requiredScenarioIDs
+        )
+    }
+
+    private static func validate(
+        _ manifest: StageDAcceptanceManifest,
+        requiredScenarioIDs orderedRequiredScenarioIDs: [String]
+    ) throws -> StageDAcceptanceManifest {
+        guard manifest.schemaVersion == StageDAcceptanceManifest.schemaVersion
+        else {
+            throw StageDAcceptanceValidationError.unsupportedSchema(
+                manifest.schemaVersion
+            )
+        }
+        guard isHex(manifest.gitCommit),
+              (7...64).contains(manifest.gitCommit.count)
+        else {
+            throw StageDAcceptanceValidationError.invalidGitCommit
+        }
+
+        var byID: [String: StageDAcceptanceRow] = [:]
+        byID.reserveCapacity(manifest.rows.count)
+        let requiredScenarioIDs = Set(
+            orderedRequiredScenarioIDs
+        )
+        for row in manifest.rows {
+            guard requiredScenarioIDs.contains(row.scenarioID) else {
+                throw StageDAcceptanceValidationError.unexpectedScenarioID(
+                    row.scenarioID
+                )
+            }
+            guard byID.updateValue(row, forKey: row.scenarioID) == nil else {
+                throw StageDAcceptanceValidationError.duplicateScenarioID(
+                    row.scenarioID
+                )
+            }
+            guard row.seed > 0 else {
+                throw StageDAcceptanceValidationError.invalidSeed(row.scenarioID)
+            }
+            guard !row.inputTrace.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ).isEmpty else {
+                throw StageDAcceptanceValidationError.missingInputTrace(
+                    row.scenarioID
+                )
+            }
+            guard row.status == .passed else {
+                throw StageDAcceptanceValidationError.scenarioDidNotPass(
+                    row.scenarioID,
+                    row.status
+                )
+            }
+            guard row.backend == .productionSparseMetal else {
+                throw StageDAcceptanceValidationError.nonproductionBackend(
+                    row.scenarioID
+                )
+            }
+            switch (row.expectedSemanticHash, row.numericOracle) {
+            case let (.some(hash), nil):
+                guard hash.count == 64, isHex(hash) else {
+                    throw StageDAcceptanceValidationError.invalidSemanticHash(
+                        row.scenarioID
+                    )
+                }
+            case let (nil, .some(oracle)):
+                guard oracle.expected.isFinite,
+                      oracle.actual.isFinite,
+                      oracle.tolerance.isFinite,
+                      oracle.tolerance >= 0
+                else {
+                    throw StageDAcceptanceValidationError.invalidNumericOracle(
+                        row.scenarioID
+                    )
+                }
+                guard abs(oracle.actual - oracle.expected) <= oracle.tolerance
+                else {
+                    throw StageDAcceptanceValidationError.numericOracleMismatch(
+                        row.scenarioID
+                    )
+                }
+            case (nil, nil):
+                throw StageDAcceptanceValidationError.missingOracle(
+                    row.scenarioID
+                )
+            case (.some, .some):
+                throw StageDAcceptanceValidationError.ambiguousOracle(
+                    row.scenarioID
+                )
+            }
+            for (name, value) in row.metrics where !value.isFinite {
+                throw StageDAcceptanceValidationError.nonfiniteMetric(
+                    row.scenarioID,
+                    name
+                )
+            }
+        }
+
+        for scenarioID in orderedRequiredScenarioIDs {
+            guard let row = byID[scenarioID] else {
+                throw StageDAcceptanceValidationError
+                    .missingRequiredScenarioID(scenarioID)
+            }
+            guard row.producer
+                    == StageDAcceptanceRequirements.producer(for: scenarioID)
+            else {
+                throw StageDAcceptanceValidationError.unexpectedProducer(
+                    scenarioID
+                )
+            }
+        }
+        return manifest
+    }
+
+    private static func isHex(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.allSatisfy {
+            (48...57).contains($0) || (65...70).contains($0)
+                || (97...102).contains($0)
+        }
+    }
+}
+
+public struct StageDAcceptanceRendererEvidence:
+    Codable, Equatable, Sendable
+{
+    public let storageAuthority: StageDAcceptanceStorageAuthority
+    public let backend: StageDAcceptanceBackend
+    public let documentGeneration: UInt64
+    public let layerCount: Int
+    public let tileByteBudget: Int
+    public let residentTileBytes: Int
+    public let residentTileHighWaterBytes: Int
+    public let backingTileBytes: Int
+    public let tileIndexEntryCount: Int
+    public let cpuCachedPlanCount: Int
+    public let gpuCachedPlanCount: Int
+    public let cpuPlanCacheHitCount: UInt64
+    public let cpuPlanCacheMissCount: UInt64
+    public let gpuPlanCacheHitCount: UInt64
+    public let gpuPlanCacheMissCount: UInt64
+    public let cachedPlanMetalBufferBytes: Int
+    public let uploadRingMetalBufferBytes: Int
+    public let residentResourceBytes: Int
+    public let residentResourceHighWaterBytes: Int
+    public let planMetalBufferAllocationCount: Int
+    public let activeUploadSlotCount: Int
+    public let uploadSlotHighWater: Int
+    public let pendingPlanCompletionCount: Int
+    public let pendingConsumerCompletionCount: Int
+    public let revisionResidentBytes: Int
+    public let activeSnapshotTokenCount: Int
+    public let aggregateSnapshotReferenceCount: Int
+    public let activeTileLeaseCount: Int
+    public let activeStrokeSurfaceCount: Int
+    public let activeCommandOperationCount: Int
+    public let pendingLayerDisplayAcknowledgementCount: Int
+}
+
+public enum StageDAcceptanceStorageAuthority: String, Codable, Sendable {
+    case sparseRGBA16Float
+}
 
 public protocol StrokeRuntimeTimestampSource: Sendable {
     func nowNanoseconds() -> UInt64
@@ -18,6 +806,14 @@ public enum StrokeRuntimeTraceProfile: String, Codable, Sendable {
     case productionTenSeconds
     case productionAcceleratedTenMinutes
     case syntheticTest
+
+    public var requiredMovedSampleCount: Int {
+        isProduction ? 600 : 0
+    }
+
+    public var requiredLongStrokeFrameCount: Int {
+        isProduction ? BenchmarkLongStrokeMetrics.segmentCount : 0
+    }
 
     public var logicalDurationNanoseconds: UInt64 {
         switch self {
@@ -56,6 +852,26 @@ public enum StrokeRuntimeTraceProfile: String, Codable, Sendable {
         case .syntheticTest:
             false
         }
+    }
+}
+
+/// Deterministic production performance workload. The circular path keeps an
+/// exact four-point chord between inputs while fitting a bounded display plan.
+/// Equal input spacing keeps the long-stroke latency comparison independent of
+/// spacing aliases without making a synthetic 600-frame line require a 4K
+/// render target.
+public enum StrokeRuntimeTraceWorkload {
+    public static let canvasDimension = 512
+
+    public static func position(frameIndex: Int) -> ScreenPoint {
+        precondition(frameIndex >= 0)
+        let radius = 200.0
+        let chord = 4.0
+        let angle = Double(frameIndex) * 2 * asin(chord / (2 * radius))
+        return ScreenPoint(
+            x: 256 + Float(radius * cos(angle)),
+            y: 256 + Float(radius * sin(angle))
+        )
     }
 }
 
@@ -464,6 +1280,55 @@ public struct StrokeRuntimeTelemetrySnapshot:
         let denominator = attributedFrameCount ?? frameCount
         guard denominator > 0 else { return 0 }
         return Double(eventToSubmitMissCount) / Double(denominator)
+    }
+
+    public func requiredLongStrokeMetrics(
+        validatesPerformance: Bool = true
+    ) throws -> BenchmarkLongStrokeMetrics {
+        let attributed = (frameRecords ?? []).filter(\.inputWasAttributed)
+        guard attributed.count >= BenchmarkLongStrokeMetrics.segmentCount else {
+            throw BenchmarkMetricError.insufficientLongStrokeFrames(
+                attributed.count
+            )
+        }
+        let measured = attributed.suffix(
+            BenchmarkLongStrokeMetrics.segmentCount
+        )
+        var cpuMilliseconds: [Double] = []
+        var gpuMilliseconds: [Double] = []
+        var projectedInstanceCounts: [Int] = []
+        cpuMilliseconds.reserveCapacity(BenchmarkLongStrokeMetrics.segmentCount)
+        gpuMilliseconds.reserveCapacity(BenchmarkLongStrokeMetrics.segmentCount)
+        projectedInstanceCounts.reserveCapacity(
+            BenchmarkLongStrokeMetrics.segmentCount
+        )
+        for (index, frame) in measured.enumerated() {
+            cpuMilliseconds.append(
+                Double(
+                    frame.timestamps.prepareFinished
+                        - frame.timestamps.prepareStarted
+                ) / 1_000_000
+            )
+            gpuMilliseconds.append(
+                Double(
+                    frame.timestamps.gpuFinished
+                        - frame.timestamps.gpuStarted
+                ) / 1_000_000
+            )
+            guard frame.newProjectedDabCount <= UInt64(Int.max) else {
+                throw BenchmarkMetricError.projectedInstanceCountOverflow(
+                    frame: index,
+                    actual: frame.newProjectedDabCount
+                )
+            }
+            projectedInstanceCounts.append(Int(frame.newProjectedDabCount))
+        }
+        return try BenchmarkLongStrokeMetrics.measure(
+            cpuMilliseconds: cpuMilliseconds,
+            dabGPUMilliseconds: gpuMilliseconds,
+            projectedInstanceCounts: projectedInstanceCounts,
+            validatesPerformance: validatesPerformance
+        )
     }
 
     public init(

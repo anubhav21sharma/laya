@@ -1,53 +1,5 @@
 import Foundation
 
-/// A response whose validation and representation selection were completed
-/// before a stroke begins. The legacy cases deliberately retain the exact
-/// operations used by `BrushMapping` so built-in brushes keep their pixels.
-public enum CompiledBrushResponse: Equatable, Sendable {
-    case constant(Float)
-    case legacyLinear(
-        input: BrushDynamicsInput,
-        minimum: Float,
-        maximum: Float,
-        missingInputValue: Float
-    )
-    case legacyBoundedPower(
-        input: BrushDynamicsInput,
-        minimum: Float,
-        maximum: Float,
-        exponent: Float,
-        missingInputValue: Float
-    )
-    case sampledCurve(
-        input: BrushDynamicsInput,
-        samples: [Float],
-        scale: Float,
-        offset: Float,
-        lowerClamp: Float,
-        upperClamp: Float,
-        inverted: Bool,
-        jitter: Float,
-        missingInputValue: Float
-    )
-}
-
-public struct BrushDynamicsProgram: Equatable, Sendable {
-    public let size: CompiledBrushResponse
-    public let flow: CompiledBrushResponse
-    public let opacity: CompiledBrushResponse
-    public let spacing: CompiledBrushResponse
-    public let rotation: CompiledBrushResponse
-    public let scatter: CompiledBrushResponse
-    public let hardness: CompiledBrushResponse
-    public let grain: CompiledBrushResponse
-    public let offsetX: CompiledBrushResponse
-    public let offsetY: CompiledBrushResponse
-    public let hue: CompiledBrushResponse
-    public let saturation: CompiledBrushResponse
-    public let brightness: CompiledBrushResponse
-    public let secondaryColorMix: CompiledBrushResponse
-}
-
 /// One schema-v2 response term after validation and LUT compilation.
 /// Construction is compiler-owned; stroke evaluation only reads this value.
 struct CompiledBrushSensorTerm: Equatable, Sendable {
@@ -358,8 +310,6 @@ public final class BrushStageCProgramMetadata: Equatable, Sendable {
 }
 
 /// Immutable stroke-finalization program selected before input begins.
-/// Legacy cases are emitted only for definitions carrying the unforgeable
-/// compatibility marker installed by the legacy adapter/decoder.
 public enum BrushTerminationProgram: Equatable, Sendable {
     case cap
     case pressureRelease(maximumWorldLength: Float)
@@ -368,29 +318,30 @@ public enum BrushTerminationProgram: Equatable, Sendable {
         maximumWorldLength: Float,
         maximumDabs: Int
     )
-    case legacySchemaV1Cap
-    case legacySchemaV1EndTaper(
-        taper: BrushTaperConfiguration,
-        replayLimits: BrushReplayLimits
-    )
-    case legacySchemaV1Replay(
-        mode: BrushReplayMode,
-        replayLimits: BrushReplayLimits
-    )
+}
 
-    var isLegacySchemaV1EndTaper: Bool {
-        if case .legacySchemaV1EndTaper = self { return true }
-        return false
+public enum CompiledBrushCompositionMode: Equatable, Sendable {
+    case orderedSourceOver
+}
+
+public final class BrushComponentProgram: Equatable, Sendable {
+    public let definition: BrushComponentDefinition
+    public let stageC: BrushStageCProgramMetadata
+
+    init(
+        definition: BrushComponentDefinition,
+        stageC: BrushStageCProgramMetadata
+    ) {
+        self.definition = definition
+        self.stageC = stageC
     }
 
-    var usesLegacySchemaV1EndpointFiltering: Bool {
-        switch self {
-        case .legacySchemaV1Cap, .legacySchemaV1EndTaper,
-             .legacySchemaV1Replay:
-            true
-        case .cap, .pressureRelease, .boundedCorrection:
-            false
-        }
+    public static func == (
+        lhs: BrushComponentProgram,
+        rhs: BrushComponentProgram
+    ) -> Bool {
+        lhs === rhs
+            || (lhs.definition == rhs.definition && lhs.stageC == rhs.stageC)
     }
 }
 
@@ -402,41 +353,80 @@ public enum BrushTerminationProgram: Equatable, Sendable {
 /// footprint. Compilation remains the only point that allocates a program.
 public final class BrushProgram: Equatable, Sendable {
     public let definition: BrushDefinition
-    public let dynamics: BrushDynamicsProgram
     public let termination: BrushTerminationProgram
     public let requiredCapabilities: Set<BrushCapability>
     public let ignoredOptionalCapabilityIdentifiers: [String]
     public let requestedBackend: BrushBackendKind
-    public let stageC: BrushStageCProgramMetadata?
+    public let composition: CompiledBrushCompositionMode
+    public let primaryComponent: BrushComponentProgram
+    public let secondaryComponent: BrushComponentProgram?
 
     init(
         definition: BrushDefinition,
-        dynamics: BrushDynamicsProgram,
         termination: BrushTerminationProgram,
         requiredCapabilities: Set<BrushCapability>,
         ignoredOptionalCapabilityIdentifiers: [String],
         requestedBackend: BrushBackendKind,
-        stageC: BrushStageCProgramMetadata?
+        stageC: BrushStageCProgramMetadata
     ) {
         self.definition = definition
-        self.dynamics = dynamics
         self.termination = termination
         self.requiredCapabilities = requiredCapabilities
         self.ignoredOptionalCapabilityIdentifiers =
             ignoredOptionalCapabilityIdentifiers
         self.requestedBackend = requestedBackend
-        self.stageC = stageC
+        composition = .orderedSourceOver
+        primaryComponent = BrushComponentProgram(
+            definition: definition.components[0],
+            stageC: stageC
+        )
+        secondaryComponent = nil
+    }
+
+    init(
+        definition: BrushDefinition,
+        termination: BrushTerminationProgram,
+        requiredCapabilities: Set<BrushCapability>,
+        ignoredOptionalCapabilityIdentifiers: [String],
+        requestedBackend: BrushBackendKind,
+        composition: CompiledBrushCompositionMode,
+        primaryComponent: BrushComponentProgram,
+        secondaryComponent: BrushComponentProgram?
+    ) {
+        self.definition = definition
+        self.termination = termination
+        self.requiredCapabilities = requiredCapabilities
+        self.ignoredOptionalCapabilityIdentifiers =
+            ignoredOptionalCapabilityIdentifiers
+        self.requestedBackend = requestedBackend
+        self.composition = composition
+        self.primaryComponent = primaryComponent
+        self.secondaryComponent = secondaryComponent
+    }
+
+    func scoped(to component: BrushComponentProgram) -> BrushProgram {
+        BrushProgram(
+            definition: definition,
+            termination: termination,
+            requiredCapabilities: requiredCapabilities,
+            ignoredOptionalCapabilityIdentifiers:
+                ignoredOptionalCapabilityIdentifiers,
+            requestedBackend: requestedBackend,
+            composition: composition,
+            primaryComponent: component,
+            secondaryComponent: nil
+        )
     }
 
     public static func == (lhs: BrushProgram, rhs: BrushProgram) -> Bool {
         lhs === rhs
             || (definitionsEqual(lhs, rhs)
-                && dynamicsEqual(lhs, rhs)
                 && terminationsEqual(lhs, rhs)
                 && requiredCapabilitiesEqual(lhs, rhs)
                 && ignoredOptionalCapabilitiesEqual(lhs, rhs)
                 && requestedBackendsEqual(lhs, rhs)
-                && stageCMetadataEqual(lhs, rhs))
+                && compositionsEqual(lhs, rhs)
+                && componentsEqual(lhs, rhs))
     }
 
     @inline(never)
@@ -445,14 +435,6 @@ public final class BrushProgram: Equatable, Sendable {
         _ rhs: BrushProgram
     ) -> Bool {
         lhs.definition == rhs.definition
-    }
-
-    @inline(never)
-    private static func dynamicsEqual(
-        _ lhs: BrushProgram,
-        _ rhs: BrushProgram
-    ) -> Bool {
-        lhs.dynamics == rhs.dynamics
     }
 
     @inline(never)
@@ -489,18 +471,20 @@ public final class BrushProgram: Equatable, Sendable {
     }
 
     @inline(never)
-    private static func stageCMetadataEqual(
+    private static func compositionsEqual(
         _ lhs: BrushProgram,
         _ rhs: BrushProgram
     ) -> Bool {
-        switch (lhs.stageC, rhs.stageC) {
-        case (nil, nil):
-            true
-        case let (.some(lhsMetadata), .some(rhsMetadata)):
-            lhsMetadata == rhsMetadata
-        case (.some, nil), (nil, .some):
-            false
-        }
+        lhs.composition == rhs.composition
+    }
+
+    @inline(never)
+    private static func componentsEqual(
+        _ lhs: BrushProgram,
+        _ rhs: BrushProgram
+    ) -> Bool {
+        lhs.primaryComponent == rhs.primaryComponent
+            && lhs.secondaryComponent == rhs.secondaryComponent
     }
 
     public var replayContract: BrushReplayContract {
@@ -524,24 +508,14 @@ public final class BrushProgram: Equatable, Sendable {
                 ),
                 maximumWorldLength: maximumWorldLength
             )
-        case .legacySchemaV1Cap:
-            BrushReplayContract(mode: .appendOnly, limits: nil)
-        case let .legacySchemaV1EndTaper(_, replayLimits):
-            BrushReplayContract(
-                mode: definition.replayMode,
-                limits: replayLimits
-            )
-        case let .legacySchemaV1Replay(mode, replayLimits):
-            BrushReplayContract(mode: mode, limits: replayLimits)
         }
     }
 }
 
 public enum BrushProgramCompilerError: Error, Equatable, Sendable {
-    case unsupportedSchemaVersion(UInt16)
     case unknownRequiredCapability(String)
-    case invalidCurve
-    case invalidStageCDefinition
+    case unknownRequiredCompositionMode(String)
+    case unsupportedCompositionMode(String)
 }
 
 /// Namespaces counter-based extension randomness. Adding a channel must never

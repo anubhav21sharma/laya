@@ -59,6 +59,7 @@ struct StrokePreparationConfiguration: Equatable, Sendable {
     let nominalDiameter: Float
     let color: InkColor
     let seed: UInt64
+    let componentRandomNamespaceMode: BrushComponentRandomNamespaceMode
     let viewport: ViewportTransform
     let tilingStrategy: TilingStrategy
     let metalResourceDescriptor: StrokeMetalResourceDescriptor?
@@ -69,6 +70,8 @@ struct StrokePreparationConfiguration: Equatable, Sendable {
         nominalDiameter: Float,
         color: InkColor,
         seed: UInt64,
+        componentRandomNamespaceMode: BrushComponentRandomNamespaceMode =
+            .isolated,
         viewport: ViewportTransform,
         tilingStrategy: TilingStrategy,
         metalResourceDescriptor: StrokeMetalResourceDescriptor? = nil,
@@ -78,6 +81,7 @@ struct StrokePreparationConfiguration: Equatable, Sendable {
         self.nominalDiameter = nominalDiameter
         self.color = color
         self.seed = seed
+        self.componentRandomNamespaceMode = componentRandomNamespaceMode
         self.viewport = viewport
         self.tilingStrategy = tilingStrategy
         self.metalResourceDescriptor = metalResourceDescriptor
@@ -92,6 +96,8 @@ struct StrokePreparationConfiguration: Equatable, Sendable {
             && lhs.nominalDiameter == rhs.nominalDiameter
             && lhs.color == rhs.color
             && lhs.seed == rhs.seed
+            && lhs.componentRandomNamespaceMode
+                == rhs.componentRandomNamespaceMode
             && lhs.viewport == rhs.viewport
             && lhs.tilingStrategy == rhs.tilingStrategy
             && lhs.metalResourceDescriptor?.brushRenderIdentity
@@ -178,8 +184,20 @@ struct StrokeStageCFailureInjection: Sendable {
 
 struct StrokePreparedProjectedRecord: Equatable, Sendable {
     let depositionRecord: ProjectedDepositionRecord
+    let componentOrdinal: UInt8
     let dirtyRect: PixelRect
     let radialPage: RadialPageCoordinate?
+
+    init(
+        depositionRecord: ProjectedDepositionRecord,
+        dirtyRect: PixelRect,
+        radialPage: RadialPageCoordinate?
+    ) {
+        self.depositionRecord = depositionRecord
+        componentOrdinal = depositionRecord.componentOrdinal
+        self.dirtyRect = dirtyRect
+        self.radialPage = radialPage
+    }
 }
 
 struct StrokePreparedLogicalDabView: RandomAccessCollection, Sendable {
@@ -535,9 +553,16 @@ private enum StrokeAuthoritativeCandidateDrainPhase: UInt8, Sendable {
     case retainedProjection
     case candidateEmission
     case candidateStorage
+    case candidateCheckpoint
     case settledTransfer
     case arenaRetention
     case finalInstall
+}
+
+private enum StrokeAuthoritativeCandidateDrainCPUResult: Sendable {
+    case page(isFinishing: Bool)
+    case checkpointCandidate
+    case continueAfterEmission
 }
 
 /// Actor-confined reference ownership is intentional. A page publication may
@@ -1449,6 +1474,8 @@ actor StrokeFrameScheduler {
                 nominalDiameter: configuration.nominalDiameter,
                 color: configuration.color,
                 seed: configuration.seed,
+                componentRandomNamespaceMode:
+                    configuration.componentRandomNamespaceMode,
                 viewport: configuration.viewport,
                 authoritativeCapacity:
                     budget.maximumPendingAuthoritativeInstances
@@ -1458,7 +1485,9 @@ actor StrokeFrameScheduler {
                 program: configuration.program,
                 nominalDiameter: configuration.nominalDiameter,
                 color: configuration.color,
-                seed: configuration.seed
+                seed: configuration.seed,
+                componentRandomNamespaceMode:
+                    configuration.componentRandomNamespaceMode
             )
             authoritativeGenerator = initialGenerator
             authoritativeInputDeriver = BrushInputDeriver()
@@ -1691,15 +1720,15 @@ actor StrokeFrameScheduler {
                     maximumPredictionDabs
                         - generatedLogicalDabScratch.count
                 )
-                let interpolationOutcome = try candidateGenerator
-                    .appendPredictionPrefix(
-                        worldSample,
-                        maximumPathSubdivisionCount:
-                            Self.maximumPathSubdivisionCount(
-                                forRemainingDabCapacity:
-                                    remainingDabCapacity
-                            )
-                    ) { dab in
+                var cursor = try candidateGenerator.emissionCursor(
+                    for: worldSample,
+                    maximumPathSubdivisionCount:
+                        Self.maximumPathSubdivisionCount(
+                            forRemainingDabCapacity: remainingDabCapacity
+                        )
+                )
+                repeat {
+                    _ = try cursor.emitNextPage { dab in
                         guard perSampleLogicalDabScratch.count
                             < remainingDabCapacity
                         else {
@@ -1731,15 +1760,16 @@ actor StrokeFrameScheduler {
                             TransientStrokeDab(
                                 attributes: dab,
                                 projectedInstanceCount:
-                                    generatedProjectionScratch.count
-                                        - dabProjectedStart
+                                generatedProjectionScratch.count
+                                    - dabProjectedStart
                             )
                         )
                     }
-                if interpolationOutcome == .truncated {
-                    overload.insert(.logicalDabs)
-                    predictionIsFull = true
+                } while !cursor.isComplete
+                guard let completed = cursor.completedGenerator else {
+                    throw StrokeFrameSchedulerError.invalidLifecycle
                 }
+                candidateGenerator = completed
             } catch let limit as StrokePredictionGenerationLimitReached {
                 overload.insert(limit.reason)
                 predictionIsFull = true
@@ -2041,12 +2071,17 @@ actor StrokeFrameScheduler {
                                     forRemainingDabCapacity:
                                         remainingDabCapacity
                                 )
-                            let interpolationOutcome:
-                                StrokePathInterpolationOutcome
-                            switch replayedSample.phase {
-                            case .began:
-                                try candidateGenerator.begin(replayedSample) {
-                                    dab in
+                            guard replayedSample.phase != .cancelled else {
+                                throw StrokeFrameSchedulerError
+                                    .invalidLifecycle
+                            }
+                            var cursor = try candidateGenerator.emissionCursor(
+                                for: replayedSample,
+                                maximumPathSubdivisionCount:
+                                    maximumPathSubdivisionCount
+                            )
+                            repeat {
+                                _ = try cursor.emitNextPage { dab in
                                     try self.appendPreparedEstimatedPredictionDab(
                                         dab,
                                         strategy: strategy,
@@ -2056,47 +2091,12 @@ actor StrokeFrameScheduler {
                                             maximumReplacementProjectedCount
                                     )
                                 }
-                                interpolationOutcome = .completed
-                            case .moved:
-                                interpolationOutcome = try candidateGenerator
-                                    .appendPredictionPrefix(
-                                        replayedSample,
-                                        maximumPathSubdivisionCount:
-                                            maximumPathSubdivisionCount
-                                    ) { dab in
-                                        try self.appendPreparedEstimatedPredictionDab(
-                                            dab,
-                                            strategy: strategy,
-                                            remainingDabCapacity:
-                                                remainingDabCapacity,
-                                            maximumProjectedCount:
-                                                maximumReplacementProjectedCount
-                                        )
-                                    }
-                            case .ended:
-                                interpolationOutcome = try candidateGenerator
-                                    .finishPredictionPrefix(
-                                        replayedSample,
-                                        maximumPathSubdivisionCount:
-                                            maximumPathSubdivisionCount
-                                    ) { dab in
-                                        try self.appendPreparedEstimatedPredictionDab(
-                                            dab,
-                                            strategy: strategy,
-                                            remainingDabCapacity:
-                                                remainingDabCapacity,
-                                            maximumProjectedCount:
-                                                maximumReplacementProjectedCount
-                                        )
-                                    }
-                            case .cancelled:
-                                throw StrokeFrameSchedulerError
-                                    .invalidLifecycle
+                            } while !cursor.isComplete
+                            guard let completed = cursor.completedGenerator
+                            else {
+                                throw StrokeFrameSchedulerError.invalidLifecycle
                             }
-                            if interpolationOutcome == .truncated {
-                                predictionWasTruncated = true
-                                predictionOverload.insert(.logicalDabs)
-                            }
+                            candidateGenerator = completed
                         } catch let limit
                             as StrokePredictionGenerationLimitReached
                         {
@@ -2134,58 +2134,32 @@ actor StrokeFrameScheduler {
                                 forRemainingDabCapacity:
                                     remainingDabCapacity
                             )
-                        switch replayedSample.phase {
-                        case .began:
-                            try candidateGenerator.begin(replayedSample) {
-                                dab in
-                                try self.appendPreparedEstimatedActualDab(
-                                    dab,
-                                    strategy: strategy,
-                                    remainingDabCapacity:
-                                        remainingDabCapacity,
-                                    maximumDabCount:
-                                        maximumAuthoritativeReplacementDabCount,
-                                    maximumProjectedCount:
-                                        maximumAuthoritativeReplacementProjectedCount
-                                )
-                            }
-                        case .moved:
-                            try candidateGenerator.append(
-                                replayedSample,
-                                maximumPathSubdivisionCount:
-                                    maximumPathSubdivisionCount
-                            ) { dab in
-                                try self.appendPreparedEstimatedActualDab(
-                                    dab,
-                                    strategy: strategy,
-                                    remainingDabCapacity:
-                                        remainingDabCapacity,
-                                    maximumDabCount:
-                                        maximumAuthoritativeReplacementDabCount,
-                                    maximumProjectedCount:
-                                        maximumAuthoritativeReplacementProjectedCount
-                                )
-                            }
-                        case .ended:
-                            try candidateGenerator.finish(
-                                replayedSample,
-                                maximumPathSubdivisionCount:
-                                    maximumPathSubdivisionCount
-                            ) { dab in
-                                try self.appendPreparedEstimatedActualDab(
-                                    dab,
-                                    strategy: strategy,
-                                    remainingDabCapacity:
-                                        remainingDabCapacity,
-                                    maximumDabCount:
-                                        maximumAuthoritativeReplacementDabCount,
-                                    maximumProjectedCount:
-                                        maximumAuthoritativeReplacementProjectedCount
-                                )
-                            }
-                        case .cancelled:
+                        guard replayedSample.phase != .cancelled else {
                             throw StrokeFrameSchedulerError.invalidLifecycle
                         }
+                        var cursor = try candidateGenerator.emissionCursor(
+                            for: replayedSample,
+                            maximumPathSubdivisionCount:
+                                maximumPathSubdivisionCount
+                        )
+                        repeat {
+                            _ = try cursor.emitNextPage { dab in
+                                try self.appendPreparedEstimatedActualDab(
+                                    dab,
+                                    strategy: strategy,
+                                    remainingDabCapacity:
+                                        remainingDabCapacity,
+                                    maximumDabCount:
+                                        maximumAuthoritativeReplacementDabCount,
+                                    maximumProjectedCount:
+                                        maximumAuthoritativeReplacementProjectedCount
+                                )
+                            }
+                        } while !cursor.isComplete
+                        guard let completed = cursor.completedGenerator else {
+                            throw StrokeFrameSchedulerError.invalidLifecycle
+                        }
+                        candidateGenerator = completed
                     } catch is StrokePathInterpolationError {
                         throw StrokeFrameSchedulerError
                             .generatedDabCapacityExceeded(
@@ -2702,12 +2676,12 @@ actor StrokeFrameScheduler {
             ?? preparationClock()
         try requireActive(generation)
         guard !commitRequested,
-              let coordinator = preparationCoordinator,
-              var candidateGenerator = authoritativeGenerator,
-              var candidateDeriver = authoritativeInputDeriver,
-              var candidateBuffer = transientStrokeBuffer,
-              let viewport = preparationViewport,
-              let strategy = preparationTilingStrategy,
+              preparationCoordinator != nil,
+              let candidateGenerator = authoritativeGenerator,
+              let candidateDeriver = authoritativeInputDeriver,
+              let candidateBuffer = transientStrokeBuffer,
+              preparationViewport != nil,
+              preparationTilingStrategy != nil,
               !samples.isEmpty,
               samples.allSatisfy({
                   $0.kind == .actual || $0.kind == .coalesced
@@ -2738,234 +2712,17 @@ actor StrokeFrameScheduler {
             }
         }
 
-        if candidateGenerator.program.stageC != nil {
-            return try await beginAuthoritativeCandidateDrain(
-                generation: generation,
-                samples: samples,
-                generator: candidateGenerator,
-                inputDeriver: candidateDeriver,
-                buffer: consume candidateBuffer,
-                generatorRanOnMainThread: generatorRanOnMainThread,
-                isFinishing: isFinishing,
-                preparationCPUStartedAt: preparationCPUStartedAt
-            )
-        }
-
-        let allocationProbe = preparationAllocationProbe
-        allocationProbe?.arm()
-        var allocationProbeIsArmed = allocationProbe != nil
-        defer {
-            if allocationProbeIsArmed {
-                allocationProbe?.disarmAndRecord(.authoritativeCPU)
-            }
-        }
-
-        transientStrokeBuffer = nil
-
-        transientDabScratch.removeAll(keepingCapacity: true)
-        transientChunkScratch.removeAll(keepingCapacity: true)
-        settledChunkScratch.removeAll(keepingCapacity: true)
-        generatedLogicalDabScratch.removeAll(keepingCapacity: true)
-        generatedProjectionScratch.removeAll(keepingCapacity: true)
-        let arenaTransaction = try transientDabArena.beginTransaction(
-            replacingPrediction: false
-        )
-        defer { arenaTransaction.rollback() }
-        var projectionRanOnMainThread = false
-        let maximumGeneratedDabCount =
-            TransientStrokeBufferContract.wholeStrokeDabCapacity
-        let maximumGeneratedProjectionCount =
-            budget.maximumPendingAuthoritativeInstances
-
-        for sample in samples {
-            let inputBefore = candidateDeriver
-            let worldSample = candidateDeriver.derive(
-                sample,
-                viewport: viewport
-            )
-            perSampleLogicalDabScratch.removeAll(keepingCapacity: true)
-            let transientStart = transientDabScratch.count
-            let projectionExecutionRanOnMainThread =
-                executionIsOnMainThread()
-            do {
-                let maximumPathSubdivisionCount =
-                    Self.maximumPathSubdivisionCount(
-                        forRemainingDabCapacity: max(
-                            0,
-                            maximumGeneratedDabCount
-                                - generatedLogicalDabScratch.count
-                        )
-                    )
-                switch sample.phase {
-                case .began:
-                    try candidateGenerator.begin(worldSample) { dab in
-                        try self.appendPreparedActualDab(
-                            dab,
-                            strategy: strategy,
-                            maximumDabCount: maximumGeneratedDabCount,
-                            maximumProjectedCount:
-                                maximumGeneratedProjectionCount
-                        )
-                    }
-                case .moved:
-                    try candidateGenerator.append(
-                        worldSample,
-                        maximumPathSubdivisionCount:
-                            maximumPathSubdivisionCount
-                    ) { dab in
-                        try self.appendPreparedActualDab(
-                            dab,
-                            strategy: strategy,
-                            maximumDabCount: maximumGeneratedDabCount,
-                            maximumProjectedCount:
-                                maximumGeneratedProjectionCount
-                        )
-                    }
-                case .ended:
-                    try candidateGenerator.finish(
-                        worldSample,
-                        maximumPathSubdivisionCount:
-                            maximumPathSubdivisionCount
-                    ) { dab in
-                        try self.appendPreparedActualDab(
-                            dab,
-                            strategy: strategy,
-                            maximumDabCount: maximumGeneratedDabCount,
-                            maximumProjectedCount:
-                                maximumGeneratedProjectionCount
-                        )
-                    }
-                case .cancelled:
-                    throw StrokeFrameSchedulerError.invalidLifecycle
-                }
-            } catch is StrokePathInterpolationError {
-                throw StrokeFrameSchedulerError
-                    .generatedDabCapacityExceeded(
-                        actual: maximumGeneratedDabCount + 1,
-                        maximum: maximumGeneratedDabCount
-                    )
-            }
-            if !perSampleLogicalDabScratch.isEmpty {
-                projectionRanOnMainThread = projectionRanOnMainThread
-                    || projectionExecutionRanOnMainThread
-            }
-            let transientCount = transientDabScratch.count - transientStart
-            let slice = try arenaTransaction.storeActual(
-                count: transientCount
-            ) { offset in
-                transientDabScratch[transientStart + offset]
-            }
-            let chunk = TransientStrokeChunk(
-                sample: worldSample,
-                dabs: slice,
-                generatorSnapshotAfterSample: candidateGenerator,
-                inputDeriverSnapshotBeforeSample: inputBefore
-            )
-            transientChunkScratch.append(chunk)
-            perMutationSettledScratch.removeAll(keepingCapacity: true)
-            let mutation = candidateBuffer.appendActual(
-                chunk,
-                settledInto: &perMutationSettledScratch
-            )
-            if let rejection = mutation.rejection {
-                throw capacityError(
-                    for: rejection,
-                    limits: candidateBuffer.activeReplayLimits
-                )
-            }
-            settledChunkScratch.append(
-                contentsOf: perMutationSettledScratch
-            )
-        }
-
-        authoritativeProjectedScratch.removeAll(keepingCapacity: true)
-        replayProjectedScratch.removeAll(keepingCapacity: true)
-        try appendProjectedChunks(
-            settledChunkScratch,
-            to: &authoritativeProjectedScratch,
-            maximumRecordCount:
-                budget.maximumPendingAuthoritativeInstances
-        )
-        try appendProjectedChunks(
-            candidateBuffer.actualChunks,
-            to: &replayProjectedScratch,
-            maximumRecordCount:
-                budget.maximumPendingPredictedInstances
-        )
-        try appendProjectedChunks(
-            candidateBuffer.predictedChunks,
-            to: &replayProjectedScratch,
-            maximumRecordCount:
-                budget.maximumPendingPredictedInstances
-        )
-        try preflightPreparedMutation(
+        return try await beginAuthoritativeCandidateDrain(
             generation: generation,
-            authoritative: authoritativeProjectedScratch,
-            replay: replayProjectedScratch
-        )
-
-        let coordinatorTransfer = settledChunkScratch.isEmpty
-            ? nil
-            : try prepareSettledTransfer(
-                settledChunkScratch,
-                coordinator: coordinator
-            )
-        if let coordinatorTransfer {
-            try coordinator.reserveForDownstreamAcceptance(
-                coordinatorTransfer,
-                retireAfterAcceptance: true
-            )
-        }
-        installPreparedQueues(
-            authoritative: authoritativeProjectedScratch,
-            replay: replayProjectedScratch
-        )
-        if let coordinatorTransfer {
-            coordinator.finalizeAndRetireAfterDownstreamAcceptance(
-                coordinatorTransfer
-            )
-        }
-        authoritativeGenerator = candidateGenerator
-        authoritativeInputDeriver = candidateDeriver
-        transientStrokeBuffer = candidateBuffer
-        preparationHasBegun = true
-        preparationHasFinished = isFinishing
-        preparationMutationRevision &+= 1
-        try arenaTransaction.commit(
-            retainingActual: candidateBuffer.actualChunks,
-            retainingPredicted: candidateBuffer.predictedChunks
-        )
-
-        let needsPredictionReplacement =
-            !replayProjectedScratch.isEmpty
-                || authoritativeProjectedScratch.isEmpty
-        if needsPredictionReplacement {
-            privateSurfaceEncoder?.beginPredictionReplacement()
-        }
-        allocationProbe?.disarmAndRecord(.authoritativeCPU)
-        allocationProbeIsArmed = false
-        let preparationCPUNanoseconds =
-            preparationClock()
-                - preparationCPUStartedAt
-        return try await makePreparedOutputBatch(
-            generation: generation,
-            predictionProvenanceBoundary:
-                currentPredictionProvenanceBoundary,
-            coordinatorSnapshot: coordinator.snapshot,
-            executorProbe: StrokePreparationExecutorProbe(
-                generatorRanOnMainThread: generatorRanOnMainThread,
-                projectionRanOnMainThread: projectionRanOnMainThread
-            ),
+            samples: samples,
+            generator: candidateGenerator,
+            inputDeriver: candidateDeriver,
+            buffer: consume candidateBuffer,
+            generatorRanOnMainThread: generatorRanOnMainThread,
             isFinishing: isFinishing,
-            emitEmpty: true,
-            predictionAdmission: nil,
-            forcedSurfaceLayer:
-                authoritativeProjectedScratch.isEmpty
-                    && replayProjectedScratch.isEmpty
-                    ? .prediction
-                    : nil,
-            preparationCPUNanoseconds: preparationCPUNanoseconds
-        )!
+            preparationCPUStartedAt: preparationCPUStartedAt
+        )
+
     }
 
     private var currentPredictionProvenanceBoundary:
@@ -3072,13 +2829,47 @@ actor StrokeFrameScheduler {
                 drain.arenaTransaction.rollback()
             }
         }
-        let isFinishing = try resumeAuthoritativeCandidateDrainCPU(
-            drain: drain,
-            coordinator: coordinator,
-            viewport: viewport,
-            strategy: strategy,
-            preparationCPUStartedAt: preparationCPUStartedAt
-        )
+        var isFinishing = false
+        var continuesCurrentPage = false
+        candidateCPU: while true {
+            let cpuResult = try resumeAuthoritativeCandidateDrainCPU(
+                drain: drain,
+                viewport: viewport,
+                strategy: strategy,
+                preparationCPUStartedAt: preparationCPUStartedAt,
+                continuesCurrentPage: continuesCurrentPage
+            )
+            switch cpuResult {
+            case let .page(pageIsFinishing):
+                isFinishing = pageIsFinishing
+                break candidateCPU
+            case .checkpointCandidate:
+                try checkpointCandidateActualStorage(drain)
+                let preparationDeadlineReached =
+                    drain.currentResumeWorkUnits > 0
+                    && preparationClock() - preparationCPUStartedAt
+                        >= budget.cpuPreparationNanoseconds
+                if drain.sampleIndex < drain.samples.count,
+                   (!generatedLogicalDabScratch.isEmpty
+                       || preparationDeadlineReached
+                       || drain.currentResumeWorkUnits
+                           >= LogicalDabBatch.maximumDabCount)
+                {
+                    try installCheckpointedAuthoritativeCandidatePage(drain)
+                    drain.hasPublishedCandidatePage = true
+                    authoritativeCandidateDrain = drain
+                    break candidateCPU
+                }
+                continuesCurrentPage = true
+            case .continueAfterEmission:
+                isFinishing = try continueAfterCandidateEmissionCPU(
+                    drain,
+                    coordinator: coordinator,
+                    preparationCPUStartedAt: preparationCPUStartedAt
+                )
+                break candidateCPU
+            }
+        }
         // No async function may be entered while the authoritative probe is
         // armed. Swift can otherwise allocate a TaskAllocator slab for the
         // callee's async frame and misattribute runtime bookkeeping to the
@@ -3095,17 +2886,19 @@ actor StrokeFrameScheduler {
 
     private func resumeAuthoritativeCandidateDrainCPU(
         drain: StrokeAuthoritativeCandidateDrain,
-        coordinator: StrokeRenderCoordinator,
         viewport: ViewportTransform,
         strategy: TilingStrategy,
-        preparationCPUStartedAt: UInt64
-    ) throws -> Bool {
-        recordCandidatePhase(drain.phase)
-        authoritativeCandidateResumeCount &+= 1
-        generatedLogicalDabScratch.removeAll(keepingCapacity: true)
-        generatedProjectionScratch.removeAll(keepingCapacity: true)
-        perSampleLogicalDabScratch.removeAll(keepingCapacity: true)
-        drain.currentResumeWorkUnits = 0
+        preparationCPUStartedAt: UInt64,
+        continuesCurrentPage: Bool
+    ) throws -> StrokeAuthoritativeCandidateDrainCPUResult {
+        if !continuesCurrentPage {
+            recordCandidatePhase(drain.phase)
+            authoritativeCandidateResumeCount &+= 1
+            generatedLogicalDabScratch.removeAll(keepingCapacity: true)
+            generatedProjectionScratch.removeAll(keepingCapacity: true)
+            perSampleLogicalDabScratch.removeAll(keepingCapacity: true)
+            drain.currentResumeWorkUnits = 0
+        }
 
         if drain.phase == .retainedProjection {
             try injectStageCFailure(
@@ -3173,7 +2966,7 @@ actor StrokeFrameScheduler {
                 try installStagedCandidateProjectionPage(drain)
                 drain.hasPublishedCandidatePage = true
                 authoritativeCandidateDrain = drain
-                return false
+                return .page(isFinishing: false)
             }
         }
 
@@ -3189,15 +2982,15 @@ actor StrokeFrameScheduler {
                 try installCheckpointedAuthoritativeCandidatePage(drain)
                 drain.hasPublishedCandidatePage = true
                 authoritativeCandidateDrain = drain
-                return false
+                return .page(isFinishing: false)
             }
+            return .checkpointCandidate
+        }
+        if drain.phase == .candidateCheckpoint {
+            return .checkpointCandidate
         }
         if drain.phase == .settledTransfer {
-            return try continueAfterCandidateEmissionCPU(
-                drain,
-                coordinator: coordinator,
-                preparationCPUStartedAt: preparationCPUStartedAt
-            )
+            return .continueAfterEmission
         }
 
         while drain.sampleIndex < drain.samples.count {
@@ -3248,9 +3041,17 @@ actor StrokeFrameScheduler {
                 try installPartialAuthoritativeCandidatePage(drain)
                 drain.hasPublishedCandidatePage = true
                 authoritativeCandidateDrain = drain
-                return false
+                return .page(isFinishing: false)
             }
-            let page: BrushStrokeGenerator.EmissionPage?
+            let remainingEmissionWork = LogicalDabBatch.maximumDabCount
+                - drain.currentResumeWorkUnits
+            if remainingEmissionWork < 2 {
+                try installPartialAuthoritativeCandidatePage(drain)
+                drain.hasPublishedCandidatePage = true
+                authoritativeCandidateDrain = drain
+                return .page(isFinishing: false)
+            }
+            let page: BrushStrokeGenerator.EmissionPage
             var yieldedAcceptedPrefix = false
             var pausedBeforeCandidate = false
             try injectStageCFailure(
@@ -3258,7 +3059,14 @@ actor StrokeFrameScheduler {
                 generation: drain.generation,
                 drain: drain
             )
-            page = try cursor.emitNextPageDeciding { dab in
+            page = try cursor.emitNextPageDeciding(
+                maximumWorkCount: remainingEmissionWork,
+                shouldPauseBeforeWork: {
+                    return self.preparationClock()
+                            - preparationCPUStartedAt
+                            >= self.budget.cpuPreparationNanoseconds
+                }
+            ) { dab in
                 if !self.generatedLogicalDabScratch.isEmpty,
                    self.preparationClock()
                     - preparationCPUStartedAt
@@ -3285,9 +3093,9 @@ actor StrokeFrameScheduler {
                         pausedBeforeCandidate = true
                         return .pause
                 }
-                drain.currentResumeWorkUnits += 1
                 return .accept
             }
+            drain.currentResumeWorkUnits += page.workCount
             yieldedAcceptedPrefix = yieldedAcceptedPrefix
                 || pausedBeforeCandidate
             try injectStageCFailure(
@@ -3304,10 +3112,7 @@ actor StrokeFrameScheduler {
                 try installPartialAuthoritativeCandidatePage(drain)
                 drain.hasPublishedCandidatePage = true
                 authoritativeCandidateDrain = drain
-                return false
-            }
-            guard let page else {
-                throw StrokeFrameSchedulerError.invalidLifecycle
+                return .page(isFinishing: false)
             }
             drain.cursor = cursor
 
@@ -3316,7 +3121,7 @@ actor StrokeFrameScheduler {
                 try installPartialAuthoritativeCandidatePage(drain)
                 drain.hasPublishedCandidatePage = true
                 authoritativeCandidateDrain = drain
-                return false
+                return .page(isFinishing: false)
             }
 
             guard let completedGenerator = cursor.completedGenerator,
@@ -3338,22 +3143,9 @@ actor StrokeFrameScheduler {
                 try installPartialAuthoritativeCandidatePage(drain)
                 drain.hasPublishedCandidatePage = true
                 authoritativeCandidateDrain = drain
-                return false
+                return .page(isFinishing: false)
             }
-
-            let preparationDeadlineReached =
-                drain.currentResumeWorkUnits > 0
-                && preparationClock() - preparationCPUStartedAt
-                    >= budget.cpuPreparationNanoseconds
-            if drain.sampleIndex < drain.samples.count,
-               (!generatedLogicalDabScratch.isEmpty
-                   || preparationDeadlineReached)
-            {
-                try installCheckpointedAuthoritativeCandidatePage(drain)
-                drain.hasPublishedCandidatePage = true
-                authoritativeCandidateDrain = drain
-                return false
-            }
+            return .checkpointCandidate
         }
 
         setCandidatePhase(.settledTransfer, on: drain)
@@ -3363,13 +3155,9 @@ actor StrokeFrameScheduler {
             try installCheckpointedAuthoritativeCandidatePage(drain)
             drain.hasPublishedCandidatePage = true
             authoritativeCandidateDrain = drain
-            return false
+            return .page(isFinishing: false)
         }
-        return try continueAfterCandidateEmissionCPU(
-            drain,
-            coordinator: coordinator,
-            preparationCPUStartedAt: preparationCPUStartedAt
-        )
+        return .continueAfterEmission
     }
 
     private func continueAfterCandidateEmissionCPU(
@@ -3542,50 +3330,74 @@ actor StrokeFrameScheduler {
             return false
         case let .stored(slice, consumedWorkUnits):
             drain.currentResumeWorkUnits += consumedWorkUnits
-            let chunk = TransientStrokeChunk(
+            transientChunkScratch.append(TransientStrokeChunk(
                 sample: worldSample,
                 dabs: slice,
                 generatorSnapshotAfterSample: completedGenerator,
                 inputDeriverSnapshotBeforeSample: inputBefore
-            )
-            perMutationSettledScratch.removeAll(keepingCapacity: true)
-            try injectStageCFailure(
-                .beforeTransientCheckpointUpdate,
-                generation: drain.generation,
-                drain: drain
-            )
-            let mutation = drain.buffer.appendActual(
-                chunk,
-                settledInto: &perMutationSettledScratch
-            )
-            if let rejection = mutation.rejection {
-                throw capacityError(
-                    for: rejection,
-                    limits: drain.buffer.activeReplayLimits
-                )
-            }
-            settledChunkScratch.append(
-                contentsOf: perMutationSettledScratch
-            )
-            try injectStageCFailure(
-                .afterTransientCheckpointUpdate,
-                generation: drain.generation,
-                drain: drain
-            )
-            drain.generator = completedGenerator
-            drain.cursor = nil
-            drain.currentSample = nil
-            drain.inputDeriverBeforeCurrentSample = nil
+            ))
             drain.actualStoreCursor = nil
-            drain.sampleIndex += 1
-            setCandidatePhase(.candidateEmission, on: drain)
-            try injectStageCFailure(
-                .afterCandidateAccepted,
-                generation: drain.generation,
-                drain: drain
-            )
+            setCandidatePhase(.candidateCheckpoint, on: drain)
             return true
         }
+    }
+
+    /// Storage cursors and their closure context are deliberately out of scope
+    /// before this checkpoint mutates the large composite replay value. Debug
+    /// Swift workers have a 512-KB stack; keeping both frames live would make a
+    /// valid two-component stroke depend on process stack size.
+    private func checkpointCandidateActualStorage(
+        _ drain: StrokeAuthoritativeCandidateDrain
+    ) throws {
+        guard transientChunkScratch.count == 1,
+              let completedGenerator = transientChunkScratch[0]
+                .generatorSnapshotAfterSample
+        else {
+            throw StrokeFrameSchedulerError.invalidLifecycle
+        }
+        perMutationSettledScratch.removeAll(keepingCapacity: true)
+        try injectStageCFailure(
+            .beforeTransientCheckpointUpdate,
+            generation: drain.generation,
+            drain: drain
+        )
+        let mutation: TransientStrokeBufferMutation
+        switch drain.buffer.mode {
+        case .appendOnly:
+            mutation = drain.buffer.appendActualAppendOnly(
+                transientChunkScratch[0],
+                settledInto: &perMutationSettledScratch
+            )
+        case .replayTail:
+            mutation = drain.buffer.appendActualReplayTail(
+                transientChunkScratch[0],
+                settledInto: &perMutationSettledScratch
+            )
+        }
+        if let rejection = mutation.rejection {
+            throw capacityError(
+                for: rejection,
+                limits: drain.buffer.activeReplayLimits
+            )
+        }
+        settledChunkScratch.append(contentsOf: perMutationSettledScratch)
+        try injectStageCFailure(
+            .afterTransientCheckpointUpdate,
+            generation: drain.generation,
+            drain: drain
+        )
+        drain.generator = completedGenerator
+        transientChunkScratch.removeAll(keepingCapacity: true)
+        drain.cursor = nil
+        drain.currentSample = nil
+        drain.inputDeriverBeforeCurrentSample = nil
+        drain.sampleIndex += 1
+        setCandidatePhase(.candidateEmission, on: drain)
+        try injectStageCFailure(
+            .afterCandidateAccepted,
+            generation: drain.generation,
+            drain: drain
+        )
     }
 
     private func makeCandidateDrainBatch(
@@ -3671,7 +3483,7 @@ actor StrokeFrameScheduler {
         let hit: StrokeStageCContinuationPhaseHits = switch phase {
         case .retainedProjection: .retainedProjection
         case .candidateEmission: .candidateEmission
-        case .candidateStorage: .candidateStorage
+        case .candidateStorage, .candidateCheckpoint: .candidateStorage
         case .settledTransfer: .settledTransfer
         case .arenaRetention: .arenaRetention
         case .finalInstall: .finalInstall
@@ -3918,11 +3730,15 @@ actor StrokeFrameScheduler {
         _ chunks: [TransientStrokeChunk],
         coordinator: StrokeRenderCoordinator
     ) throws -> PreparedStrokeCoordinatorEmission {
-        try coordinator.prepareSettledReplayTransfer(
+        guard let finalGenerator = chunks.last?.generatorSnapshotAfterSample
+        else {
+            throw StrokeRenderCoordinatorError
+                .settledReplayCheckpointMismatch
+        }
+        return try coordinator.prepareSettledReplayTransfer(
             chunks,
             trustedStartingGenerator: coordinator.generatorSnapshot,
-            trustedFinalGenerator:
-                chunks.last?.generatorSnapshotAfterSample
+            trustedFinalGenerator: finalGenerator
         )
     }
 
@@ -4294,6 +4110,7 @@ actor StrokeFrameScheduler {
                 StrokePreparedProjectedRecord(
                     depositionRecord: ProjectedDepositionRecord(
                         identity: dab.ordinal,
+                        componentOrdinal: dab.componentOrdinal,
                         instance: try PatternDepositionStampInstance(
                             fragment: fragment,
                             dab: dab,

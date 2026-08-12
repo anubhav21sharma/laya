@@ -12,7 +12,6 @@ public struct SyntheticV1DiagnosticResult: Codable, Equatable, Sendable {
     public let adapter: String
     public let approximated: Int
     public let exact: Int
-    public let nativeFeatureVersion: UInt16
     public let packageRoundTrip: Bool
     public let requiredSemanticKeys: [String]
     public let resourceResampled: Int
@@ -96,8 +95,7 @@ public enum SyntheticV1DiagnosticRunner {
         let expectedSourceKeys = includeWet
             ? SyntheticV1SemanticKeys.all
             : SyntheticV1SemanticKeys.dry
-        guard definition.compatibility.nativeFeatureVersion == 1,
-              definition.compatibility.sourceSettingKeys == expectedSourceKeys,
+        guard definition.compatibility.sourceSettingKeys == expectedSourceKeys,
               summary.exact == SyntheticV1SemanticKeys.dry.count - 2,
               summary.approximated == 0,
               summary.resourceResampled == 2,
@@ -106,50 +104,24 @@ public enum SyntheticV1DiagnosticRunner {
             throw SyntheticV1DiagnosticFailure(stage: .activation)
         }
 
-        let activation: String
-        switch scenario {
-        case .dry:
-            guard definition.compatibility.requiredSemanticKeys.isEmpty,
-                  definition.material.interaction == .none,
-                  definition.capabilities.isEmpty
-            else {
-                throw SyntheticV1DiagnosticFailure(stage: .activation)
-            }
-            do {
-                _ = try BrushProgramCompiler.compile(definition)
-            } catch {
-                throw SyntheticV1DiagnosticFailure(stage: .activation)
-            }
-            activation = "supported"
-        case .wet:
-            let wetEntry = mapped.report.entries.first {
-                $0.sourceSemanticKey == SyntheticV1SemanticKeys.wet
-            }
-            guard definition.compatibility.requiredSemanticKeys
-                == [SyntheticV1SemanticKeys.wet],
-                definition.material.interaction == .wetMix,
-                definition.capabilities
-                == [
-                    BrushCapabilityDeclaration(
-                        identifier: BrushCapability.wetMix.rawValue,
-                        required: true
-                    ),
-                ],
-                wetEntry?.disposition == .unsupported,
-                wetEntry?.requiredForFaithfulRendering == true
-            else {
-                throw SyntheticV1DiagnosticFailure(stage: .activation)
-            }
-            activation = "blocked-required-semantics"
+        guard scenario == .dry,
+              definition.compatibility.requiredSemanticKeys.isEmpty,
+              definition.components[0].material.interaction == .none,
+              definition.capabilities.isEmpty
+        else {
+            throw SyntheticV1DiagnosticFailure(stage: .activation)
+        }
+        do {
+            _ = try BrushProgramCompiler.compile(definition)
+        } catch {
+            throw SyntheticV1DiagnosticFailure(stage: .activation)
         }
 
         return SyntheticV1DiagnosticResult(
-            activation: activation,
+            activation: "supported",
             adapter: "synthetic-v1",
             approximated: summary.approximated,
             exact: summary.exact,
-            nativeFeatureVersion:
-            definition.compatibility.nativeFeatureVersion,
             packageRoundTrip: true,
             requiredSemanticKeys:
             definition.compatibility.requiredSemanticKeys,

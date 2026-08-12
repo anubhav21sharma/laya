@@ -9,7 +9,6 @@ public final class EditorModel {
     public private(set) var brushDiameter: Float = 20
     public private(set) var eraserStrength: Float = 1
     public private(set) var selectedRecipeID = EditorBrushCatalog.defaultDraw.id
-    public private(set) var lastBrushSelectionDiagnostic: String?
     public private(set) var showGrid = false
     public private(set) var pixelSize =
         EditorConfiguration.defaultPeriodicPixelSize
@@ -81,17 +80,13 @@ public final class EditorModel {
         self.inkColor = inkColor
     }
 
-    public func confirmRecipe(_ recipeID: BrushRecipeID) {
-        if recipeID.rawValue == "builtin.bounded-wash" {
-            selectedRecipeID = EditorBrushCatalog.defaultDraw.id
-            lastBrushSelectionDiagnostic = "staleBuiltinBoundedWash"
-            return
-        }
-        guard let resolved = EditorBrushCatalog.resolveSelection(recipeID) else {
+    public func confirmRecipe(_ recipeID: BrushRecipeID) throws {
+        guard let resolved = try EditorBrushCatalog.resolveCurrentSelection(
+            recipeID
+        ) else {
             return
         }
         selectedRecipeID = resolved
-        lastBrushSelectionDiagnostic = nil
     }
 
     public func confirmBrushDiameter(_ brushDiameter: Float) {

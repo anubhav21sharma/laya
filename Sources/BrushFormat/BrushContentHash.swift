@@ -8,46 +8,26 @@ import PatternEngine
 /// do not alter rendered output. Package equality still includes both through
 /// `BrushPackage.Equatable`.
 public enum BrushContentHash {
-    public static let legacySchemaVersion: UInt16 = 2
-    public static let currentSchemaVersion: UInt16 = 3
-    public static let schemaVersion = legacySchemaVersion
+    public static let currentSchemaVersion: UInt16 = 4
+    public static let schemaVersion = currentSchemaVersion
 
     public static func sha256Hex(of data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     public static func digest(of package: BrushPackage) throws -> String {
-        try BrushPackageValidator.validate(package)
         return try digestOfValidatedPackage(package)
     }
 
     package static func digestOfValidatedPackage(
         _ package: BrushPackage
     ) throws -> String {
-        switch package.definition.schemaVersion {
-        case BrushDefinition.legacySchemaVersion:
-            var writer = CanonicalBrushWriterV1()
-            writer.string("laya.brush.semantic")
-            writer.u16(legacySchemaVersion)
-            append(package.definition, to: &writer)
-            appendSemanticResources(package, to: &writer)
-            return sha256Hex(of: writer.data)
-        case BrushDefinition.currentSchemaVersion:
-            var writer = CanonicalBrushWriterV2()
-            writer.string("laya.brush.semantic")
-            writer.u16(currentSchemaVersion)
-            append(
-                package.definition,
-                includeDisplayMetadata: false,
-                includeSourceSettingKeys: false,
-                to: &writer
-            )
-            try appendStageC(package.definition, to: &writer)
-            appendSemanticResources(package, to: &writer)
-            return sha256Hex(of: writer.data)
-        default:
-            throw BrushPackageError.unsupportedDefinitionSchema
-        }
+        var writer = CanonicalBrushWriter()
+        writer.string("laya.brush.semantic")
+        writer.u16(currentSchemaVersion)
+        try append(package.definition, to: &writer)
+        appendSemanticResources(package, to: &writer)
+        return sha256Hex(of: writer.data)
     }
 
     private static func appendSemanticResources(
@@ -69,121 +49,30 @@ public enum BrushContentHash {
         }
     }
 
-    private static func appendStageC(
+    private static func append(
         _ definition: BrushDefinition,
         to writer: inout CanonicalBrushWriter
     ) throws {
-        guard let normalization = definition.sensorNormalization,
-              let sensorProgram = definition.sensorProgram,
-              let stabilization = definition.stabilizationV2,
-              let direction = definition.direction,
-              let emission = definition.emission,
-              let tipSupports = definition.tipSupports
-        else { throw BrushPackageError.invalidDefinition }
-
-        writer.float(normalization.fullScaleWorldVelocity)
-        writer.double(normalization.minimumVelocityDeltaTime)
-        writer.double(normalization.fullScaleStrokeAge)
-        writer.float(normalization.fullScaleStrokeDistanceInDiameters)
-        for output in BrushDynamicOutput.allCases {
-            writer.u8(dynamicOutputTag(output))
-            guard let outputProgram = sensorProgram.outputs[output] else {
-                throw BrushPackageError.invalidDefinition
-            }
-            writer.float(outputProgram.baseValue)
-            writer.count(outputProgram.terms.count)
-            for term in outputProgram.terms {
-                writer.u8(dynamicsInputTag(term.input))
-                append(term.response, to: &writer)
-                writer.boolean(term.inputInverted)
-                writer.float(term.missingInputValue)
-                writer.float(term.responseScale)
-                writer.float(term.responseOffset)
-                writer.float(term.responseLowerClamp)
-                writer.float(term.responseUpperClamp)
-                writer.float(term.jitter)
-                writer.u8(responseOperationTag(term.operation))
-            }
-        }
-        switch stabilization {
-        case .none:
-            writer.u8(0)
-        case let .weightedWindow(distance):
-            writer.u8(1); writer.float(distance)
-        case let .delayed(distance):
-            writer.u8(2); writer.float(distance)
-        }
-        writer.float(direction.maximumAngularStep)
-        writer.float(direction.stationaryDirection)
-        switch emission.mode {
-        case .distance: writer.u8(0)
-        case .time: writer.u8(1)
-        case .distanceAndTime: writer.u8(2)
-        }
-        if let interval = emission.timeInterval {
-            writer.u8(1); writer.double(interval)
-        } else {
-            writer.u8(0)
-        }
-        writer.count(tipSupports.count)
-        for support in tipSupports {
-            switch support.kind {
-            case .analyticEllipse: writer.u8(0)
-            case .analyticRectangle: writer.u8(1)
-            case .normalizedBounds:
-                writer.u8(2)
-                guard let bounds = support.bounds else {
-                    throw BrushPackageError.invalidDefinition
-                }
-                writer.float(bounds.minX); writer.float(bounds.maxX)
-                writer.float(bounds.minY); writer.float(bounds.maxY)
-            }
-        }
-    }
-
-    private static func append(
-        _ definition: BrushDefinition,
-        includeDisplayMetadata: Bool = true,
-        includeSourceSettingKeys: Bool = true,
-        to writer: inout CanonicalBrushWriter
-    ) {
         writer.string(definition.id.rawValue)
         writer.u16(definition.schemaVersion)
-        if includeDisplayMetadata {
-            append(definition.metadata, to: &writer)
-        }
 
-        let capabilities = definition.capabilities.sorted { $0.identifier < $1.identifier }
+        let capabilities = definition.capabilities.sorted {
+            $0.identifier < $1.identifier
+        }
         writer.count(capabilities.count)
         for capability in capabilities {
             writer.string(capability.identifier)
             writer.boolean(capability.required)
         }
 
-        let resources = definition.resources
-            .filter { $0.kind != .preview }
-            .sorted { $0.identifier < $1.identifier }
-        writer.count(resources.count)
-        for resource in resources {
-            writer.string(resource.identifier)
-            writer.u8(resourceKindTag(resource.kind))
-            writer.boolean(resource.required)
-            switch resource.fallback {
-            case nil:
-                writer.u8(0)
-            case let .builtIn(identifier)?:
-                writer.u8(1)
-                writer.string(identifier)
-            }
+        writer.string(definition.composition.identifier)
+        writer.boolean(definition.composition.required)
+        writer.count(definition.components.count)
+        for component in definition.components {
+            try append(component, to: &writer)
         }
 
-        append(definition.coverage, to: &writer)
-        append(definition.placement, to: &writer)
-        append(definition.dynamics, to: &writer)
-        append(definition.color, to: &writer)
-        append(definition.material, to: &writer)
         writer.float(definition.stabilization)
-        append(definition.taper, to: &writer)
         writer.u8(replayModeTag(definition.replayMode))
         append(definition.replayLimits, to: &writer)
         append(
@@ -204,11 +93,140 @@ public enum BrushContentHash {
         writer.integer(definition.limits.maximumResourceDimension)
         writer.integer(definition.limits.maximumResidentBytes)
         writer.u8(performanceIntentTag(definition.performanceIntent))
-        writer.u16(definition.compatibility.nativeFeatureVersion)
-        if includeSourceSettingKeys {
-            appendSorted(definition.compatibility.sourceSettingKeys, to: &writer)
+        appendSorted(
+            definition.compatibility.requiredSemanticKeys,
+            to: &writer
+        )
+        append(definition.sensorNormalization, to: &writer)
+        append(definition.stabilizationV2, to: &writer)
+        append(definition.direction, to: &writer)
+    }
+
+    private static func append(
+        _ component: BrushComponentDefinition,
+        to writer: inout CanonicalBrushWriter
+    ) throws {
+        writer.string(component.identifier.rawValue)
+        writer.u8(component.ordinal)
+        let resources = component.resources
+            .filter { $0.kind != .preview }
+            .sorted { $0.identifier < $1.identifier }
+        writer.count(resources.count)
+        for resource in resources {
+            writer.string(resource.identifier)
+            writer.u8(resourceKindTag(resource.kind))
+            writer.boolean(resource.required)
+            switch resource.fallback {
+            case nil:
+                writer.u8(0)
+            case let .builtIn(identifier)?:
+                writer.u8(1)
+                writer.string(identifier)
+            }
         }
-        appendSorted(definition.compatibility.requiredSemanticKeys, to: &writer)
+        append(component.coverage, to: &writer)
+        append(component.placement, to: &writer)
+        append(component.dynamics, to: &writer)
+        append(component.color, to: &writer)
+        append(component.material, to: &writer)
+        append(component.taper, to: &writer)
+        try append(component.sensorProgram, to: &writer)
+        append(component.emission, to: &writer)
+        try append(component.tipSupports, to: &writer)
+    }
+
+    private static func append(
+        _ normalization: BrushSensorNormalizationDefinition,
+        to writer: inout CanonicalBrushWriter
+    ) {
+        writer.float(normalization.fullScaleWorldVelocity)
+        writer.double(normalization.minimumVelocityDeltaTime)
+        writer.double(normalization.fullScaleStrokeAge)
+        writer.float(normalization.fullScaleStrokeDistanceInDiameters)
+    }
+
+    private static func append(
+        _ sensorProgram: BrushSensorProgramDefinition,
+        to writer: inout CanonicalBrushWriter
+    ) throws {
+        for output in BrushDynamicOutput.allCases {
+            writer.u8(dynamicOutputTag(output))
+            guard let outputProgram = sensorProgram.outputs[output] else {
+                throw BrushPackageError.invalidDefinition
+            }
+            writer.float(outputProgram.baseValue)
+            writer.count(outputProgram.terms.count)
+            for term in outputProgram.terms {
+                writer.u8(dynamicsInputTag(term.input))
+                append(term.response, to: &writer)
+                writer.boolean(term.inputInverted)
+                writer.float(term.missingInputValue)
+                writer.float(term.responseScale)
+                writer.float(term.responseOffset)
+                writer.float(term.responseLowerClamp)
+                writer.float(term.responseUpperClamp)
+                writer.float(term.jitter)
+                writer.u8(responseOperationTag(term.operation))
+            }
+        }
+    }
+
+    private static func append(
+        _ stabilization: BrushStabilizationDefinition,
+        to writer: inout CanonicalBrushWriter
+    ) {
+        switch stabilization {
+        case .none:
+            writer.u8(0)
+        case let .weightedWindow(distance):
+            writer.u8(1); writer.float(distance)
+        case let .delayed(distance):
+            writer.u8(2); writer.float(distance)
+        }
+    }
+
+    private static func append(
+        _ direction: BrushDirectionDefinition,
+        to writer: inout CanonicalBrushWriter
+    ) {
+        writer.float(direction.maximumAngularStep)
+        writer.float(direction.stationaryDirection)
+    }
+
+    private static func append(
+        _ emission: BrushEmissionDefinition,
+        to writer: inout CanonicalBrushWriter
+    ) {
+        switch emission.mode {
+        case .distance: writer.u8(0)
+        case .time: writer.u8(1)
+        case .distanceAndTime: writer.u8(2)
+        }
+        if let interval = emission.timeInterval {
+            writer.u8(1); writer.double(interval)
+        } else {
+            writer.u8(0)
+        }
+    }
+
+    private static func append(
+        _ tipSupports: [BrushTipSupportDefinition],
+        to writer: inout CanonicalBrushWriter
+    ) throws {
+        writer.count(tipSupports.count)
+        for support in tipSupports {
+            switch support.kind {
+            case .analyticEllipse: writer.u8(0)
+            case .analyticRectangle: writer.u8(1)
+            case .normalizedBounds:
+                writer.u8(2)
+                guard let bounds = support.bounds else {
+                    throw BrushPackageError.invalidDefinition
+                }
+                writer.float(bounds.minX); writer.float(bounds.maxX)
+                writer.float(bounds.minY); writer.float(bounds.maxY)
+            }
+        }
     }
 
     private static func append(_ metadata: BrushMetadata, to writer: inout CanonicalBrushWriter) {
@@ -397,16 +415,6 @@ public enum BrushContentHash {
             writer.integer(maximumSamples)
             writer.float(maximumWorldLength)
             writer.integer(maximumDabs)
-        case .legacySchemaV1Cap:
-            writer.u8(3)
-        case let .legacySchemaV1EndTaper(taper, replayLimits):
-            writer.u8(4)
-            append(taper, to: &writer)
-            append(replayLimits, to: &writer)
-        case let .legacySchemaV1Replay(mode, replayLimits):
-            writer.u8(5)
-            writer.u8(replayModeTag(mode))
-            append(replayLimits, to: &writer)
         }
     }
 
@@ -562,7 +570,7 @@ public enum BrushContentHash {
     }
 
     private static func replayModeTag(_ value: BrushReplayMode) -> UInt8 {
-        switch value { case .appendOnly: 0; case .replayTail: 1; case .boundedWholeStroke: 2 }
+        switch value { case .appendOnly: 0; case .replayTail: 1 }
     }
 
     private static func performanceIntentTag(_ value: BrushPerformanceIntent) -> UInt8 {
@@ -630,6 +638,3 @@ private struct CanonicalBrushWriter {
         string(value)
     }
 }
-
-private typealias CanonicalBrushWriterV1 = CanonicalBrushWriter
-private typealias CanonicalBrushWriterV2 = CanonicalBrushWriter
