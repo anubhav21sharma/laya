@@ -228,6 +228,8 @@ schemes:
       config: Debug
       targets:
         - PatternSpikeMacUITests
+      environmentVariables:
+        STAGE_D_ACCEPTANCE_COMMIT: "$(STAGE_D_ACCEPTANCE_COMMIT)"
 
   PatternSpikeMacHarness:
     build:

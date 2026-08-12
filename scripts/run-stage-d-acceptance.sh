@@ -108,8 +108,7 @@ run_ui_gate() {
   local pid elapsed status
   rm -rf "$xcresult"
   set +e
-  STAGE_D_ACCEPTANCE_COMMIT="$commit" \
-    xcodebuild test-without-building \
+  xcodebuild test-without-building \
     -project "$repo_root/App/PatternSpike.xcodeproj" \
     -scheme PatternSpikeMac \
     -destination "$mac_destination" \
@@ -118,6 +117,7 @@ run_ui_gate() {
     -only-testing:"$required_ui_test" \
     -parallel-testing-enabled NO \
     ARCHS="$host_arch" \
+    STAGE_D_ACCEPTANCE_COMMIT="$commit" \
     CODE_SIGNING_ALLOWED=NO \
     >"$logs/xcode-ui.log" 2>&1 &
   pid=$!

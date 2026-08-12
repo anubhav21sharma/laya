@@ -36,10 +36,21 @@ final class StageDAppRouteUITests: XCTestCase {
             "STAGE_D_ACCEPTANCE_DATE": "2026-08-10T12:00:00Z",
             "STAGE_D_ACCEPTANCE_REQUEST": requestURL.path,
         ]
+        app.launchArguments = [
+            "-ApplePersistenceIgnoreState", "YES",
+            "-NSQuitAlwaysKeepsWindows", "NO",
+        ]
         app.launch()
 
-        let canvas = app.descendants(matching: .any)["Pattern Canvas"]
-        XCTAssertTrue(canvas.waitForExistence(timeout: 10))
+        let brushLabWindow = app.windows["Brush Lab"]
+        if brushLabWindow.waitForExistence(timeout: 1) {
+            let close = brushLabWindow.buttons[XCUIIdentifierCloseWindow]
+            if close.exists { close.click() }
+        }
+        let mainWindow = app.windows["PatternSpike"]
+        XCTAssertTrue(mainWindow.waitForExistence(timeout: 30))
+        let canvas = mainWindow.descendants(matching: .any)["Pattern Canvas"]
+        XCTAssertTrue(canvas.waitForExistence(timeout: 30))
         record(
             scenario: "stage-d.app.controls",
             route: "controls.initial",
