@@ -102,8 +102,8 @@ func stageDRouteConfigurationRequiresEveryDeterministicBoundary() throws {
             String(repeating: "a", count: 40),
         StageDAppRouteConfiguration.dateEnvironmentKey:
             "2026-08-10T12:00:00Z",
-        StageDAppRouteConfiguration.notificationEnvironmentKey:
-            "stage-d-route-\(UUID().uuidString)",
+        StageDAppRouteConfiguration.requestEnvironmentKey:
+            directory.appendingPathComponent("request.json").path,
     ]
 
     let configuration = try #require(
@@ -137,8 +137,8 @@ func stageDRouteRecorderBindsAppStatePixelsAndQuiescentSparseOwnership()
             String(repeating: "b", count: 40),
         StageDAppRouteConfiguration.dateEnvironmentKey:
             "2026-08-10T12:00:00Z",
-        StageDAppRouteConfiguration.notificationEnvironmentKey:
-            "stage-d-route-\(UUID().uuidString)",
+        StageDAppRouteConfiguration.requestEnvironmentKey:
+            directory.appendingPathComponent("request.json").path,
     ])
     recorder.bind(controller)
 

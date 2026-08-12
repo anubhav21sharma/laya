@@ -108,7 +108,8 @@ run_ui_gate() {
   local pid elapsed status
   rm -rf "$xcresult"
   set +e
-  xcodebuild test-without-building \
+  STAGE_D_ACCEPTANCE_COMMIT="$commit" \
+    xcodebuild test-without-building \
     -project "$repo_root/App/PatternSpike.xcodeproj" \
     -scheme PatternSpikeMac \
     -destination "$mac_destination" \

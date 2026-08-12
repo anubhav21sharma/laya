@@ -7,10 +7,6 @@ import XCTest
 @MainActor
 final class StageDAppRouteUITests: XCTestCase {
     func testProductionControlsShortcutsAndPersistenceWriteEvidence() throws {
-        let repository = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
         let artifactDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(
                 "StageDAppRouteArtifacts",
@@ -27,16 +23,18 @@ final class StageDAppRouteUITests: XCTestCase {
             .appendingPathComponent("route.patternproj")
         let exportURL = artifactDirectory
             .appendingPathComponent("route.png")
-        let notificationName = "com.anubhav.pattern.stage-d.route"
+        let requestURL = artifactDirectory
+            .appendingPathComponent("route-request.json")
+        let commit = try acceptanceCommit()
 
         let app = XCUIApplication()
         app.launchEnvironment = [
             "STAGE_D_ACCEPTANCE_MANIFEST": manifestURL.path,
             "STAGE_D_ACCEPTANCE_PROJECT": projectURL.path,
             "STAGE_D_ACCEPTANCE_EXPORT": exportURL.path,
-            "STAGE_D_ACCEPTANCE_COMMIT": try gitCommit(repository: repository),
+            "STAGE_D_ACCEPTANCE_COMMIT": commit,
             "STAGE_D_ACCEPTANCE_DATE": "2026-08-10T12:00:00Z",
-            "STAGE_D_ACCEPTANCE_NOTIFICATION": notificationName,
+            "STAGE_D_ACCEPTANCE_REQUEST": requestURL.path,
         ]
         app.launch()
 
@@ -45,7 +43,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.controls",
             route: "controls.initial",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
 
@@ -54,16 +52,16 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.controls",
             route: "controls.brush-size",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
         let anchor = app.popUpButtons["Brush Anchor"]
-        select("Graphite Pencil", in: anchor, app: app)
-        XCTAssertEqual(anchor.value as? String, "Graphite Pencil")
+        select("Native Dry Media", in: anchor, app: app)
+        XCTAssertEqual(anchor.value as? String, "Native Dry Media")
         record(
             scenario: "stage-d.app.controls",
             route: "controls.brush-selection",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
 
@@ -77,7 +75,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.controls",
             route: "controls.ink-color",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
 
@@ -90,7 +88,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.controls",
             route: "controls.draw",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
         let drawn = try attributes(
@@ -104,7 +102,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.controls",
             route: "controls.erase-tool",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
         drag(
@@ -116,7 +114,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.controls",
             route: "controls.erase",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
 
@@ -125,7 +123,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.controls",
             route: "controls.undo-erase",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
         app.buttons["Redo"].click()
@@ -133,7 +131,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.controls",
             route: "controls.redo-erase",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
         app.buttons["Add Layer"].click()
@@ -141,7 +139,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.controls",
             route: "controls.layer-add",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
         app.buttons["Lock Layer"].click()
@@ -149,7 +147,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.controls",
             route: "controls.layer-lock",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
         app.buttons["Unlock Layer"].click()
@@ -157,7 +155,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.controls",
             route: "controls.layer-unlock",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
         app.buttons["Hide Layer"].click()
@@ -165,7 +163,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.controls",
             route: "controls.layer-hide",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
         app.buttons["Show Layer"].click()
@@ -173,7 +171,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.controls",
             route: "controls.layer-show",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
         select(
@@ -184,7 +182,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.controls",
             route: "controls.layer-select-painted",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
 
@@ -193,7 +191,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.controls",
             route: "controls.clear-painted-layer",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
         let cleared = try attributes(
@@ -206,7 +204,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.controls",
             route: "controls.undo-clear-restores",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
         let restored = try attributes(
@@ -220,7 +218,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.controls",
             route: "controls.mode-half-drop",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
         replaceText(in: app.textFields["Tile Width"], with: "320")
@@ -231,7 +229,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.controls",
             route: "controls.resize",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
         let resized = try attributes(
@@ -248,7 +246,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.shortcuts",
             route: "shortcuts.hud-show",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
         app.typeKey("`", modifierFlags: [])
@@ -258,7 +256,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.shortcuts",
             route: "shortcuts.hud-hide",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
         app.typeKey("g", modifierFlags: [])
@@ -269,7 +267,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.shortcuts",
             route: "shortcuts.grid",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
         app.typeKey("7", modifierFlags: [])
@@ -277,7 +275,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.shortcuts",
             route: "shortcuts.mode",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
         app.typeKey("z", modifierFlags: .command)
@@ -285,7 +283,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.shortcuts",
             route: "shortcuts.undo",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
         app.typeKey("z", modifierFlags: [.command, .shift])
@@ -293,7 +291,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.shortcuts",
             route: "shortcuts.redo",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
 
@@ -305,7 +303,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.shortcuts",
             route: "shortcuts.numeric-field-owns-digit",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
 
@@ -315,7 +313,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.persistence",
             route: "persistence.save",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
         let saved = try attributes(
@@ -336,7 +334,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.persistence",
             route: "persistence.open-atomic-replacement",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
         let opened = try attributes(
@@ -354,7 +352,7 @@ final class StageDAppRouteUITests: XCTestCase {
         record(
             scenario: "stage-d.app.persistence",
             route: "persistence.flattened-png-export",
-            notificationName: notificationName,
+            requestURL: requestURL,
             manifestURL: manifestURL
         )
         let exported = try attributes(
@@ -378,22 +376,29 @@ final class StageDAppRouteUITests: XCTestCase {
         XCTAssertTrue(manifest.contains("10738cff"))
         XCTAssertFalse(manifest.contains("\"status\" : \"failed\""))
         XCTAssertTrue(app.buttons["Delete Active Layer"].isEnabled)
+        let attachment = XCTAttachment(contentsOfFile: manifestURL)
+        attachment.name = "app-route-manifest.json"
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     private func record(
         scenario: String,
         route: String,
-        notificationName: String,
+        requestURL: URL,
         manifestURL: URL
     ) {
-        DistributedNotificationCenter.default().post(
-            name: Notification.Name(notificationName),
-            object: nil,
-            userInfo: [
+        do {
+            let data = try JSONSerialization.data(withJSONObject: [
                 "scenarioID": scenario,
                 "routeID": route,
-            ]
-        )
+                "nonce": UUID().uuidString,
+            ])
+            try data.write(to: requestURL, options: .atomic)
+        } catch {
+            XCTFail("could not write route request: \(error)")
+            return
+        }
         XCTAssertTrue(waitUntil(timeout: 10) {
             guard let data = try? Data(contentsOf: manifestURL),
                   let text = String(data: data, encoding: .utf8)
@@ -402,19 +407,22 @@ final class StageDAppRouteUITests: XCTestCase {
         })
     }
 
-    private func gitCommit(repository: URL) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["-C", repository.path, "rev-parse", "HEAD"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        try process.run()
-        process.waitUntilExit()
-        XCTAssertEqual(process.terminationStatus, 0)
-        return String(
-            decoding: pipe.fileHandleForReading.readDataToEndOfFile(),
-            as: UTF8.self
-        ).trimmingCharacters(in: .whitespacesAndNewlines)
+    private func acceptanceCommit() throws -> String {
+        let commit = ProcessInfo.processInfo.environment[
+            "STAGE_D_ACCEPTANCE_COMMIT"
+        ] ?? ""
+        let isSHA1 = commit.count == 40 && commit.allSatisfy {
+            $0.isHexDigit
+        }
+        guard isSHA1 else {
+            throw NSError(
+                domain: "StageDAppRouteUITests",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "STAGE_D_ACCEPTANCE_COMMIT must be a 40-digit Git SHA"]
+            )
+        }
+        return commit
     }
 
     private func attributes(

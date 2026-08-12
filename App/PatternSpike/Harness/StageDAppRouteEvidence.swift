@@ -10,14 +10,14 @@ struct StageDAppRouteConfiguration: Equatable, Sendable {
     static let exportEnvironmentKey = "STAGE_D_ACCEPTANCE_EXPORT"
     static let commitEnvironmentKey = "STAGE_D_ACCEPTANCE_COMMIT"
     static let dateEnvironmentKey = "STAGE_D_ACCEPTANCE_DATE"
-    static let notificationEnvironmentKey = "STAGE_D_ACCEPTANCE_NOTIFICATION"
+    static let requestEnvironmentKey = "STAGE_D_ACCEPTANCE_REQUEST"
 
     let manifestURL: URL
     let projectURL: URL
     let exportURL: URL
     let gitCommit: String
     let generatedAt: Date
-    let notificationName: String
+    let requestURL: URL
 
     init?(environment: [String: String]) {
         guard let manifest = environment[Self.manifestEnvironmentKey],
@@ -26,15 +26,15 @@ struct StageDAppRouteConfiguration: Equatable, Sendable {
               let commit = environment[Self.commitEnvironmentKey],
               let dateValue = environment[Self.dateEnvironmentKey],
               let date = ISO8601DateFormatter().date(from: dateValue),
-              let notification = environment[Self.notificationEnvironmentKey],
-              !notification.isEmpty
+              let request = environment[Self.requestEnvironmentKey],
+              !request.isEmpty
         else { return nil }
         manifestURL = URL(fileURLWithPath: manifest)
         projectURL = URL(fileURLWithPath: project)
         exportURL = URL(fileURLWithPath: export)
         gitCommit = commit
         generatedAt = date
-        notificationName = notification
+        requestURL = URL(fileURLWithPath: request)
     }
 }
 
@@ -245,7 +245,8 @@ final class StageDAppRouteEvidenceRecorder {
     private var strokeTimestampOrigin: TimeInterval?
     private var previousNormalizedInput: ((StrokeSample) -> Void)?
     #if os(macOS)
-    nonisolated(unsafe) private var observer: NSObjectProtocol?
+    nonisolated(unsafe) private var requestTimer: Timer?
+    private var lastRequestData: Data?
     #endif
 
     init(
@@ -254,23 +255,12 @@ final class StageDAppRouteEvidenceRecorder {
         configuration = StageDAppRouteConfiguration(environment: environment)
         #if os(macOS)
         if let configuration {
-            observer = DistributedNotificationCenter.default().addObserver(
-                forName: Notification.Name(configuration.notificationName),
-                object: nil,
-                queue: .main
-            ) { [weak self] notification in
-                guard let scenarioID = notification.userInfo?[
-                    Self.scenarioUserInfoKey
-                ] as? String,
-                let routeID = notification.userInfo?[
-                    Self.routeUserInfoKey
-                ] as? String
-                else { return }
+            requestTimer = Timer.scheduledTimer(
+                withTimeInterval: 0.05,
+                repeats: true
+            ) { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    try? await self?.record(
-                        scenarioID: scenarioID,
-                        routeID: routeID
-                    )
+                    self?.consumeRouteRequest(at: configuration.requestURL)
                 }
             }
         }
@@ -279,9 +269,7 @@ final class StageDAppRouteEvidenceRecorder {
 
     deinit {
         #if os(macOS)
-        if let observer {
-            DistributedNotificationCenter.default().removeObserver(observer)
-        }
+        requestTimer?.invalidate()
         #endif
     }
 
@@ -317,6 +305,25 @@ final class StageDAppRouteEvidenceRecorder {
         previousNormalizedInput = nil
         self.controller = nil
     }
+
+    #if os(macOS)
+    private func consumeRouteRequest(at url: URL) {
+        guard let data = try? Data(contentsOf: url),
+              data != lastRequestData,
+              let object = try? JSONSerialization.jsonObject(with: data)
+                as? [String: String],
+              let scenarioID = object[Self.scenarioUserInfoKey],
+              let routeID = object[Self.routeUserInfoKey]
+        else { return }
+        lastRequestData = data
+        Task { @MainActor [weak self] in
+            try? await self?.record(
+                scenarioID: scenarioID,
+                routeID: routeID
+            )
+        }
+    }
+    #endif
 
     private func recordNormalizedInput(_ sample: StrokeSample) {
         if sample.phase == .began || strokeTimestampOrigin == nil {
@@ -569,7 +576,7 @@ final class StageDAppRouteEvidenceRecorder {
             return initial.paintedPixelCount == 0
                 && sized.brushDiameter > initial.brushDiameter
                 && brush.selectedBrushID
-                    == "builtin.professional-graphite-pencil"
+                    == "builtin.native-dry-media"
                 && color.inkColorRGBA8Hex == "10738cff"
                 && drawn.paintedPixelCount > 0
                 && drawn.flattenedBGRA8SHA256
