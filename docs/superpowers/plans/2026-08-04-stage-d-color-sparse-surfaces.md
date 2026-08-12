@@ -11,7 +11,9 @@ zero failures, including a wrapper-style `build-for-testing` plus
 completion, imported layer-stack adoption, sandbox artifact paths, keyboard
 focus, evidence routing, capture quiescence, and durable history accounting;
 focused regressions cover the repairs, and the final review reported no
-Critical, Important, or Minor findings. Two fresh clean-commit aggregate runs,
+Critical, Important, or Minor findings. The requested post-commit exact route
+passed `1810dce` in 145.050 seconds without another authorization prompt. Two
+fresh clean-commit aggregate runs,
 the strict native-wall threshold, and physical-device evidence remain pending.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
@@ -1002,14 +1004,15 @@ than being repeated after minor edits.
   input and require every named UI scenario above to pass. Never treat a
   successful app build as UI route evidence. On 2026-08-12 the user approved
   the macOS UI Automation prompt and repeated exact tests executed the complete
-  29-route sequence in 155–199 seconds with one test passed and zero failures;
-  the definitive final-source run passed in 156.435 seconds.
+  29-route sequence in 145–199 seconds with one test passed and zero failures;
+  the definitive pre-commit final-source run passed in 156.435 seconds and the
+  exact pushed implementation commit `1810dce` passed in 145.050 seconds.
   The controls, shortcuts, and persistence rows all passed with zero pending
   ownership; save wrote a nonempty schema-4 project and export wrote a valid
-  PNG. Three post-fix diagnostic manifests have identical projected semantic
+  PNG. Four post-fix manifests have identical projected semantic
   hashes and compared resource metrics despite variable raw macOS gesture
-  sampling. These diagnostic runs are bound to `f5d3748`; the two fresh clean-commit
-  acceptance-script runs remain the final aggregate boundary.
+  sampling. The latest manifest is bound to `1810dce`; the two fresh
+  clean-commit acceptance-script runs remain the final aggregate boundary.
 - [x] Build `PatternSpikeMac` Debug and Release for `platform=macOS`, and build
   `PatternSpikePad` Debug and Release for `generic/platform=iOS Simulator`, all
   with `CODE_SIGNING_ALLOWED=NO`. Launch the macOS harness route and require a
@@ -1032,7 +1035,10 @@ than being repeated after minor edits.
   negative-control proof, broad baseline diff, review disposition, and physical
   iPad/Pencil/Wacom/120 Hz/thermal/memory evidence as pending in the acceptance
   report. The report alone may set Stage D to `accepted` and open Stage E.
-- [ ] Commit Stage D acceptance after the Xcode-hosted app-route gate passes as
+- [x] Commit and push the Stage D capture/XCTest hardening after the
+  Xcode-hosted app-route gate passes (`1810dce`).
+- [ ] Commit final Stage D acceptance only after the two clean aggregate runs
+  and qualifying hardware/profile evidence pass, using
   `test(raster): accept stage D surfaces`.
 
 ## Completion Boundary

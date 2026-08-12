@@ -7,11 +7,10 @@ cutovers. Stage E remains closed.
 
 Stage D base revision: `ca5dff5`
 
-The complete 29-route Xcode UI sequence now executes. The definitive
-final-source diagnostic manifest is bound to `f5d3748` while the final
-synchronization/accounting fix is uncommitted, so it is not reused as
-clean-commit acceptance evidence. No final two-run aggregate acceptance
-manifest has been produced.
+The complete 29-route Xcode UI sequence now executes. A successful manifest is
+bound to the pushed implementation commit `1810dce`; all three rows passed with
+stable semantic hashes and zero pending or ownership-accounting mismatch. No
+final two-run aggregate acceptance manifest has been produced.
 
 Execution date: 2026-08-12 (Asia/Kolkata)
 
@@ -186,7 +185,7 @@ runner launched the production app and executed the exact required method:
 
 ```text
 StageDAppRouteUITests.testProductionControlsShortcutsAndPersistenceWriteEvidence
-1 test passed, 0 failures, 156.435 seconds
+1 test passed, 0 failures, 145.050 seconds
 ```
 
 The timestamped log proves active progress through real clicks, drags, key
@@ -206,7 +205,7 @@ one passed test, and no failures or skips. The wrapper timeout is 300 seconds,
 which leaves bounded headroom over both measured healthy runs while preserving
 fail-closed termination.
 
-Three later successful diagnostic manifests were compared directly. Their raw
+Four later successful manifests were compared directly. Their raw
 macOS gesture streams contained different intermediate sample counts and
 produced different exact raster hashes, as expected for accessibility-driven
 mouse delivery, while each run independently proved exact undo/redo and
@@ -222,14 +221,16 @@ contend with display preparation. The recorder now drives renderer/controller
 quiescence, serializes display preparation around capture/export, returns early
 on a timed-out response, and reports durable resize undo-history snapshot
 ownership separately from pending work. Focused regressions cover both pending
-stroke capture and retained resize history. The definitive final-source run
-passed in 156.435 seconds after all review fixes, including the timed-out task
-retirement quarantine.
+stroke capture and retained resize history. The definitive pre-commit
+final-source run passed in 156.435 seconds after all review fixes, including the
+timed-out task retirement quarantine. The requested post-commit run then passed
+the exact pushed implementation revision `1810dce` in 145.050 seconds without
+another authorization prompt.
 
-This successful run is diagnostic rather than the final acceptance aggregate:
-its manifest identifies `f5d3748` while the synchronization fix was still in
-the working tree. The acceptance script must rerun it against the new clean
-commit in each of its two fresh roots.
+This successful run proves the pushed implementation commit's Xcode route, but
+it is not the final acceptance aggregate. The acceptance script must still run
+twice from clean fresh roots and combine this route with the package, broad,
+runtime, allocation, build, review, and cross-run comparison gates.
 
 ## Environment and physical-evidence boundary
 
@@ -290,24 +291,26 @@ independently passed 49 focused tests. The review gate is complete.
   `.build/brush-corrective-verification/stage-d-final-focused.log`
   (104 tests / 4 suites passed)
 - UI log:
-  `.build/brush-corrective-verification/stage-d-definitive-ui-test.log`
-  (`c998d124b21192a502ae6c5e8f6bafc4a0b88fa970d5fafbc90387d481f3bd0a`)
-- UI result: `.build/StageDAppRoutes-definitive.xcresult`
-  (1 passed test / 0 failures / 156.435 seconds)
+  `.build/brush-corrective-verification/stage-d-ui-1810dce.log`
+  (`87a73a87135e7af90e164ffd6a33c39a8c6ccb9e69098b6d4a4fe8ca3daaf065`)
+- UI result: `.build/StageDAppRoutes-1810dce.xcresult`
+  (1 passed test / 0 failures / 145.050 seconds)
 - App-route manifest SHA-256:
-  `0e24b9e99019a96cfdb9744d80e1dcf0a2a5238374d4b69a0d28056667ac4e42`
+  `daaf11076aa6e8c343c6c4791cd715b96456cbdf88a1155842267168b736b22c`
 - Saved project SHA-256:
-  `1e26e764e9d5cc490c4e7f5ae742022072ece1f505bf34e0bddc75c5287a6703`
+  `17162304f164bbf47c818bb48ed751c5b4ab6f52de685889dec0cb917a731dc9`
 - Exported PNG SHA-256:
-  `84f6461ff52d9f2cd6f0a1fc6c0cb90a2dad448adedc17f5fb1edb3a634a816c`
+  `d42f50762ac7700f80adfd8b48a0ab14324a44c3f6551adbbf431a44a5dd5ac2`
+- Independent review disposition SHA-256:
+  `e90d443dde3cb86f8a950623a1b7e636eac47fa6b8930548acae178c0144ad62`
 
 These execution artifacts are local and intentionally uncommitted.
 
 ## Exit boundary
 
-Stage D remains open. To change this report to `accepted`, commit the current
-fix, run the fail-closed acceptance script twice from clean fresh roots on a
-qualifying native GPU host, obtain identical semantic hashes and wall miss
+Stage D remains open. To change this report to `accepted`, run the fail-closed
+acceptance script twice from clean fresh roots on a qualifying native GPU host,
+obtain identical semantic hashes and wall miss
 fraction `<=1%`, and attach the required physical-device evidence. Xcode UI
 Automation and every other locally executable software gate are now working;
 the current-diff independent review is complete.

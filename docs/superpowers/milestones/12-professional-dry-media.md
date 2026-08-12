@@ -252,8 +252,9 @@ input, equal early/late projected work, and the one-percent event-to-submit
 miss ceiling. Four paired negative controls fail closed. The production UI
 route was also exercised directly. After explicit macOS UI Automation
 approval, repeated exact XCTest gates completed all 29 Stage D routes in
-155–199 seconds with one test passed and zero failures; the definitive
-final-source run took 156.435 seconds.
+145–199 seconds with one test passed and zero failures; the definitive
+pre-commit final-source run took 156.435 seconds and the exact pushed
+implementation commit `1810dce` took 145.050 seconds.
 
 ## Historical Checklist And Current Corrective Boundary
 

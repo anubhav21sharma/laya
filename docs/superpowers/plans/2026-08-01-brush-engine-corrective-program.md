@@ -50,7 +50,9 @@ routes repeatedly with one test passed, zero failures, three passing scenario
 rows, real schema-4 save/open replacement, and a valid PNG export. The
 acceptance wrapper's separate locally signed `build-for-testing` and
 `test-without-building` roots passed in 198.722 seconds; the definitive
-final-source run passed in 156.435 seconds.
+pre-commit final-source run passed in 156.435 seconds, and the exact pushed
+implementation commit `1810dce` passed in 145.050 seconds without another
+authorization prompt.
 Fresh clean-commit aggregate runs remain pending; direct signed production-UI
 replay and the hosted non-XCTest regression are also green.
 
