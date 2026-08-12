@@ -178,8 +178,6 @@ require_tool swift
 require_tool xcodebuild
 require_tool xcodegen
 require_tool xcrun
-require_tool system_profiler
-require_tool awk
 
 require_clean_worktree
 [[ -n "$review_evidence" && -f "$review_evidence" ]] \
@@ -189,12 +187,13 @@ if [[ -n "$reference_manifest" ]]; then
     || fail "reference run manifest is unavailable: $reference_manifest"
 fi
 host_gpu="$(
-  system_profiler SPDisplaysDataType \
-    | awk -F': ' '/Chipset Model:/{print $2; exit}'
+  xcrun swift -e \
+    'import Metal; if let device = MTLCreateSystemDefaultDevice() { print(device.name) }'
 )"
 [[ -n "$host_gpu" ]] || fail "host GPU identity is unavailable"
 case "$host_gpu" in
-  *[Pp]aravirtual*)
+  *[Vv][Ii][Rr][Tt][Uu][Aa][Ll]*|\
+  *[Ss][Ii][Mm][Uu][Ll][Aa][Tt][Oo][Rr]*)
     fail "host GPU is not Stage D performance-qualified: $host_gpu"
     ;;
 esac

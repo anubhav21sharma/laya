@@ -9,10 +9,10 @@ cutovers. Stage E remains closed.
 Stage D base revision: `ca5dff5`
 
 The complete 29-route Xcode UI sequence now executes. Successful manifests are
-bound to pushed implementation commits through `e8756ee`; the latest repaired
-runner-owned-path candidate also passed all three rows with independently
-decoded export pixels and bounded snapshot ownership. No final two-run
-aggregate acceptance manifest has been produced.
+bound to pushed implementation commits through `7403862`; the final repaired
+runner-owned-path replay passed all three rows with independently decoded
+export pixels and bounded snapshot ownership. No final two-run aggregate
+acceptance manifest has been produced.
 
 Execution date: 2026-08-13 (Asia/Kolkata)
 
@@ -46,7 +46,8 @@ producer identity, production backend identity, and typed status. Validation
 rejects missing, duplicate, skipped, unknown, zero-test, nonproduction,
 nonfinite, or failed evidence.
 
-The final runner requires a clean Git worktree, removes any prior app-route
+The final runner requires a clean Git worktree, queries Metal's default device
+directly for the performance-hardware identity, removes any prior app-route
 manifest before launching XCTest, passes runner-owned absolute manifest,
 project, and PNG paths through the Xcode scheme into the test process, binds
 every manifest to the exact commit, and requires exactly one positive Swift
@@ -207,9 +208,12 @@ save pre-delete. All six are repaired. Lifecycle allocation now records
 `max(last - first, 0)` with `last <= first + 8`; app ownership is bounded on
 every route and compared across runs; project save retains `SafeArchiveIO`'s
 atomic replacement; and exported PNG dimensions and decoded BGRA8 bytes must
-exactly match the flattened renderer readback. Empty or paravirtual GPU names
-are nonqualifying. Replaying the captured `Apple Paravirtual device` package
-now terminates nonzero with `runtime hardware is not Stage D
+exactly match the flattened renderer readback. Empty, virtual, or simulator GPU
+names are nonqualifying. The wrapper queries Metal directly because
+`system_profiler SPDisplaysDataType` is empty on the current Apple VM even
+though Metal reports `Apple Paravirtual device`. A clean-clone preflight now
+rejects that device explicitly before creating a run directory. Replaying the
+captured package also terminates nonzero with `runtime hardware is not Stage D
 performance-qualified` and writes no manifest.
 
 ## Builds
@@ -314,6 +318,11 @@ monotonic five-second async deadline, drains completed renderer events, and
 waits for the controller's actual `.collecting` state. The repaired test passed
 26 consecutive runs; production renderer behavior was unchanged.
 
+The final exact pushed `7403862` replay then passed one test with zero failures
+or skips in **146.784 seconds**. Its three-row manifest is bound to the full
+pushed commit and preserves the same independently decoded export and bounded
+ownership authorities.
+
 This successful run proves the pushed implementation commit's Xcode route, but
 it is not the final acceptance aggregate. The acceptance script must still run
 twice from clean fresh roots and combine this route with the package, broad,
@@ -407,6 +416,12 @@ and 13-test selections, shell parse, and diff check all passed.
 - Exact pushed `99924f8` UI result:
   `.build/stage-d-ui-handoff-fix/StageDAppRoutes-99924f8fcea8f482c4d9520d2821a297f39e65c5.xcresult`
   (1 passed test / 0 failures / 153.393 seconds)
+- Final exact pushed `7403862` UI result:
+  `.build/stage-d-ui-handoff-fix/StageDAppRoutes-7403862ba8956a0242a4eb26d11c3d18eb0a04e2.xcresult`
+  (1 passed test / 0 failures / 146.784 seconds)
+- Final exact pushed `7403862` app manifest:
+  `.build/stage-d-ui-handoff-fix/AppRouteArtifacts-7403862ba8956a0242a4eb26d11c3d18eb0a04e2/app-route-manifest.json`
+  (`6afa7faa00f027494d642ca0501d7907b174021373cc92383e989141093948fa`)
 - Final post-review broad log:
   `.build/brush-corrective-verification/stage-d-final-post-review-broad-green.log`
   (`7f5780f871ec6f112fc14e492d1a07929d188fe04967487297b849c4d65ed303`;

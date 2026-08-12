@@ -13,8 +13,9 @@ completion, imported layer-stack adoption, sandbox artifact paths, keyboard
 focus, evidence routing, capture quiescence, and durable history accounting;
 focused regressions cover the repairs, and the final review reported no
 Critical, Important, or Minor findings. Exact pushed routes passed `1810dce` in
-145.050 seconds and `e8756ee` in 158.444 seconds without another authorization
-prompt. Two fresh clean-commit aggregate runs,
+145.050 seconds, `e8756ee` in 158.444 seconds, and the final callback-wait
+revision `7403862` in 146.784 seconds without another authorization prompt.
+Two fresh clean-commit aggregate runs,
 the strict native-wall threshold, and physical-device evidence remain pending.
 An earlier clean-root aggregate attempt exposed and corrected a hardcoded
 default SwiftPM build path in the CLI subprocess tests; isolated-scratch
@@ -1076,7 +1077,11 @@ than being repeated after minor edits.
   stress then exposed queued idle-callback delivery after retirement; the test
   now uses a monotonic five-second async wait for `.collecting` and passes 26
   consecutive runs. The pushed `99924f8` UI route independently passed in
-  153.393 seconds with zero failures.
+  153.393 seconds, and the exact final `7403862` replay passed in 146.784
+  seconds, both with zero failures. The wrapper now obtains its GPU identity
+  from `MTLCreateSystemDefaultDevice()` because the Apple VM's display profile
+  is empty; a clean-clone preflight rejects virtual and simulator devices before
+  creating an acceptance run directory.
 - [ ] Run the corrected aggregate twice from independent fresh roots on the
   same pushed commit and compare the resulting manifests.
 - [ ] Commit final Stage D acceptance only after the two clean aggregate runs
