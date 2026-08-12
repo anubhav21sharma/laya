@@ -176,6 +176,10 @@ final class InteractiveMetalView: MTKView {
         self.requestEditorFocus = requestEditorFocus
         lastPointerCancellationGeneration = pointerCancellationGeneration
         super.init(frame: frame, device: renderer.device)
+        setAccessibilityElement(true)
+        setAccessibilityIdentifier("Pattern Canvas")
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("Pattern Canvas")
         brushCursorView.isHidden = true
         brushCursorView.setAccessibilityElement(true)
         brushCursorView.setAccessibilityIdentifier("Brush Cursor")

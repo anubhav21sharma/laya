@@ -3325,6 +3325,24 @@ func focusLossPairsSpaceReleaseAndCancelsTheActivePointer() throws {
 #if os(macOS)
 @Test
 @MainActor
+func nativeCanvasExposesStableAccessibilityTarget() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    let view = InteractiveMetalView(
+        frame: CGRect(x: 0, y: 0, width: 64, height: 64),
+        controller: controller,
+        renderer: renderer,
+        requestEditorFocus: {},
+        pointerCancellationGeneration: 0
+    )
+
+    #expect(view.isAccessibilityElement())
+    #expect(view.accessibilityIdentifier() == "Pattern Canvas")
+    #expect(view.accessibilityRole() == .group)
+}
+
+@Test
+@MainActor
 func escapeDuringActivePanCancelsNativeAndReducerState() throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
