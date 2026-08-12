@@ -853,6 +853,15 @@ public struct StageDAcceptanceRendererEvidence:
             + pendingPlanCompletionCount
             + pendingConsumerCompletionCount
     }
+
+    /// A mutating production stroke legitimately misses on every layer-
+    /// composite plan because each exact sparse snapshot changes revision and
+    /// its one-shot ownership is retired after submission. Positive misses
+    /// prove the production plan path ran; cache-hit behavior is covered by
+    /// dedicated stable-key cache tests and is not required of this trace.
+    public var hasStageDProductionPlanCacheEvidence: Bool {
+        cpuPlanCacheMissCount > 0 || gpuPlanCacheMissCount > 0
+    }
 }
 
 extension StageDAcceptanceRendererEvidence {

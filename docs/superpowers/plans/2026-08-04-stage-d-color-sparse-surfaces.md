@@ -1,24 +1,34 @@
 # Stage D Color And Sparse Paint Surfaces Implementation Plan
 
-**Execution status (2026-08-12):** Tasks 0 through 7 and the locally executable
+**Execution status (2026-08-13):** Tasks 0 through 7 and the locally executable
 portions of Task 8 are complete. Debug/Release/simulator builds, sustained
 probes, direct production-app evidence, the hosted non-XCTest route, focused
 regressions, and the exact `XCUIApplication` route gate are green. The user
-approved macOS UI Automation; no sudo was needed. Signed diagnostic runs now
+approved macOS UI Automation; authorization persists and no sudo is needed.
+Signed diagnostic runs now
 exercise all 29 controls/shortcuts/persistence routes with one test passed and
 zero failures, including a wrapper-style `build-for-testing` plus
 `test-without-building` run. The gate exposed defects in transient-display
 completion, imported layer-stack adoption, sandbox artifact paths, keyboard
 focus, evidence routing, capture quiescence, and durable history accounting;
 focused regressions cover the repairs, and the final review reported no
-Critical, Important, or Minor findings. The requested post-commit exact route
-passed `1810dce` in 145.050 seconds without another authorization prompt. Two
-fresh clean-commit aggregate runs,
+Critical, Important, or Minor findings. Exact pushed routes passed `1810dce` in
+145.050 seconds and `e8756ee` in 158.444 seconds without another authorization
+prompt. Two fresh clean-commit aggregate runs,
 the strict native-wall threshold, and physical-device evidence remain pending.
-The first clean-root aggregate attempt also exposed and corrected a hardcoded
+An earlier clean-root aggregate attempt exposed and corrected a hardcoded
 default SwiftPM build path in the CLI subprocess tests; isolated-scratch
-subprocess verification is green, but the clean aggregate count remains zero
-until the full runner completes.
+subprocess verification is green. The next exact-commit attempt passed 656
+focused tests, the complete 2,206-test/120-suite broad boundary, every product
+build, both runtime probes, and both allocation probes. It stopped at final
+package emission because the consumer required cache hits where the mutating
+production compositor deliberately records one-shot misses, required exact
+zero-work allocation equality where the producer allows a maximum, required
+zero sampling totals where the producer enforces per-event caps, and split
+spaced metric arrays incorrectly. Those contracts and their regression tests
+are corrected, and the same full evidence now validates all 12 package rows.
+The clean aggregate count remains zero until two complete runs of the resulting
+pushed commit finish.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development (recommended) or
@@ -1010,12 +1020,13 @@ than being repeated after minor edits.
   the macOS UI Automation prompt and repeated exact tests executed the complete
   29-route sequence in 145–199 seconds with one test passed and zero failures;
   the definitive pre-commit final-source run passed in 156.435 seconds and the
-  exact pushed implementation commit `1810dce` passed in 145.050 seconds.
+  exact pushed implementation commits `1810dce` and `e8756ee` passed in
+  145.050 and 158.444 seconds respectively.
   The controls, shortcuts, and persistence rows all passed with zero pending
   ownership; save wrote a nonempty schema-4 project and export wrote a valid
   PNG. Four post-fix manifests have identical projected semantic
   hashes and compared resource metrics despite variable raw macOS gesture
-  sampling. The latest manifest is bound to `1810dce`; the two fresh
+  sampling. The latest standalone result is bound to `e8756ee`; the two fresh
   clean-commit acceptance-script runs remain the final aggregate boundary.
 - [x] Build `PatternSpikeMac` Debug and Release for `platform=macOS`, and build
   `PatternSpikePad` Debug and Release for `generic/platform=iOS Simulator`, all
@@ -1040,6 +1051,14 @@ than being repeated after minor edits.
   report. The report alone may set Stage D to `accepted` and open Stage E.
 - [x] Commit and push the Stage D capture/XCTest hardening after the
   Xcode-hosted app-route gate passes (`1810dce`).
+- [x] Align final package validation with the runtime/allocation producers:
+  accept deliberate one-shot cache misses as production activity, enforce the
+  shared sampling per-event caps with overflow-safe total bounds, accept
+  zero-work allocation below its declared maximum, and parse bracketed metric
+  arrays fail-closed. The affected 81-test matrix and 12-row package emission
+  pass on the captured exact-commit evidence.
+- [ ] Run the corrected aggregate twice from independent fresh roots on the
+  same pushed commit and compare the resulting manifests.
 - [ ] Commit final Stage D acceptance only after the two clean aggregate runs
   and qualifying hardware/profile evidence pass, using
   `test(raster): accept stage D surfaces`.

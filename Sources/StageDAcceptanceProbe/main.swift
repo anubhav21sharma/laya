@@ -514,10 +514,7 @@ private enum PackageEvidence {
               renderer.residentTileHighWaterBytes <= renderer.tileByteBudget,
               renderer.residentResourceHighWaterBytes
                 >= renderer.residentResourceBytes,
-              renderer.cpuPlanCacheHitCount
-                + renderer.gpuPlanCacheHitCount > 0,
-              renderer.cpuPlanCacheMissCount
-                + renderer.gpuPlanCacheMissCount > 0,
+              renderer.hasStageDProductionPlanCacheEvidence,
               renderer.activeSnapshotTokenCount == 0,
               renderer.aggregateSnapshotReferenceCount == 0,
               renderer.activeTileLeaseCount == 0,

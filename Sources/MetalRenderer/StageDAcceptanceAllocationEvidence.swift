@@ -95,25 +95,62 @@ public enum StageDAllocationEvidenceValidator {
             )
         }
 
-        for field in [
-            "app_acquire", "app_preflight", "app_completion", "app_wait",
-        ] {
-            let value = try slashLeadingInteger(
+        let samplingEventCount = try integer(
+            samplingFields,
+            field: "events",
+            scope: "sampling"
+        )
+        guard samplingEventCount > 0,
+              let samplingEvents = UInt64(exactly: samplingEventCount)
+        else {
+            throw StageDAllocationEvidenceValidationError.invalidField(
+                "sampling.events"
+            )
+        }
+        let samplingCaps: [(String, UInt64)] = [
+            (
+                "app_acquire",
+                SparseTileSamplingAllocationCap.acquire
+                    .maximumSingleEventCount
+            ),
+            (
+                "app_preflight",
+                SparseTileSamplingAllocationCap.preflight
+                    .maximumSingleEventCount
+            ),
+            (
+                "app_completion",
+                SparseTileSamplingAllocationCap.completion
+                    .maximumSingleEventCount
+            ),
+            (
+                "app_wait",
+                SparseTileSamplingAllocationCap.completionWait
+                    .maximumSingleEventCount
+            ),
+            (
+                "metal_submission",
+                SparseTileSamplingAllocationCap.submission
+                    .maximumSingleEventCount
+            ),
+        ]
+        for (field, maximumPerEvent) in samplingCaps {
+            let observed = try allocationSummary(
                 samplingFields,
                 field: field,
                 scope: "sampling"
             )
-            guard value == 0 else {
+            let maximumTotal = samplingEvents
+                .multipliedReportingOverflow(by: observed.maximum)
+            guard observed.maximum <= observed.total,
+                  observed.maximum <= maximumPerEvent,
+                  !maximumTotal.overflow,
+                  observed.total <= maximumTotal.partialValue
+            else {
                 throw StageDAllocationEvidenceValidationError.invalidField(
                     "sampling.\(field)"
                 )
             }
-        }
-        guard try integer(samplingFields, field: "events", scope: "sampling")
-            > 0 else {
-            throw StageDAllocationEvidenceValidationError.invalidField(
-                "sampling.events"
-            )
         }
 
         for field in [
@@ -199,7 +236,7 @@ public enum StageDAllocationEvidenceValidator {
             field: "zero_work",
             scope: "trace"
         )
-        guard zeroWork.0 == zeroWork.1 else {
+        guard zeroWork.0 <= zeroWork.1 else {
             throw StageDAllocationEvidenceValidationError.invalidField(
                 "trace.zero_work"
             )
@@ -252,7 +289,7 @@ public enum StageDAllocationEvidenceValidator {
         }
         let suffix = line.dropFirst(prefix.count)
         var result: [String: String] = [:]
-        for token in suffix.split(separator: " ") {
+        for token in try fieldTokens(suffix, name: name) {
             let pair = token.split(separator: "=", maxSplits: 1)
             guard pair.count == 2, !pair[0].isEmpty, !pair[1].isEmpty else {
                 throw StageDAllocationEvidenceValidationError
@@ -266,6 +303,43 @@ public enum StageDAllocationEvidenceValidator {
             result[key] = String(pair[1])
         }
         return result
+    }
+
+    private static func fieldTokens(
+        _ suffix: Substring,
+        name: String
+    ) throws -> [String] {
+        var tokens: [String] = []
+        var current = ""
+        var bracketDepth = 0
+        for character in suffix {
+            switch character {
+            case "[":
+                bracketDepth += 1
+                current.append(character)
+            case "]":
+                guard bracketDepth > 0 else {
+                    throw StageDAllocationEvidenceValidationError
+                        .malformedLine(name)
+                }
+                bracketDepth -= 1
+                current.append(character)
+            default:
+                if character.isWhitespace, bracketDepth == 0 {
+                    if !current.isEmpty {
+                        tokens.append(current)
+                        current = ""
+                    }
+                } else {
+                    current.append(character)
+                }
+            }
+        }
+        guard bracketDepth == 0 else {
+            throw StageDAllocationEvidenceValidationError.malformedLine(name)
+        }
+        if !current.isEmpty { tokens.append(current) }
+        return tokens
     }
 
     private static func integer(
@@ -330,23 +404,26 @@ public enum StageDAllocationEvidenceValidator {
         return (first, second)
     }
 
-    private static func slashLeadingInteger(
+    private static func allocationSummary(
         _ fields: [String: String],
         field: String,
         scope: String
-    ) throws -> Int {
+    ) throws -> (total: UInt64, maximum: UInt64) {
         guard let raw = fields[field] else {
             throw StageDAllocationEvidenceValidationError.missingField(
                 "\(scope).\(field)"
             )
         }
-        guard let leading = raw.split(separator: "/").first,
-              let value = Int(leading), value >= 0
+        let pair = raw.split(separator: "/", omittingEmptySubsequences: false)
+        guard pair.count == 2,
+              pair[1].hasPrefix("max"),
+              let total = UInt64(pair[0]),
+              let maximum = UInt64(pair[1].dropFirst(3))
         else {
             throw StageDAllocationEvidenceValidationError.invalidField(
                 "\(scope).\(field)"
             )
         }
-        return value
+        return (total, maximum)
     }
 }

@@ -1,18 +1,19 @@
 # Stage D Color And Sparse Surface Acceptance Checkpoint
 
-Status: **not accepted — Xcode UI gate passed; timing/profile evidence pending**
+Status: **not accepted — Xcode UI gate passed; two clean aggregate runs and
+qualifying profile/physical evidence pending**
 
 Scope: Stage D Tasks 0 through 8 on the current-only native project and brush
 cutovers. Stage E remains closed.
 
 Stage D base revision: `ca5dff5`
 
-The complete 29-route Xcode UI sequence now executes. A successful manifest is
-bound to the pushed implementation commit `1810dce`; all three rows passed with
-stable semantic hashes and zero pending or ownership-accounting mismatch. No
-final two-run aggregate acceptance manifest has been produced.
+The complete 29-route Xcode UI sequence now executes. Successful manifests are
+bound to pushed implementation commits through `e8756ee`; all three rows pass
+with stable semantic hashes and zero pending or ownership-accounting mismatch.
+No final two-run aggregate acceptance manifest has been produced.
 
-Execution date: 2026-08-12 (Asia/Kolkata)
+Execution date: 2026-08-13 (Asia/Kolkata)
 
 ## Decision
 
@@ -22,9 +23,8 @@ boundary, exact Xcode-hosted UI route, and independent review are complete.
 Stage D is nevertheless **not accepted** because these mandatory boundaries
 remain:
 
-1. the native-wall event-to-submit gate cannot be satisfied on the Apple
-   Paravirtual GPU host; the unchanged requirement is `<=1%` on qualifying
-   native hardware;
+1. final-source native-wall evidence must still be captured on a qualifying
+   native GPU host; the unchanged miss-fraction requirement is `<=1%`;
 2. the final acceptance script still requires two clean-commit runs from fresh
    roots with stable semantics and no resource growth; and
 3. physical iPad/Pencil/Wacom/ProMotion/thermal/memory-pressure evidence is not
@@ -147,13 +147,38 @@ the intentionally empty Stage D baseline SHA-256 is
 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
 The transient observation was not added to the baseline.
 
-The first clean-root aggregate attempt then exposed a separate reproducibility
+An earlier clean-root aggregate attempt exposed a separate reproducibility
 defect before acceptance: nine CLI subprocess cases looked only in the
 repository's default `.build/debug` directory and could not find the executable
 in the acceptance runner's isolated SwiftPM scratch path. The tests now resolve
 `layabrush-convert` beside their SwiftPM resource bundle. A nondefault fresh
-scratch run passed all 8 tests (10 parameterized cases); a new clean-root
-aggregate run remains required.
+scratch run passed all 8 tests (10 parameterized cases).
+
+The next fresh-root aggregate attempt at exact pushed commit `e8756ee` reached
+every pre-package gate. Its focused groups passed **656 tests**, its complete
+broad rerun passed **2,206 tests in 120 suites** in **1,903.055 seconds** with
+zero issues, all macOS and iOS Simulator Debug/Release builds passed, and its
+wall-clock runtime, accelerated runtime, and allocation probes passed. The
+production wall record reported event-to-submit p95 **7,472,792 ns**, p99
+**7,931,083 ns**, and **1 miss in 602 attributed frames** on the Apple
+Paravirtual device. The run did not count as a clean aggregate because the
+final package validator rejected valid producer evidence before reaching
+XCTest.
+
+That rejection exposed three producer/consumer contract mismatches. Mutating
+sparse compositor plans are deliberately one-shot, so their production trace
+correctly reports positive plan-cache misses with zero hits; the validator had
+required a hit. The allocation probe accepts zero-work actual allocations at
+or below its maximum, while the validator had required equality. The sampling
+probe enforces bounded per-event acquire, preflight, completion, wait, and
+Metal-submission allocations, while the validator had incorrectly required all
+totals to be zero and could not tokenize the spaced metric arrays it produced.
+The validator now shares the producer caps, checks totals with overflow-safe
+event bounds, accepts positive cache activity through misses, and parses
+bracketed fields fail-closed. The full clean-run evidence now emits a verified
+12-scenario package manifest under the corrected validator, and the affected
+acceptance/sparse matrix passes **81 tests in 2 suites**. Two complete fresh-root
+runs of the resulting pushed commit are still required.
 
 ## Builds
 
@@ -233,7 +258,10 @@ stroke capture and retained resize history. The definitive pre-commit
 final-source run passed in 156.435 seconds after all review fixes, including the
 timed-out task retirement quarantine. The requested post-commit run then passed
 the exact pushed implementation revision `1810dce` in 145.050 seconds without
-another authorization prompt.
+another authorization prompt. A later exact pushed `e8756ee` manual-approval
+request also reused the persistent authorization and passed one test with zero
+failures or skips in 158.444 seconds; its result bundle records the macOS device,
+test timestamps, and final passed status.
 
 This successful run proves the pushed implementation commit's Xcode route, but
 it is not the final acceptance aggregate. The acceptance script must still run
@@ -322,4 +350,5 @@ acceptance script twice from clean fresh roots on a qualifying native GPU host,
 obtain identical semantic hashes and wall miss
 fraction `<=1%`, and attach the required physical-device evidence. Xcode UI
 Automation and every other locally executable software gate are now working;
-the current-diff independent review is complete.
+the corrected package validator still requires two complete aggregate runs on
+the exact pushed source revision.

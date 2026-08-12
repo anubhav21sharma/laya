@@ -109,20 +109,86 @@ struct StageDAcceptanceTests {
     @Test
     func allocationEvidenceParsesExactAnchoredProductionMetrics() throws {
         let log = """
-        ALLOCATOR PROBE STAGE D TILES PASS partition=20/0 lease=13/0 metal_driver=10/159
-        ALLOCATOR PROBE STAGE D SAMPLING PASS backends=direct,tier2 events=8 app_acquire=0/max0 app_preflight=0/max0 app_completion=0/max0 app_wait=0/max0 metal_submission=12/max4 plan_bytes=[1024] upload_bytes=[512] draws=[8]
-        ALLOCATOR PROBE OFF-MAIN PASS application=0 workspace=0 main=0 authoritative=0 estimated=0 prediction=0 packaging=0 surface_metal_mallocs=159 tile_partition=0 tile_lease=0
+        ALLOCATOR PROBE STAGE D TILES PASS partition=20/0 lease=13/0 metal_driver=10/233
+        ALLOCATOR PROBE STAGE D SAMPLING PASS backends=directFallback,tier2ArgumentBuffer events=510 app_acquire=3060/max6 app_preflight=2040/max4 app_completion=0/max0 app_wait=0/max0 metal_submission=13771/max28 plan_bytes=[712, 4672] upload_bytes=[1536, 1536] draws=[2, 1]
+        ALLOCATOR PROBE OFF-MAIN PASS application=0 workspace=0 main=0 authoritative=0 estimated=0 prediction=0 packaging=0 surface_metal_mallocs=5948 tile_partition=0 tile_lease=0
         ALLOCATOR PROBE PRODUCTION PASS allocations=0
-        ALLOCATOR PROBE TEN-MINUTE TRACE PASS samples=36000 hot_allocations=0/0 lifecycle=24/24 cpu_ns=1000/1200 missed=0 zero_work=601/601 deferred=0
+        ALLOCATOR PROBE TEN-MINUTE TRACE PASS samples=36000 hot_allocations=0/0 lifecycle=41/0 cpu_ns=37956/34924 missed=0 zero_work=606/2649 deferred=605
         """
         let evidence = try StageDAllocationEvidenceValidator.validate(log)
         #expect(evidence.inputSampleCount == 36_000)
         #expect(evidence.partitionEventCount == 20)
         #expect(evidence.leaseEventCount == 13)
-        #expect(evidence.metalDriverAllocationCount == 159)
-        #expect(evidence.offMainSurfaceMetalAllocationCount == 159)
-        #expect(evidence.firstDecileNanosecondsPerEvent == 1_000)
-        #expect(evidence.lastDecileNanosecondsPerEvent == 1_200)
+        #expect(evidence.metalDriverAllocationCount == 233)
+        #expect(evidence.offMainSurfaceMetalAllocationCount == 5_948)
+        #expect(evidence.firstDecileNanosecondsPerEvent == 37_956)
+        #expect(evidence.lastDecileNanosecondsPerEvent == 34_924)
+        #expect(evidence.zeroWorkLeaseCount == 606)
+        #expect(evidence.maximumZeroWorkLeaseCount == 2_649)
+
+        #expect(throws: StageDAllocationEvidenceValidationError
+            .invalidField("sampling.app_acquire")) {
+            _ = try StageDAllocationEvidenceValidator.validate(
+                log.replacingOccurrences(
+                    of: "app_acquire=3060/max6",
+                    with: "app_acquire=3061/max6"
+                )
+            )
+        }
+        #expect(throws: StageDAllocationEvidenceValidationError
+            .invalidField("sampling.app_acquire")) {
+            _ = try StageDAllocationEvidenceValidator.validate(
+                log.replacingOccurrences(
+                    of: "app_acquire=3060/max6",
+                    with: "app_acquire=0/max6"
+                )
+            )
+        }
+        #expect(throws: StageDAllocationEvidenceValidationError
+            .invalidField("sampling.app_acquire")) {
+            _ = try StageDAllocationEvidenceValidator.validate(
+                log.replacingOccurrences(
+                    of: "app_acquire=3060/max6",
+                    with: "app_acquire=3060/max1"
+                )
+            )
+        }
+        #expect(throws: StageDAllocationEvidenceValidationError
+            .invalidField("sampling.metal_submission")) {
+            _ = try StageDAllocationEvidenceValidator.validate(
+                log.replacingOccurrences(
+                    of: "metal_submission=13771/max28",
+                    with: "metal_submission=1/max28"
+                )
+            )
+        }
+        #expect(throws: StageDAllocationEvidenceValidationError
+            .invalidField("sampling.metal_submission")) {
+            _ = try StageDAllocationEvidenceValidator.validate(
+                log.replacingOccurrences(
+                    of: "metal_submission=13771/max28",
+                    with: "metal_submission=13771/max1"
+                )
+            )
+        }
+        #expect(throws: StageDAllocationEvidenceValidationError
+            .invalidField("sampling.app_preflight")) {
+            _ = try StageDAllocationEvidenceValidator.validate(
+                log.replacingOccurrences(
+                    of: "app_preflight=2040/max4",
+                    with: "app_preflight=2040/max5"
+                )
+            )
+        }
+        #expect(throws: StageDAllocationEvidenceValidationError
+            .invalidField("sampling.app_completion")) {
+            _ = try StageDAllocationEvidenceValidator.validate(
+                log.replacingOccurrences(
+                    of: "app_completion=0/max0",
+                    with: "app_completion=1/max0"
+                )
+            )
+        }
 
         #expect(throws: StageDAllocationEvidenceValidationError
             .invalidField("production.allocations")) {
@@ -145,6 +211,15 @@ struct StageDAcceptanceTests {
                 log.replacingOccurrences(
                     of: "samples=36000",
                     with: "samples=35999"
+                )
+            )
+        }
+        #expect(throws: StageDAllocationEvidenceValidationError
+            .invalidField("trace.zero_work")) {
+            _ = try StageDAllocationEvidenceValidator.validate(
+                log.replacingOccurrences(
+                    of: "zero_work=606/2649",
+                    with: "zero_work=2650/2649"
                 )
             )
         }
@@ -491,6 +566,29 @@ struct StageDAcceptanceTests {
             BenchmarkRecord.encode(benchmark)
         )
         #expect(decoded.stageDAcceptanceRendererEvidence == evidence)
+        #expect(!evidence.hasStageDProductionPlanCacheEvidence)
+
+        var liveTraceRoot = try #require(
+            JSONSerialization.jsonObject(
+                with: BenchmarkRecord.encode(benchmark)
+            ) as? [String: Any]
+        )
+        var liveTraceEvidence = try #require(
+            liveTraceRoot["stageDAcceptanceRendererEvidence"]
+                as? [String: Any]
+        )
+        liveTraceEvidence["cpuPlanCacheMissCount"] = 1_205
+        liveTraceEvidence["gpuPlanCacheMissCount"] = 1_205
+        liveTraceRoot["stageDAcceptanceRendererEvidence"] = liveTraceEvidence
+        let liveTrace = try BenchmarkRecord.decode(
+            JSONSerialization.data(withJSONObject: liveTraceRoot)
+        )
+        let liveTraceDecoded = try #require(
+            liveTrace.stageDAcceptanceRendererEvidence
+        )
+        #expect(liveTraceDecoded.cpuPlanCacheHitCount == 0)
+        #expect(liveTraceDecoded.gpuPlanCacheHitCount == 0)
+        #expect(liveTraceDecoded.hasStageDProductionPlanCacheEvidence)
 
         var legacyRoot = try #require(
             JSONSerialization.jsonObject(

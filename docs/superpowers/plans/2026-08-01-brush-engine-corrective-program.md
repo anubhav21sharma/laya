@@ -28,7 +28,7 @@ macOS 14+, and iPadOS 18+.
 
 ## Authority And Status
 
-**Execution status (2026-08-12):** Stages A through G and the automated
+**Execution status (2026-08-13):** Stages A through G and the automated
 performance/repair portion of Task 28 are complete. The persisted three-pass,
 24-trace matrix sets `engineIntegrated=true` and
 `softwarePerformancePassed=true`. That matrix predates the final compositor
@@ -50,11 +50,16 @@ routes repeatedly with one test passed, zero failures, three passing scenario
 rows, real schema-4 save/open replacement, and a valid PNG export. The
 acceptance wrapper's separate locally signed `build-for-testing` and
 `test-without-building` roots passed in 198.722 seconds; the definitive
-pre-commit final-source run passed in 156.435 seconds, and the exact pushed
-implementation commit `1810dce` passed in 145.050 seconds without another
-authorization prompt.
-Fresh clean-commit aggregate runs remain pending; direct signed production-UI
-replay and the hosted non-XCTest regression are also green.
+pre-commit final-source run passed in 156.435 seconds, and exact pushed
+implementation commits `1810dce` and `e8756ee` passed in 145.050 and 158.444
+seconds without another authorization prompt. A fresh `e8756ee` aggregate
+passed 656 focused tests, all 2,206 broad tests in 120 suites, all product
+builds, and its runtime/allocation probes before final packaging exposed three
+producer/consumer validation mismatches. The corrected validator now accepts
+the captured 12-row package with bounded allocation and positive one-shot cache
+miss evidence; its affected 81-test matrix passes. That interrupted attempt
+does not count, so two fresh clean-commit aggregate runs remain pending; direct
+signed production-UI replay and the hosted non-XCTest regression are green.
 
 The original task-level commit checkpoints are represented by existing
 mainline history plus the authorized consolidated corrective-program closeout
