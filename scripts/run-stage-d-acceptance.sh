@@ -20,7 +20,10 @@ derived_ui="$root/DerivedDataUI"
 logs="$root/logs"
 runtime="$root/runtime"
 package_manifest="$root/package-manifest.json"
-app_manifest="$repo_root/.build/StageDAppRouteArtifacts/app-route-manifest.json"
+app_artifacts="$root/AppRouteArtifacts"
+app_manifest="$app_artifacts/app-route-manifest.json"
+app_project="$app_artifacts/route.patternproj"
+app_export="$app_artifacts/route.png"
 xcresult="$root/StageDAppRoutes.xcresult"
 final_manifest="$root/acceptance-manifest.json"
 run_manifest="$root/run-manifest.json"
@@ -109,6 +112,11 @@ run_ui_gate() {
   local pid elapsed status
   rm -rf "$xcresult"
   set +e
+  STAGE_D_ACCEPTANCE_MANIFEST="$app_manifest" \
+  STAGE_D_ACCEPTANCE_PROJECT="$app_project" \
+  STAGE_D_ACCEPTANCE_EXPORT="$app_export" \
+  STAGE_D_ACCEPTANCE_COMMIT="$commit" \
+  STAGE_D_ACCEPTANCE_DATE="$generated_at" \
   xcodebuild test-without-building \
     -project "$repo_root/App/PatternSpike.xcodeproj" \
     -scheme PatternSpikeMac \
@@ -118,7 +126,11 @@ run_ui_gate() {
     -only-testing:"$required_ui_test" \
     -parallel-testing-enabled NO \
     ARCHS="$host_arch" \
+    STAGE_D_ACCEPTANCE_MANIFEST="$app_manifest" \
+    STAGE_D_ACCEPTANCE_PROJECT="$app_project" \
+    STAGE_D_ACCEPTANCE_EXPORT="$app_export" \
     STAGE_D_ACCEPTANCE_COMMIT="$commit" \
+    STAGE_D_ACCEPTANCE_DATE="$generated_at" \
     >"$logs/xcode-ui.log" 2>&1 &
   pid=$!
   elapsed=0
@@ -166,6 +178,8 @@ require_tool swift
 require_tool xcodebuild
 require_tool xcodegen
 require_tool xcrun
+require_tool system_profiler
+require_tool awk
 
 require_clean_worktree
 [[ -n "$review_evidence" && -f "$review_evidence" ]] \
@@ -174,9 +188,20 @@ if [[ -n "$reference_manifest" ]]; then
   [[ -f "$reference_manifest" ]] \
     || fail "reference run manifest is unavailable: $reference_manifest"
 fi
+host_gpu="$(
+  system_profiler SPDisplaysDataType \
+    | awk -F': ' '/Chipset Model:/{print $2; exit}'
+)"
+[[ -n "$host_gpu" ]] || fail "host GPU identity is unavailable"
+case "$host_gpu" in
+  *[Pp]aravirtual*)
+    fail "host GPU is not Stage D performance-qualified: $host_gpu"
+    ;;
+esac
 [[ ! -e "$root" ]] \
   || fail "run directory already exists; use a fresh run name: $root"
-mkdir -p "$logs" "$runtime/wall" "$runtime/accelerated"
+mkdir -p \
+  "$logs" "$runtime/wall" "$runtime/accelerated" "$app_artifacts"
 rm -rf "$repo_root/.build/stage-d-sampling-allocation-probe-tests"
 
 run_suite \

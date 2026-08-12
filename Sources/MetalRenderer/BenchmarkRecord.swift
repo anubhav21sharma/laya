@@ -1,5 +1,11 @@
 import Foundation
 
+public enum StageDAcceptanceHardwareQualificationError:
+    Error, Equatable, Sendable
+{
+    case nonqualifyingGPU(String)
+}
+
 public struct BenchmarkHardware: Codable, Equatable, Sendable {
     public let gpuName: String
     public let logicalProcessorCount: Int
@@ -19,6 +25,27 @@ public struct BenchmarkHardware: Codable, Equatable, Sendable {
         gpuName: String
     ) -> Bool {
         gpuName.lowercased().contains("paravirtual")
+    }
+
+    public static func isStageDAcceptancePerformanceQualified(
+        gpuName: String
+    ) -> Bool {
+        let normalized = gpuName.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        return !normalized.isEmpty
+            && !isPerformancePendingEnvironment(gpuName: normalized)
+    }
+
+    @discardableResult
+    public static func requireStageDAcceptancePerformanceQualified(
+        gpuName: String
+    ) throws -> String {
+        guard isStageDAcceptancePerformanceQualified(gpuName: gpuName) else {
+            throw StageDAcceptanceHardwareQualificationError
+                .nonqualifyingGPU(gpuName)
+        }
+        return gpuName
     }
 }
 

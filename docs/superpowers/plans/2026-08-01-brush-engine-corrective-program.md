@@ -57,7 +57,14 @@ passed 656 focused tests, all 2,206 broad tests in 120 suites, all product
 builds, and its runtime/allocation probes before final packaging exposed three
 producer/consumer validation mismatches. The corrected validator now accepts
 the captured 12-row package with bounded allocation and positive one-shot cache
-miss evidence; its affected 81-test matrix passes. That interrupted attempt
+miss evidence; its affected 81-test matrix passes. A later full-range review
+found that paravirtual performance could still be represented as passed and
+identified five related artifact, allocation, PNG, ownership, and atomic-save
+gaps. Those are now repaired; the real fixed-path XCTest route and affected
+94-test matrix pass, the captured paravirtual package fails closed without
+writing a manifest, and independent re-review reports zero unresolved findings.
+The final broad rerun passes all 2,206 tests in 120 suites with zero issues.
+That interrupted attempt
 does not count, so two fresh clean-commit aggregate runs remain pending; direct
 signed production-UI replay and the hosted non-XCTest regression are green.
 

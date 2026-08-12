@@ -3,7 +3,45 @@ import EditorCore
 @preconcurrency import Foundation
 import MetalRenderer
 import PatternEngine
+import PatternFile
 import SwiftUI
+
+struct StageDExportedPNGEvidence: Equatable, Sendable {
+    let pixelSize: PixelSize
+    let bgra8SHA256: String
+}
+
+enum StageDExportedPNGValidationError: Error, Equatable {
+    case invalidPNG
+    case pixelMismatch
+}
+
+enum StageDExportedPNGValidator {
+    static func validate(
+        _ data: Data,
+        expectedPixelSize: PixelSize,
+        expectedBGRA8Bytes: [UInt8]
+    ) throws -> StageDExportedPNGEvidence {
+        let decoded: PatternRasterImage
+        do {
+            decoded = try PatternRasterPNGCodec.decode(
+                data,
+                expectedPixelSize: expectedPixelSize
+            )
+        } catch {
+            throw StageDExportedPNGValidationError.invalidPNG
+        }
+        guard decoded.bgra8PremultipliedBytes == expectedBGRA8Bytes else {
+            throw StageDExportedPNGValidationError.pixelMismatch
+        }
+        return StageDExportedPNGEvidence(
+            pixelSize: decoded.pixelSize,
+            bgra8SHA256: SHA256.hash(
+                data: Data(decoded.bgra8PremultipliedBytes)
+            ).map { String(format: "%02x", $0) }.joined()
+        )
+    }
+}
 
 struct StageDAppRouteConfiguration: Equatable, Sendable {
     static let manifestEnvironmentKey = "STAGE_D_ACCEPTANCE_MANIFEST"
@@ -26,19 +64,20 @@ struct StageDAppRouteConfiguration: Equatable, Sendable {
               let dateValue = environment[Self.dateEnvironmentKey],
               let date = ISO8601DateFormatter().date(from: dateValue)
         else { return nil }
-        manifestURL = Self.artifactURL(manifest)
-        projectURL = Self.artifactURL(project)
-        exportURL = Self.artifactURL(export)
+        guard let manifestURL = Self.artifactURL(manifest),
+              let projectURL = Self.artifactURL(project),
+              let exportURL = Self.artifactURL(export)
+        else { return nil }
+        self.manifestURL = manifestURL
+        self.projectURL = projectURL
+        self.exportURL = exportURL
         gitCommit = commit
         generatedAt = date
     }
 
-    private static func artifactURL(_ path: String) -> URL {
-        if path.hasPrefix("/") {
-            return URL(fileURLWithPath: path)
-        }
-        return FileManager.default.temporaryDirectory
-            .appendingPathComponent(path)
+    private static func artifactURL(_ path: String) -> URL? {
+        guard path.hasPrefix("/") else { return nil }
+        return URL(fileURLWithPath: path)
     }
 }
 
@@ -121,6 +160,7 @@ private struct StageDAppRouteRecord: Codable, Equatable, Sendable {
     let gpuCachedPlanCount: Int
     let cachedPlanMetalBufferBytes: Int
     let pendingOwnershipCount: Int
+    let boundedOwnership: Bool
     let activeSnapshotTokenCount: Int
     let retainedDisplaySnapshotTokenCount: Int
     let retainedHistorySnapshotTokenCount: Int
@@ -136,6 +176,9 @@ private struct StageDAppRouteRecord: Codable, Equatable, Sendable {
     let projectFileBytes: Int
     let exportFileBytes: Int
     let exportFilePrefixHex: String
+    let exportedPNGDecodedBGRA8SHA256: String
+    let exportedPNGPixelWidth: Int
+    let exportedPNGPixelHeight: Int
 }
 
 private struct StageDNormalizedInputRecord:
@@ -393,6 +436,13 @@ final class StageDAppRouteEvidenceRecorder {
         let stack = controller.currentLayerStack
         let projectData = try? Data(contentsOf: configuration.projectURL)
         let exportData = try? Data(contentsOf: configuration.exportURL)
+        let exportedPNG = exportData.flatMap {
+            try? StageDExportedPNGValidator.validate(
+                $0,
+                expectedPixelSize: controller.model.pixelSize,
+                expectedBGRA8Bytes: flattenedBytes
+            )
+        }
         let record = StageDAppRouteRecord(
             routeID: routeID,
             tool: String(describing: controller.model.tool),
@@ -436,6 +486,10 @@ final class StageDAppRouteEvidenceRecorder {
             cachedPlanMetalBufferBytes:
                 rendererEvidence.cachedPlanMetalBufferBytes,
             pendingOwnershipCount: rendererEvidence.pendingOwnershipCount,
+            boundedOwnership: rendererEvidence
+                .hasBoundedStageDApplicationRouteOwnership(
+                    layerCount: stack.layers.count
+                ),
             activeSnapshotTokenCount:
                 rendererEvidence.activeSnapshotTokenCount,
             retainedDisplaySnapshotTokenCount:
@@ -463,7 +517,11 @@ final class StageDAppRouteEvidenceRecorder {
             exportFileBytes: exportData?.count ?? 0,
             exportFilePrefixHex: exportData.map {
                 $0.prefix(8).map { String(format: "%02x", $0) }.joined()
-            } ?? ""
+            } ?? "",
+            exportedPNGDecodedBGRA8SHA256:
+                exportedPNG?.bgra8SHA256 ?? "",
+            exportedPNGPixelWidth: exportedPNG?.pixelSize.width ?? 0,
+            exportedPNGPixelHeight: exportedPNG?.pixelSize.height ?? 0
         )
         var scenarioRecords = records[scenarioID, default: []]
         scenarioRecords.removeAll { $0.routeID == routeID }
@@ -603,7 +661,7 @@ final class StageDAppRouteEvidenceRecorder {
                   )
             else { return nil }
             let allQuiescent = routeRecords.allSatisfy {
-                $0.pendingOwnershipCount == 0
+                $0.pendingOwnershipCount == 0 && $0.boundedOwnership
             }
             let routesComplete = routeRecords.map(\.routeID).sorted()
                 == requiredRouteIDs.sorted()
@@ -648,6 +706,15 @@ final class StageDAppRouteEvidenceRecorder {
                     "pendingOwnershipCount": Double(
                         latest.pendingOwnershipCount
                     ),
+                    "activeSnapshotTokenCount": Double(
+                        latest.activeSnapshotTokenCount
+                    ),
+                    "retainedDisplaySnapshotTokenCount": Double(
+                        latest.retainedDisplaySnapshotTokenCount
+                    ),
+                    "retainedHistorySnapshotTokenCount": Double(
+                        latest.retainedHistorySnapshotTokenCount
+                    ),
                     "snapshotOwnershipAccountingMismatchCount": Double(
                         latest.snapshotOwnershipAccountingMismatchCount
                     ),
@@ -684,6 +751,14 @@ final class StageDAppRouteEvidenceRecorder {
                     "projectFileBytes": String(latest.projectFileBytes),
                     "exportFileBytes": String(latest.exportFileBytes),
                     "exportFilePrefixHex": latest.exportFilePrefixHex,
+                    "exportedPNGDecodedBGRA8SHA256":
+                        latest.exportedPNGDecodedBGRA8SHA256,
+                    "exportedPNGPixelWidth": String(
+                        latest.exportedPNGPixelWidth
+                    ),
+                    "exportedPNGPixelHeight": String(
+                        latest.exportedPNGPixelHeight
+                    ),
                     "observedSemanticHash": Self.sha256(semanticData),
                 ]
             )
@@ -838,6 +913,10 @@ final class StageDAppRouteEvidenceRecorder {
                 && !opened.canRedo
                 && !exported.canUndo
                 && !exported.canRedo
+                && exported.exportedPNGDecodedBGRA8SHA256
+                    == exported.flattenedBGRA8SHA256
+                && exported.exportedPNGPixelWidth == exported.pixelWidth
+                && exported.exportedPNGPixelHeight == exported.pixelHeight
                 && samePersistentState
         default:
             return false

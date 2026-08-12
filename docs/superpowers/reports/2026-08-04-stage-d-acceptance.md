@@ -9,17 +9,18 @@ cutovers. Stage E remains closed.
 Stage D base revision: `ca5dff5`
 
 The complete 29-route Xcode UI sequence now executes. Successful manifests are
-bound to pushed implementation commits through `e8756ee`; all three rows pass
-with stable semantic hashes and zero pending or ownership-accounting mismatch.
-No final two-run aggregate acceptance manifest has been produced.
+bound to pushed implementation commits through `e8756ee`; the latest repaired
+runner-owned-path candidate also passed all three rows with independently
+decoded export pixels and bounded snapshot ownership. No final two-run
+aggregate acceptance manifest has been produced.
 
 Execution date: 2026-08-13 (Asia/Kolkata)
 
 ## Decision
 
 The locally executable implementation, package tests, Metal ownership and
-allocation gates, product builds, broad regression boundary, app-route source
-boundary, exact Xcode-hosted UI route, and independent review are complete.
+allocation gates, product builds, broad regression boundary, exact
+Xcode-hosted UI route, and independent review are complete.
 Stage D is nevertheless **not accepted** because these mandatory boundaries
 remain:
 
@@ -46,9 +47,11 @@ rejects missing, duplicate, skipped, unknown, zero-test, nonproduction,
 nonfinite, or failed evidence.
 
 The final runner requires a clean Git worktree, removes any prior app-route
-manifest before launching XCTest, binds every manifest to the exact commit, and
-requires exactly one positive Swift Testing aggregate with no unreviewed issue.
-It cannot pass by reusing a stale manifest or by executing zero filtered tests.
+manifest before launching XCTest, passes runner-owned absolute manifest,
+project, and PNG paths through the Xcode scheme into the test process, binds
+every manifest to the exact commit, and requires exactly one positive Swift
+Testing aggregate with no unreviewed issue. It cannot pass by reusing a stale
+manifest or by executing zero filtered tests.
 
 The hardened app route now records real normalized `StrokeSample` delivery from
 `EditorSessionController`, including source, phase, capabilities, pressure, and
@@ -101,6 +104,11 @@ capture/export serialization, a global deadline, cancellation-insensitive
 display-preparation retirement, deterministic gesture semantics, pending-stroke
 quiescence, and retained resize-history ownership.
 
+The final evidence-contract repair selection passed **94 tests in 2 suites**.
+Independent re-review additionally passed **54 tests in 1 suite** across the
+acceptance and app lifecycle boundary and **13 tests** across atomic archive
+replacement and project bridging.
+
 ## Allocation and sustained accelerated trace
 
 The optimized allocation oracle passed with zero post-warm application,
@@ -147,6 +155,17 @@ the intentionally empty Stage D baseline SHA-256 is
 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
 The transient observation was not added to the baseline.
 
+The final evidence-contract source rerun first completed all 2,206/120 tests in
+1,793.753 seconds and exposed one unreviewed scheduler-speed assumption in an
+existing retirement test: a fixed 20,000-`Task.yield()` loop expired after
+1.688 seconds. The test now awaits the production renderer's bounded async
+retirement path, which also resolves an owned transient display source before
+delivering the deferred pointer prefix. It passed 11 consecutive focused runs
+and independent review reported no finding. The complete rerun then passed all
+**2,206 tests in 120 suites** in **1,712.339 seconds** with zero issues; the
+strict baseline verifier passed. Its log SHA-256 is
+`7f5780f871ec6f112fc14e492d1a07929d188fe04967487297b849c4d65ed303`.
+
 An earlier clean-root aggregate attempt exposed a separate reproducibility
 defect before acceptance: nine CLI subprocess cases looked only in the
 repository's default `.build/debug` directory and could not find the executable
@@ -175,10 +194,23 @@ Metal-submission allocations, while the validator had incorrectly required all
 totals to be zero and could not tokenize the spaced metric arrays it produced.
 The validator now shares the producer caps, checks totals with overflow-safe
 event bounds, accepts positive cache activity through misses, and parses
-bracketed fields fail-closed. The full clean-run evidence now emits a verified
-12-scenario package manifest under the corrected validator, and the affected
-acceptance/sparse matrix passes **81 tests in 2 suites**. Two complete fresh-root
-runs of the resulting pushed commit are still required.
+bracketed fields fail-closed. Before the hardware qualification repair, the
+captured evidence emitted a structurally verified 12-scenario package manifest
+and the affected acceptance/sparse matrix passed **81 tests in 2 suites**.
+
+A subsequent full-range audit correctly invalidated that package as acceptance
+evidence. It found a runner/XCTest artifact-path mismatch, a symmetric
+allocation oracle where the producer contract was one-sided, a paravirtual
+performance skip reported as passed, export validation that did not decode the
+written PNG, unbounded classified history ownership, and a non-atomic direct
+save pre-delete. All six are repaired. Lifecycle allocation now records
+`max(last - first, 0)` with `last <= first + 8`; app ownership is bounded on
+every route and compared across runs; project save retains `SafeArchiveIO`'s
+atomic replacement; and exported PNG dimensions and decoded BGRA8 bytes must
+exactly match the flattened renderer readback. Empty or paravirtual GPU names
+are nonqualifying. Replaying the captured `Apple Paravirtual device` package
+now terminates nonzero with `runtime hardware is not Stage D
+performance-qualified` and writes no manifest.
 
 ## Builds
 
@@ -207,8 +239,10 @@ and queue high-water was zero, while event-to-submit was about `16.417 ms` p95.
 The delayed interval therefore precedes renderer preparation rather than
 showing CPU, GPU, or queue backlog.
 
-No threshold was raised and no blocking wait was introduced. The wall gate
-must be rerun on a native GPU/macOS host.
+No threshold was raised and no blocking wait was introduced. The acceptance
+runner and package emitter now fail before acceptance on an empty or Apple
+Paravirtual GPU identity instead of labelling skipped performance evidence as
+passed. The wall gate must be rerun on a native GPU/macOS host.
 
 ## Xcode UI route gate
 
@@ -263,6 +297,15 @@ request also reused the persistent authorization and passed one test with zero
 failures or skips in 158.444 seconds; its result bundle records the macOS device,
 test timestamps, and final passed status.
 
+The repaired fixed-path handoff was then exercised end to end from a fresh
+signed UI build. The exact test passed in **151.837 seconds** and wrote its
+manifest, project, and PNG beneath the runner-owned artifact directory. The
+manifest contains three passed rows, decoded PNG dimensions **320 x 192**, an
+exported decoded-BGRA8 hash equal to the flattened readback hash, and bounded
+controls/shortcuts ownership of one history token and two layer references.
+This was a pre-commit candidate run; an exact pushed-revision replay remains a
+post-commit evidence step, not a substitute for either qualifying aggregate.
+
 This successful run proves the pushed implementation commit's Xcode route, but
 it is not the final acceptance aggregate. The acceptance script must still run
 twice from clean fresh roots and combine this route with the package, broad,
@@ -311,6 +354,14 @@ scheduling during retirement, and schedules exactly once afterward. The final
 independent re-review reported no Critical, Important, or Minor findings and
 independently passed 49 focused tests. The review gate is complete.
 
+The final full-range review over `ca5dff5` through the current candidate then
+found the six package/runner issues described above. After their repair it
+attested **zero Critical, Important, and Minor findings**. It independently
+verified the real runner-owned-path XCTest output, one-sided allocation bound,
+fail-closed hardware qualification, decoded PNG pixel comparison, per-route and
+cross-run ownership limits, and atomic archive replacement. Its fresh 54-test
+and 13-test selections, shell parse, and diff check all passed.
+
 ## Evidence
 
 - Broad log:
@@ -340,6 +391,27 @@ independently passed 49 focused tests. The review gate is complete.
   `d42f50762ac7700f80adfd8b48a0ab14324a44c3f6551adbbf431a44a5dd5ac2`
 - Independent review disposition SHA-256:
   `e90d443dde3cb86f8a950623a1b7e636eac47fa6b8930548acae178c0144ad62`
+- Fixed-path UI result:
+  `.build/stage-d-ui-handoff-fix/StageDAppRoutes-handoff-3.xcresult`
+  (1 passed test / 0 failures / 151.837 seconds)
+- Fixed-path app manifest:
+  `.build/stage-d-ui-handoff-fix/AppRouteArtifacts/app-route-manifest.json`
+- Final post-review broad log:
+  `.build/brush-corrective-verification/stage-d-final-post-review-broad-green.log`
+  (`7f5780f871ec6f112fc14e492d1a07929d188fe04967487297b849c4d65ed303`;
+  2,206 tests / 120 suites / 0 issues / 1,712.339 seconds)
+- Final macOS Release build log:
+  `.build/brush-corrective-verification/stage-d-final-mac-release.log`
+  (`f2d1ee96bb1c16a6ef6b2bb9be4e8a3bc884c59ee26916ac8833b1844021a071`)
+- Final macOS harness Release build log:
+  `.build/brush-corrective-verification/stage-d-final-mac-harness-release.log`
+  (`659513eb6c10ce4c36baf0a0641f6b9193ae235c41fa382d0cf679e896ec4908`)
+- Final iPad Simulator Debug build log:
+  `.build/brush-corrective-verification/stage-d-final-pad-debug.log`
+  (`6fd389e0a3168a84903ebe5d618941788ca42d083d91404db7880041ce25f73a`)
+- Final iPad Simulator Release build log:
+  `.build/brush-corrective-verification/stage-d-final-pad-release.log`
+  (`b0484d94851fd2904eafc667ada215aac776ad5f900dbc4ba6aec46fe76a4b37`)
 
 These execution artifacts are local and intentionally uncommitted.
 

@@ -12,6 +12,10 @@ public struct StageDAllocationEvidence: Equatable, Sendable {
     public let zeroWorkLeaseCount: Int
     public let maximumZeroWorkLeaseCount: Int
     public let deferredDrainCount: Int
+
+    public var lifecycleAllocationGrowthCount: Int {
+        max(lastLifecycleAllocationCount - firstLifecycleAllocationCount, 0)
+    }
 }
 
 public enum StageDAllocationEvidenceValidationError: Error, Equatable {
@@ -209,6 +213,14 @@ public enum StageDAllocationEvidenceValidator {
             field: "lifecycle",
             scope: "trace"
         )
+        let maximumLastLifecycle = lifecycle.0.addingReportingOverflow(8)
+        guard !maximumLastLifecycle.overflow,
+              lifecycle.1 <= maximumLastLifecycle.partialValue
+        else {
+            throw StageDAllocationEvidenceValidationError.invalidField(
+                "trace.lifecycle"
+            )
+        }
         let cpu = try unsignedRatio(
             traceFields,
             field: "cpu_ns",

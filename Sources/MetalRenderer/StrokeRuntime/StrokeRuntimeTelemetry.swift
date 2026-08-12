@@ -425,6 +425,10 @@ public enum StageDAcceptanceRunRequirements {
             "cpuCachedPlanCount",
             "gpuCachedPlanCount",
             "cachedPlanMetalBufferBytes",
+            "activeSnapshotTokenCount",
+            "retainedDisplaySnapshotTokenCount",
+            "retainedHistorySnapshotTokenCount",
+            "retainedSnapshotReferenceCount",
         ],
         StageDAcceptanceRequirements.appShortcuts: [
             "residentTileHighWaterBytes",
@@ -433,6 +437,10 @@ public enum StageDAcceptanceRunRequirements {
             "cpuCachedPlanCount",
             "gpuCachedPlanCount",
             "cachedPlanMetalBufferBytes",
+            "activeSnapshotTokenCount",
+            "retainedDisplaySnapshotTokenCount",
+            "retainedHistorySnapshotTokenCount",
+            "retainedSnapshotReferenceCount",
         ],
         StageDAcceptanceRequirements.appPersistence: [
             "residentTileHighWaterBytes",
@@ -441,6 +449,10 @@ public enum StageDAcceptanceRunRequirements {
             "cpuCachedPlanCount",
             "gpuCachedPlanCount",
             "cachedPlanMetalBufferBytes",
+            "activeSnapshotTokenCount",
+            "retainedDisplaySnapshotTokenCount",
+            "retainedHistorySnapshotTokenCount",
+            "retainedSnapshotReferenceCount",
         ],
     ]
 }
@@ -861,6 +873,35 @@ public struct StageDAcceptanceRendererEvidence:
     /// dedicated stable-key cache tests and is not required of this trace.
     public var hasStageDProductionPlanCacheEvidence: Bool {
         cpuPlanCacheMissCount > 0 || gpuPlanCacheMissCount > 0
+    }
+
+    public func hasBoundedStageDApplicationRouteOwnership(
+        layerCount: Int
+    ) -> Bool {
+        guard layerCount > 0,
+              activeSnapshotTokenCount >= 0,
+              retainedDisplaySnapshotTokenCount >= 0,
+              retainedHistorySnapshotTokenCount >= 0,
+              aggregateSnapshotReferenceCount >= 0,
+              activeTileLeaseCount >= 0,
+              activeStrokeSurfaceCount >= 0,
+              activeCommandOperationCount >= 0,
+              pendingLayerDisplayAcknowledgementCount >= 0,
+              activeUploadSlotCount >= 0,
+              pendingPlanCompletionCount >= 0,
+              pendingConsumerCompletionCount >= 0,
+              pendingOwnershipCount == 0,
+              snapshotOwnershipAccountingMismatchCount == 0,
+              retainedDisplaySnapshotTokenCount == 0,
+              retainedHistorySnapshotTokenCount <= 1,
+              activeSnapshotTokenCount == retainedHistorySnapshotTokenCount
+        else { return false }
+        let maximumReferences = layerCount.multipliedReportingOverflow(
+            by: retainedHistorySnapshotTokenCount
+        )
+        return !maximumReferences.overflow
+            && aggregateSnapshotReferenceCount
+                <= maximumReferences.partialValue
     }
 }
 

@@ -1024,10 +1024,14 @@ than being repeated after minor edits.
   145.050 and 158.444 seconds respectively.
   The controls, shortcuts, and persistence rows all passed with zero pending
   ownership; save wrote a nonempty schema-4 project and export wrote a valid
-  PNG. Four post-fix manifests have identical projected semantic
+  PNG. The repaired runner-owned absolute-path handoff passed again in 151.837
+  seconds; its exported 320 x 192 PNG was independently decoded and its BGRA8
+  bytes matched the renderer readback exactly. Four post-fix manifests have
+  identical projected semantic
   hashes and compared resource metrics despite variable raw macOS gesture
-  sampling. The latest standalone result is bound to `e8756ee`; the two fresh
-  clean-commit acceptance-script runs remain the final aggregate boundary.
+  sampling. The latest pushed standalone result is bound to `e8756ee`; the
+  repaired-path candidate is explicitly pre-commit. The two fresh clean-commit
+  acceptance-script runs remain the final aggregate boundary.
 - [x] Build `PatternSpikeMac` Debug and Release for `platform=macOS`, and build
   `PatternSpikePad` Debug and Release for `generic/platform=iOS Simulator`, all
   with `CODE_SIGNING_ALLOWED=NO`. Launch the macOS harness route and require a
@@ -1057,6 +1061,18 @@ than being repeated after minor edits.
   zero-work allocation below its declared maximum, and parse bracketed metric
   arrays fail-closed. The affected 81-test matrix and 12-row package emission
   pass on the captured exact-commit evidence.
+- [x] Close the full-range review gaps in the final evidence boundary: hand
+  runner-owned absolute artifact paths through the Xcode test process; encode
+  allocation growth as the producer's one-sided `last <= first + 8` contract;
+  reject empty/paravirtual performance hardware; independently decode and
+  pixel-compare exported PNGs; bound classified history tokens/references on
+  every app route and across runs; and preserve atomic direct project
+  replacement. The affected 94-test matrix, real 151.837-second XCTest route,
+  Release probe build, paravirtual rejection, shell parse, and diff check pass.
+  Final independent re-review reports zero Critical, Important, or Minor
+  findings. A full final-source rerun passes all 2,206 tests in 120 suites in
+  1,712.339 seconds with zero issues after replacing one scheduler-speed test
+  loop with the renderer's bounded production retirement wait.
 - [ ] Run the corrected aggregate twice from independent fresh roots on the
   same pushed commit and compare the resulting manifests.
 - [ ] Commit final Stage D acceptance only after the two clean aggregate runs

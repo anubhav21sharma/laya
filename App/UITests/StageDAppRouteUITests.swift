@@ -9,21 +9,31 @@ final class StageDAppRouteUITests: XCTestCase {
 
     func testProductionControlsShortcutsAndPersistenceWriteEvidence() throws {
         let commit = try acceptanceCommit()
-        let artifactDirectory = "StageDAppRouteArtifacts-"
-            + UUID().uuidString
+        let manifestPath = try acceptanceArtifactPath(
+            "STAGE_D_ACCEPTANCE_MANIFEST"
+        )
+        let projectPath = try acceptanceArtifactPath(
+            "STAGE_D_ACCEPTANCE_PROJECT"
+        )
+        let exportPath = try acceptanceArtifactPath(
+            "STAGE_D_ACCEPTANCE_EXPORT"
+        )
+        let generatedAt = try acceptanceEnvironmentValue(
+            "STAGE_D_ACCEPTANCE_DATE"
+        )
 
         let app = XCUIApplication()
         evidenceApp = app
         recordedRows = [:]
         app.launchEnvironment = [
             "STAGE_D_ACCEPTANCE_MANIFEST":
-                "\(artifactDirectory)/app-route-manifest.json",
+                manifestPath,
             "STAGE_D_ACCEPTANCE_PROJECT":
-                "\(artifactDirectory)/route.patternproj",
+                projectPath,
             "STAGE_D_ACCEPTANCE_EXPORT":
-                "\(artifactDirectory)/route.png",
+                exportPath,
             "STAGE_D_ACCEPTANCE_COMMIT": commit,
-            "STAGE_D_ACCEPTANCE_DATE": "2026-08-10T12:00:00Z",
+            "STAGE_D_ACCEPTANCE_DATE": generatedAt,
         ]
         app.launchArguments = [
             "-ApplePersistenceIgnoreState", "YES",
@@ -340,6 +350,10 @@ final class StageDAppRouteUITests: XCTestCase {
             exported["exportFilePrefixHex"] as? String,
             "89504e470d0a1a0a"
         )
+        XCTAssertEqual(
+            exported["exportedPNGDecodedBGRA8SHA256"] as? String,
+            exported["flattenedBGRA8SHA256"] as? String
+        )
         XCTAssertEqual(recordedRows.keys.sorted(), [
             "stage-d.app.controls",
             "stage-d.app.persistence",
@@ -443,6 +457,31 @@ final class StageDAppRouteUITests: XCTestCase {
             )
         }
         return commit
+    }
+
+    private func acceptanceArtifactPath(_ key: String) throws -> String {
+        let path = try acceptanceEnvironmentValue(key)
+        guard path.hasPrefix("/") else {
+            throw NSError(
+                domain: "StageDAppRouteUITests",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "\(key) must be an absolute path"]
+            )
+        }
+        return path
+    }
+
+    private func acceptanceEnvironmentValue(_ key: String) throws -> String {
+        let value = ProcessInfo.processInfo.environment[key] ?? ""
+        guard !value.isEmpty else {
+            throw NSError(
+                domain: "StageDAppRouteUITests",
+                code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "\(key) is required"]
+            )
+        }
+        return value
     }
 
     private func attributes(for scenarioID: String) -> [String: Any] {

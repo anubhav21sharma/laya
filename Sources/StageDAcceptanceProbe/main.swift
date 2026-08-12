@@ -532,12 +532,16 @@ private enum PackageEvidence {
         else {
             throw ProbeError.invalidRuntimeEvidence(expectedProfile.rawValue)
         }
-        let longStroke = try runtime.requiredLongStrokeMetrics(
-            validatesPerformance: !BenchmarkHardware
-                .isPerformancePendingEnvironment(
-                    gpuName: benchmark.hardware.gpuName
-                )
-        )
+        do {
+            try BenchmarkHardware.requireStageDAcceptancePerformanceQualified(
+                gpuName: benchmark.hardware.gpuName
+            )
+        } catch {
+            throw ProbeError.nonqualifyingRuntimeHardware(
+                benchmark.hardware.gpuName
+            )
+        }
+        let longStroke = try runtime.requiredLongStrokeMetrics()
         let digest = sha256(data)
         return StageDAcceptanceRow(
             scenarioID: scenarioID,
@@ -614,6 +618,8 @@ private enum PackageEvidence {
                 "observedSemanticHash": hash.lowercased(),
                 "buildConfiguration": benchmark.build.configuration,
                 "buildGitCommit": benchmark.build.gitCommit,
+                "gpuName": benchmark.hardware.gpuName,
+                "performanceQualification": "qualified",
             ]
         )
     }
@@ -751,10 +757,7 @@ private enum PackageEvidence {
             expectedSemanticHash: nil,
             numericOracle: .init(
                 expected: 0,
-                actual: Double(
-                    evidence.firstLifecycleAllocationCount
-                        - evidence.lastLifecycleAllocationCount
-                ),
+                actual: Double(evidence.lifecycleAllocationGrowthCount),
                 tolerance: 8
             ),
             status: .passed,
@@ -947,6 +950,7 @@ private enum ProbeError: Error, CustomStringConvertible {
     case invalidPackageScenario(String)
     case suiteDidNotPass(String)
     case invalidRuntimeEvidence(String)
+    case nonqualifyingRuntimeHardware(String)
     case invalidAllocationEvidence
     case invalidBroadRegressionEvidence
     case invalidIndependentReviewEvidence
@@ -976,6 +980,8 @@ private enum ProbeError: Error, CustomStringConvertible {
             "suite evidence did not pass: \(value)"
         case let .invalidRuntimeEvidence(value):
             "invalid production runtime evidence: \(value)"
+        case let .nonqualifyingRuntimeHardware(value):
+            "runtime hardware is not Stage D performance-qualified: \(value)"
         case .invalidAllocationEvidence:
             "allocation evidence lacks required production pass markers"
         case .invalidBroadRegressionEvidence:

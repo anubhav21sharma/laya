@@ -2438,19 +2438,15 @@ func retiringWorkspaceResumesDeferredPrefixBeforePointerEnds()
     #expect(controller.transactionStateForTesting == .idle)
     #expect(normalizedTimestamps.isEmpty)
 
-    var didResumeCollecting = false
-    for _ in 0..<20_000 {
-        try renderer.drainCompletedInteractiveOperations()
-        if case let .drawing(drawing) =
-            controller.transactionStateForTesting,
-           drawing.phase == .collecting
-        {
-            didResumeCollecting = true
-            break
-        }
-        await Task.yield()
+    try await renderer.awaitPendingStrokeWorkspaceRetirement()
+    try renderer.drainCompletedInteractiveOperations()
+    guard case let .drawing(resumedDrawing) =
+            controller.transactionStateForTesting
+    else {
+        Issue.record("Expected deferred pointer prefix to resume")
+        return
     }
-    #expect(didResumeCollecting)
+    #expect(resumedDrawing.phase == .collecting)
     let deferredPredictionState = try await awaitActorTransientSamples(
         renderer,
         predictedXs: acceptedPrediction.map(\.position.x),

@@ -229,7 +229,11 @@ schemes:
       targets:
         - PatternSpikeMacUITests
       environmentVariables:
+        STAGE_D_ACCEPTANCE_MANIFEST: "$(STAGE_D_ACCEPTANCE_MANIFEST)"
+        STAGE_D_ACCEPTANCE_PROJECT: "$(STAGE_D_ACCEPTANCE_PROJECT)"
+        STAGE_D_ACCEPTANCE_EXPORT: "$(STAGE_D_ACCEPTANCE_EXPORT)"
         STAGE_D_ACCEPTANCE_COMMIT: "$(STAGE_D_ACCEPTANCE_COMMIT)"
+        STAGE_D_ACCEPTANCE_DATE: "$(STAGE_D_ACCEPTANCE_DATE)"
 
   PatternSpikeMacHarness:
     build:

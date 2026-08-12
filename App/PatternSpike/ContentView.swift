@@ -515,7 +515,6 @@ struct ContentView: View {
                             withIntermediateDirectories: true
                         )
                         destination = requested
-                        try? FileManager.default.removeItem(at: destination)
                     } else {
                         createdTemporaryDirectory = true
                         directory = FileManager.default.temporaryDirectory

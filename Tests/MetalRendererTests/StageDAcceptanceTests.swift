@@ -7,7 +7,9 @@ import Testing
 @Suite("Stage D acceptance evidence", .serialized)
 struct StageDAcceptanceTests {
     @Test
-    func productionRuntimeProfilesFreezeInputAndSteadyFrameInventories() {
+    func productionRuntimeProfilesFreezeInputAndSteadyFrameInventories()
+        throws
+    {
         for profile in [
             StrokeRuntimeTraceProfile.productionTenSeconds,
             .productionAcceleratedTenMinutes,
@@ -16,6 +18,25 @@ struct StageDAcceptanceTests {
             #expect(profile.requiredLongStrokeFrameCount == 400)
             #expect(profile.requiredWallDurationNanoseconds == 10_000_000_000)
         }
+        #expect(!BenchmarkHardware.isStageDAcceptancePerformanceQualified(
+            gpuName: "Apple Paravirtual device"
+        ))
+        #expect(BenchmarkHardware.isStageDAcceptancePerformanceQualified(
+            gpuName: "Apple M4 Max"
+        ))
+        #expect(!BenchmarkHardware.isStageDAcceptancePerformanceQualified(
+            gpuName: "   "
+        ))
+        #expect(throws: StageDAcceptanceHardwareQualificationError
+            .nonqualifyingGPU("Apple Paravirtual device")) {
+            try BenchmarkHardware.requireStageDAcceptancePerformanceQualified(
+                gpuName: "Apple Paravirtual device"
+            )
+        }
+        #expect(try BenchmarkHardware
+            .requireStageDAcceptancePerformanceQualified(
+                gpuName: "Apple M4 Max"
+            ) == "Apple M4 Max")
     }
 
     @Test
@@ -125,6 +146,24 @@ struct StageDAcceptanceTests {
         #expect(evidence.lastDecileNanosecondsPerEvent == 34_924)
         #expect(evidence.zeroWorkLeaseCount == 606)
         #expect(evidence.maximumZeroWorkLeaseCount == 2_649)
+        #expect(evidence.lifecycleAllocationGrowthCount == 0)
+
+        let boundedGrowth = try StageDAllocationEvidenceValidator.validate(
+            log.replacingOccurrences(
+                of: "lifecycle=41/0",
+                with: "lifecycle=1/9"
+            )
+        )
+        #expect(boundedGrowth.lifecycleAllocationGrowthCount == 8)
+        #expect(throws: StageDAllocationEvidenceValidationError
+            .invalidField("trace.lifecycle")) {
+            _ = try StageDAllocationEvidenceValidator.validate(
+                log.replacingOccurrences(
+                    of: "lifecycle=41/0",
+                    with: "lifecycle=1/10"
+                )
+            )
+        }
 
         #expect(throws: StageDAllocationEvidenceValidationError
             .invalidField("sampling.app_acquire")) {
@@ -330,6 +369,24 @@ struct StageDAcceptanceTests {
             _ = try StageDAcceptanceRepeatabilityValidator.validate(
                 reference: reference,
                 candidate: grown
+            )
+        }
+
+        let retainedReferenceGrowth = acceptanceRunManifest(
+            commit: commit,
+            semanticSuffix: "1",
+            residentHighWater: 1_024,
+            controlRetainedReferenceCount: 3
+        )
+        #expect(throws: StageDAcceptanceRepeatabilityError.resourceGrowth(
+            scenarioID: StageDAcceptanceRequirements.appControls,
+            metric: "retainedSnapshotReferenceCount",
+            reference: 2,
+            candidate: 3
+        )) {
+            _ = try StageDAcceptanceRepeatabilityValidator.validate(
+                reference: reference,
+                candidate: retainedReferenceGrowth
             )
         }
     }
@@ -630,6 +687,52 @@ struct StageDAcceptanceTests {
             inconsistentDecoded.snapshotOwnershipAccountingMismatchCount == 1
         )
         #expect(inconsistentDecoded.pendingOwnershipCount == 1)
+
+        var boundedHistoryEvidence = legacyEvidence
+        boundedHistoryEvidence["activeSnapshotTokenCount"] = 1
+        boundedHistoryEvidence["retainedDisplaySnapshotTokenCount"] = 0
+        boundedHistoryEvidence["retainedHistorySnapshotTokenCount"] = 1
+        boundedHistoryEvidence["aggregateSnapshotReferenceCount"] = 2
+        legacyRoot["stageDAcceptanceRendererEvidence"] = boundedHistoryEvidence
+        let boundedHistory = try BenchmarkRecord.decode(
+            JSONSerialization.data(withJSONObject: legacyRoot)
+        )
+        let boundedHistoryDecoded = try #require(
+            boundedHistory.stageDAcceptanceRendererEvidence
+        )
+        #expect(boundedHistoryDecoded
+            .hasBoundedStageDApplicationRouteOwnership(layerCount: 2))
+
+        boundedHistoryEvidence["aggregateSnapshotReferenceCount"] = 3
+        legacyRoot["stageDAcceptanceRendererEvidence"] = boundedHistoryEvidence
+        let inflatedReferences = try BenchmarkRecord.decode(
+            JSONSerialization.data(withJSONObject: legacyRoot)
+        )
+        #expect(!(try #require(inflatedReferences
+            .stageDAcceptanceRendererEvidence))
+            .hasBoundedStageDApplicationRouteOwnership(layerCount: 2))
+
+        boundedHistoryEvidence["activeSnapshotTokenCount"] = 2
+        boundedHistoryEvidence["retainedHistorySnapshotTokenCount"] = 2
+        boundedHistoryEvidence["aggregateSnapshotReferenceCount"] = 2
+        legacyRoot["stageDAcceptanceRendererEvidence"] = boundedHistoryEvidence
+        let inflatedTokens = try BenchmarkRecord.decode(
+            JSONSerialization.data(withJSONObject: legacyRoot)
+        )
+        #expect(!(try #require(inflatedTokens
+            .stageDAcceptanceRendererEvidence))
+            .hasBoundedStageDApplicationRouteOwnership(layerCount: 2))
+
+        boundedHistoryEvidence["activeSnapshotTokenCount"] = -1
+        boundedHistoryEvidence["retainedHistorySnapshotTokenCount"] = -1
+        boundedHistoryEvidence["aggregateSnapshotReferenceCount"] = -2
+        legacyRoot["stageDAcceptanceRendererEvidence"] = boundedHistoryEvidence
+        let negativeOwnership = try BenchmarkRecord.decode(
+            JSONSerialization.data(withJSONObject: legacyRoot)
+        )
+        #expect(!(try #require(negativeOwnership
+            .stageDAcceptanceRendererEvidence))
+            .hasBoundedStageDApplicationRouteOwnership(layerCount: 2))
     }
 
     private func row(
@@ -658,7 +761,8 @@ struct StageDAcceptanceTests {
     private func acceptanceRunManifest(
         commit: String,
         semanticSuffix: String,
-        residentHighWater: Double
+        residentHighWater: Double,
+        controlRetainedReferenceCount: Double = 2
     ) -> StageDAcceptanceManifest {
         let semanticIDs = Set(
             StageDAcceptanceRunRequirements.semanticScenarioIDs
@@ -692,6 +796,12 @@ struct StageDAcceptanceTests {
                         metrics["cpuCachedPlanCount"] = 0
                         metrics["gpuCachedPlanCount"] = 0
                         metrics["cachedPlanMetalBufferBytes"] = 0
+                        metrics["activeSnapshotTokenCount"] = 1
+                        metrics["retainedDisplaySnapshotTokenCount"] = 0
+                        metrics["retainedHistorySnapshotTokenCount"] = 1
+                        metrics["retainedSnapshotReferenceCount"] = scenarioID
+                            == StageDAcceptanceRequirements.appControls
+                            ? controlRetainedReferenceCount : 2
                     }
                     return row(
                         scenarioID: scenarioID,

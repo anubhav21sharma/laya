@@ -5,6 +5,7 @@ import Foundation
 import Metal
 @testable import MetalRenderer
 import PatternEngine
+import PatternFile
 import SwiftUI
 import Testing
 
@@ -76,7 +77,9 @@ func productionPerformanceTraceWaitsForAcceptedInputWork() throws {
 }
 
 @Test
-func imageExportPolicyKeepsTheProductRouteAvailableWithoutAcceptanceInjection() {
+func imageExportPolicyKeepsTheProductRouteAvailableWithoutAcceptanceInjection()
+    throws
+{
     let destination = URL(fileURLWithPath: "/tmp/stage-d-export.png")
     #expect(EditorImageExportPolicy.disposition(
         acceptanceDestination: nil
@@ -84,6 +87,38 @@ func imageExportPolicyKeepsTheProductRouteAvailableWithoutAcceptanceInjection() 
     #expect(EditorImageExportPolicy.disposition(
         acceptanceDestination: destination
     ) == .direct(destination))
+
+    let pixelSize = PixelSize(width: 2, height: 1)
+    let expectedBytes: [UInt8] = [
+        1, 2, 3, 255,
+        4, 5, 6, 255,
+    ]
+    let correctPNG = try PatternRasterPNGCodec.encode(PatternRasterImage(
+        pixelSize: pixelSize,
+        bgra8PremultipliedBytes: expectedBytes
+    ))
+    let correct = try StageDExportedPNGValidator.validate(
+        correctPNG,
+        expectedPixelSize: pixelSize,
+        expectedBGRA8Bytes: expectedBytes
+    )
+    #expect(correct.pixelSize == pixelSize)
+    #expect(correct.bgra8SHA256.count == 64)
+
+    let wrongPNG = try PatternRasterPNGCodec.encode(PatternRasterImage(
+        pixelSize: pixelSize,
+        bgra8PremultipliedBytes: [
+            9, 9, 9, 255,
+            8, 8, 8, 255,
+        ]
+    ))
+    #expect(throws: StageDExportedPNGValidationError.pixelMismatch) {
+        _ = try StageDExportedPNGValidator.validate(
+            wrongPNG,
+            expectedPixelSize: pixelSize,
+            expectedBGRA8Bytes: expectedBytes
+        )
+    }
 }
 
 @Test
@@ -112,6 +147,13 @@ func stageDRouteConfigurationRequiresEveryDeterministicBoundary() throws {
     #expect(configuration.projectURL.path.hasSuffix("project.patternproj"))
     #expect(configuration.exportURL.path.hasSuffix("export.png"))
     #expect(configuration.gitCommit == String(repeating: "a", count: 40))
+
+    var relativeEnvironment = environment
+    relativeEnvironment[StageDAppRouteConfiguration.manifestEnvironmentKey] =
+        "relative/routes.json"
+    #expect(StageDAppRouteConfiguration(
+        environment: relativeEnvironment
+    ) == nil)
 }
 
 @Test
