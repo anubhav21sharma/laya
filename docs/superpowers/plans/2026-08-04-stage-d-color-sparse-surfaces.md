@@ -2,9 +2,13 @@
 
 **Execution status (2026-08-12):** Tasks 0 through 7 and the non-UI portions of
 Task 8 are complete. Debug/Release/simulator builds, sustained probes, direct
-production-app evidence, and the hosted non-XCTest route are green. The two
-Xcode-hosted `XCUIApplication` checklist items remain pending while a fresh
-automation authorization request is raised after source-control closeout.
+production-app evidence, the hosted non-XCTest route, focused regressions, and
+the Xcode UI-test build are green. Diagnostic `XCUIApplication` runs exercised
+the complete controls/shortcuts/persistence sequence and exposed defects in
+transient-display completion, imported layer-stack adoption, sandbox artifact
+paths, keyboard focus, and evidence routing; focused regressions cover the
+repairs. The two Xcode-hosted checklist items remain pending until the exact
+committed source is run after the requested manual macOS automation approval.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development (recommended) or
@@ -983,24 +987,30 @@ than being repeated after minor edits.
 - [ ] Run the Xcode-hosted app-route gate:
 
   ```bash
+  STAGE_D_ACCEPTANCE_COMMIT="$(git rev-parse HEAD)" \
   xcodebuild test -project App/PatternSpike.xcodeproj \
     -scheme PatternSpikeMac -destination 'platform=macOS' \
-    -resultBundlePath .build/StageDAppRoutes.xcresult \
-    CODE_SIGNING_ALLOWED=NO
+    -only-testing:PatternSpikeMacUITests/StageDAppRouteUITests/testProductionControlsShortcutsAndPersistenceWriteEvidence \
+    -resultBundlePath .build/StageDAppRoutes.xcresult
   ```
 
   Convert its test summary plus the app route manifest into the aggregator
   input and require every named UI scenario above to pass. Never treat a
-  successful app build as UI route evidence.
+  successful app build as UI route evidence. The 2026-08-12 final
+  `build-for-testing` succeeded. A subsequent test invocation reached
+  `XCUIInitializeForUITesting` and waited in
+  `enableAutomationModeWithError`; it was stopped so the authorization prompt
+  can be raised only after commit/push and approved manually as requested.
 - [x] Build `PatternSpikeMac` Debug and Release for `platform=macOS`, and build
   `PatternSpikePad` Debug and Release for `generic/platform=iOS Simulator`, all
   with `CODE_SIGNING_ALLOWED=NO`. Launch the macOS harness route and require a
   completed production JSONL segment; simulator build is compile evidence only.
-- [x] Run the broad suite. It must contain only the exact frozen 27 Stage B issue
-  records and no new issue. A resolved frozen record requires independent
-  evidence plus an explicit reviewed baseline removal; never regenerate the
-  allowlist or golden from current output. Capture the expected nonzero `swift
-  test` output and validate it with
+- [x] Run the broad suite. It must contain only the exact five records in the
+  reviewed Stage D amendment to the immutable 27-record Stage B baseline and
+  no new issue. A resolved frozen record requires independent evidence plus an
+  explicit reviewed baseline removal; never regenerate the allowlist or golden
+  from current output. Capture the expected nonzero `swift test` output and
+  validate it with
   `scripts/verify-swift-testing-baseline.sh`; a raw nonzero status is not by
   itself a regression and a raw green is not a substitute for allowlist
   verification.

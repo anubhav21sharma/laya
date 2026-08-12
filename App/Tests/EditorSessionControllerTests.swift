@@ -1735,6 +1735,40 @@ func replacementSessionPreservesConfirmedSelectionAndPersistenceWiring()
 
 @Test
 @MainActor
+func replacementSessionAdoptsImportedRendererLayerStack() throws {
+    let base = try LayerDescriptor(
+        id: LayerStack.initialLayerID,
+        name: "Imported Base"
+    )
+    let top = try LayerDescriptor(
+        id: controllerLayerID(90),
+        name: "Imported Top",
+        isVisible: false,
+        opacity: 0.5,
+        isLocked: true,
+        blendMode: .screen
+    )
+    let importedStack = try LayerStack(
+        layers: [base, top],
+        activeLayerID: top.id
+    )
+    guard let sourceRenderer = try makeControllerRenderer(),
+          let importedRenderer = try makeControllerRenderer(
+              layerStack: importedStack
+          )
+    else { return }
+    let source = EditorSessionController(renderer: sourceRenderer)
+
+    let replacement = try source.replacementSession(
+        renderer: importedRenderer
+    )
+
+    #expect(replacement.layerStackForTesting == importedStack)
+    #expect(replacement.model.layerStack == importedStack)
+}
+
+@Test
+@MainActor
 func replacementInvalidatesSelectionCompilingOnTheSourceSession()
     async throws
 {

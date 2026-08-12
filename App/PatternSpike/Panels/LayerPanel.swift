@@ -130,6 +130,9 @@ struct LayerPanel: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(layer.isVisible ? "Hide Layer" : "Show Layer")
+            .accessibilityIdentifier(
+                "\(layer.isVisible ? "Hide" : "Show") \(layer.name)"
+            )
 
             Button {
                 perform {
@@ -143,6 +146,9 @@ struct LayerPanel: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(layer.isLocked ? "Unlock Layer" : "Lock Layer")
+            .accessibilityIdentifier(
+                "\(layer.isLocked ? "Unlock" : "Lock") \(layer.name)"
+            )
         }
         .padding(.horizontal, 6)
         .frame(minHeight: editorControlExtent)

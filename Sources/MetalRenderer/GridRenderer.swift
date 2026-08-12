@@ -204,6 +204,35 @@ private struct OffMainStrokeTraceInactivityWatchdog {
 
 @MainActor
 public final class GridRenderer: NSObject, MTKViewDelegate {
+    enum PaintDisplayPreparationAction: Equatable, Sendable {
+        case stable
+        case transient
+        case wait
+        case fail(StrokePreparationAcknowledgementError)
+    }
+
+    nonisolated static func paintDisplayPreparationAction(
+        for status: StrokePreparedFrameAcknowledgementStatus?
+    ) -> PaintDisplayPreparationAction {
+        switch status {
+        case nil, .fulfilled:
+            .stable
+        case .available:
+            .transient
+        case .pending:
+            .wait
+        case let .failed(error):
+            .fail(error)
+        }
+    }
+
+    nonisolated static func isDeferredPaintDisplayPreparationFailure(
+        _ error: Error
+    ) -> Bool {
+        error as? DocumentPaintVisiblePlanControllerError
+            == .transientSourceNotAvailable
+    }
+
     public let device: any MTLDevice
     public let historyByteBudget: Int
     public var layerStack: LayerStack { paintContext.layerStack }
@@ -1742,6 +1771,28 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
               paintDisplayPreparationTask == nil,
               preparedPaintDisplaySubmission == nil
         else { return }
+        let source = activePaintTransientSource
+        let transient: DocumentPaintTransientDisplaySource?
+        switch Self.paintDisplayPreparationAction(
+            for: source?.acknowledgementStatus
+        ) {
+        case .stable:
+            if source?.acknowledgementStatus == .fulfilled {
+                activePaintTransientSource = nil
+            }
+            transient = nil
+        case .transient:
+            transient = source
+        case .wait:
+            return
+        case let .fail(error):
+            let rendererError = MetalRendererError.commandFailed(
+                "transient display acknowledgement failed: \(error)"
+            )
+            paintCommandError = rendererError
+            failActiveOperationIfNeeded(rendererError)
+            return
+        }
         let width = Int(view.drawableSize.width)
         let height = Int(view.drawableSize.height)
         guard width > 0, height > 0 else { return }
@@ -1754,7 +1805,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             return
         }
         paintDisplayPreparationSequence = sequence
-        let transient = activePaintTransientSource
         paintDisplayPreparationTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
@@ -1779,6 +1829,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             } catch {
                 if self.paintDisplayPreparationSequence == sequence {
                     self.paintDisplayPreparationTask = nil
+                    if Self.isDeferredPaintDisplayPreparationFailure(error) {
+                        if self.activePaintTransientSource?
+                            .acknowledgementStatus == .fulfilled
+                        {
+                            self.activePaintTransientSource = nil
+                            self.schedulePaintDisplayPreparation(in: view)
+                        }
+                        return
+                    }
                     self.paintCommandError = (error as? MetalRendererError)
                         ?? .commandFailed(error.localizedDescription)
                     self.failActiveOperationIfNeeded(
@@ -1843,6 +1902,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public func stageDAcceptanceEvidence() async
         -> StageDAcceptanceRendererEvidence
     {
+        try? await paintContext.retryLayerDisplayCompletions()
         let snapshot = await paintContext.snapshot()
         let cpuCaches = [
             snapshot.visiblePlan.cpuPlanCache,

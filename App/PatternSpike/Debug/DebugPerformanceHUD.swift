@@ -75,6 +75,7 @@ struct DebugPerformanceHUD: View {
             RoundedRectangle(cornerRadius: 6)
                 .stroke(.primary.opacity(0.16))
         }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("Debug Performance HUD")
     }
 

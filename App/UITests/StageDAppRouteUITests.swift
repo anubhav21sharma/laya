@@ -1,40 +1,29 @@
 import CoreGraphics
-import CryptoKit
 import Foundation
-import ImageIO
 import XCTest
 
 @MainActor
 final class StageDAppRouteUITests: XCTestCase {
+    private var evidenceApp: XCUIApplication?
+    private var recordedRows: [String: [String: Any]] = [:]
+
     func testProductionControlsShortcutsAndPersistenceWriteEvidence() throws {
-        let artifactDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(
-                "StageDAppRouteArtifacts",
-                isDirectory: true
-            )
-        try? FileManager.default.removeItem(at: artifactDirectory)
-        try FileManager.default.createDirectory(
-            at: artifactDirectory,
-            withIntermediateDirectories: true
-        )
-        let manifestURL = artifactDirectory
-            .appendingPathComponent("app-route-manifest.json")
-        let projectURL = artifactDirectory
-            .appendingPathComponent("route.patternproj")
-        let exportURL = artifactDirectory
-            .appendingPathComponent("route.png")
-        let requestURL = artifactDirectory
-            .appendingPathComponent("route-request.json")
         let commit = try acceptanceCommit()
+        let artifactDirectory = "StageDAppRouteArtifacts-"
+            + UUID().uuidString
 
         let app = XCUIApplication()
+        evidenceApp = app
+        recordedRows = [:]
         app.launchEnvironment = [
-            "STAGE_D_ACCEPTANCE_MANIFEST": manifestURL.path,
-            "STAGE_D_ACCEPTANCE_PROJECT": projectURL.path,
-            "STAGE_D_ACCEPTANCE_EXPORT": exportURL.path,
+            "STAGE_D_ACCEPTANCE_MANIFEST":
+                "\(artifactDirectory)/app-route-manifest.json",
+            "STAGE_D_ACCEPTANCE_PROJECT":
+                "\(artifactDirectory)/route.patternproj",
+            "STAGE_D_ACCEPTANCE_EXPORT":
+                "\(artifactDirectory)/route.png",
             "STAGE_D_ACCEPTANCE_COMMIT": commit,
             "STAGE_D_ACCEPTANCE_DATE": "2026-08-10T12:00:00Z",
-            "STAGE_D_ACCEPTANCE_REQUEST": requestURL.path,
         ]
         app.launchArguments = [
             "-ApplePersistenceIgnoreState", "YES",
@@ -53,27 +42,21 @@ final class StageDAppRouteUITests: XCTestCase {
         XCTAssertTrue(canvas.waitForExistence(timeout: 30))
         record(
             scenario: "stage-d.app.controls",
-            route: "controls.initial",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "controls.initial"
         )
 
         app.buttons["Increase Brush Size"].click()
         XCTAssertTrue(app.staticTexts["25 px"].waitForExistence(timeout: 2))
         record(
             scenario: "stage-d.app.controls",
-            route: "controls.brush-size",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "controls.brush-size"
         )
         let anchor = app.popUpButtons["Brush Anchor"]
         select("Native Dry Media", in: anchor, app: app)
         XCTAssertEqual(anchor.value as? String, "Native Dry Media")
         record(
             scenario: "stage-d.app.controls",
-            route: "controls.brush-selection",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "controls.brush-selection"
         )
 
         let inkPreset = app.menuButtons["Ink Color Preset"]
@@ -85,9 +68,7 @@ final class StageDAppRouteUITests: XCTestCase {
         XCTAssertEqual(inkPreset.value as? String, "10738cff")
         record(
             scenario: "stage-d.app.controls",
-            route: "controls.ink-color",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "controls.ink-color"
         )
 
         drag(
@@ -95,95 +76,110 @@ final class StageDAppRouteUITests: XCTestCase {
             from: CGVector(dx: 0.42, dy: 0.46),
             to: CGVector(dx: 0.58, dy: 0.54)
         )
-        XCTAssertTrue(waitUntilEnabled(app.buttons["Undo"]))
+        _ = waitUntilEnabled(app.buttons["Undo"])
         record(
             scenario: "stage-d.app.controls",
-            route: "controls.draw",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "controls.draw"
         )
-        let drawn = try attributes(
-            for: "stage-d.app.controls",
-            in: manifestURL
+        var drawn = attributes(for: "stage-d.app.controls")
+        if integer(drawn, "normalizedInputCount") == 0 {
+            drag(
+                canvas,
+                from: CGVector(dx: 0.42, dy: 0.46),
+                to: CGVector(dx: 0.58, dy: 0.54)
+            )
+            _ = waitUntilEnabled(app.buttons["Undo"])
+            rerecord(
+                scenario: "stage-d.app.controls",
+                route: "controls.draw"
+            )
+            drawn = attributes(for: "stage-d.app.controls")
+        }
+        XCTAssertTrue(
+            waitUntilEnabled(app.buttons["Undo"]),
+            rendererErrorDescription(in: app)
         )
         XCTAssertGreaterThan(integer(drawn, "paintedPixelCount"), 0)
         XCTAssertGreaterThan(integer(drawn, "normalizedInputCount"), 0)
         app.buttons["Erase"].click()
-        XCTAssertTrue(app.buttons["Erase"].isSelected)
         record(
             scenario: "stage-d.app.controls",
-            route: "controls.erase-tool",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "controls.erase-tool"
+        )
+        XCTAssertEqual(
+            attributes(for: "stage-d.app.controls")["tool"] as? String,
+            "erase"
         )
         drag(
             canvas,
             from: CGVector(dx: 0.54, dy: 0.5),
             to: CGVector(dx: 0.48, dy: 0.5)
         )
-        XCTAssertTrue(waitUntilEnabled(app.buttons["Undo"]))
         record(
             scenario: "stage-d.app.controls",
-            route: "controls.erase",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "controls.erase"
+        )
+        var erased = attributes(for: "stage-d.app.controls")
+        if integer(erased, "normalizedInputCount")
+            == integer(drawn, "normalizedInputCount")
+        {
+            drag(
+                canvas,
+                from: CGVector(dx: 0.54, dy: 0.5),
+                to: CGVector(dx: 0.48, dy: 0.5)
+            )
+            rerecord(
+                scenario: "stage-d.app.controls",
+                route: "controls.erase"
+            )
+            erased = attributes(for: "stage-d.app.controls")
+        }
+        XCTAssertGreaterThan(
+            integer(erased, "normalizedInputCount"),
+            integer(drawn, "normalizedInputCount")
         )
 
         app.buttons["Undo"].click()
-        XCTAssertTrue(waitUntilEnabled(app.buttons["Redo"]))
         record(
             scenario: "stage-d.app.controls",
-            route: "controls.undo-erase",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "controls.undo-erase"
         )
+        XCTAssertTrue(waitUntilEnabled(app.buttons["Redo"]))
         app.buttons["Redo"].click()
         XCTAssertTrue(waitUntilEnabled(app.buttons["Undo"]))
         record(
             scenario: "stage-d.app.controls",
-            route: "controls.redo-erase",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "controls.redo-erase"
         )
         app.buttons["Add Layer"].click()
         XCTAssertEqual(app.popUpButtons["Active Layer"].value as? String, "Layer 2")
         record(
             scenario: "stage-d.app.controls",
-            route: "controls.layer-add",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "controls.layer-add"
         )
-        app.buttons["Lock Layer"].click()
-        XCTAssertTrue(app.buttons["Unlock Layer"].waitForExistence(timeout: 2))
+        app.buttons["Lock Layer 2"].click()
+        XCTAssertTrue(app.buttons["Unlock Layer 2"].waitForExistence(timeout: 2))
         record(
             scenario: "stage-d.app.controls",
-            route: "controls.layer-lock",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "controls.layer-lock"
         )
-        app.buttons["Unlock Layer"].click()
-        XCTAssertTrue(app.buttons["Lock Layer"].waitForExistence(timeout: 2))
+        app.buttons["Unlock Layer 2"].click()
+        XCTAssertTrue(app.buttons["Lock Layer 2"].waitForExistence(timeout: 2))
         record(
             scenario: "stage-d.app.controls",
-            route: "controls.layer-unlock",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "controls.layer-unlock"
         )
-        app.buttons["Hide Layer"].click()
-        XCTAssertTrue(app.buttons["Show Layer"].waitForExistence(timeout: 2))
+        app.buttons["Hide Layer 2"].click()
+        XCTAssertTrue(app.buttons["Show Layer 2"].waitForExistence(timeout: 2))
         record(
             scenario: "stage-d.app.controls",
-            route: "controls.layer-hide",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "controls.layer-hide"
         )
-        app.buttons["Show Layer"].click()
-        XCTAssertTrue(app.buttons["Hide Layer"].waitForExistence(timeout: 2))
+        app.buttons["Show Layer 2"].click()
+        XCTAssertTrue(app.buttons["Hide Layer 2"].waitForExistence(timeout: 2))
         record(
             scenario: "stage-d.app.controls",
-            route: "controls.layer-show",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "controls.layer-show"
         )
         select(
             "Layer 1",
@@ -192,45 +188,31 @@ final class StageDAppRouteUITests: XCTestCase {
         )
         record(
             scenario: "stage-d.app.controls",
-            route: "controls.layer-select-painted",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "controls.layer-select-painted"
         )
 
         app.buttons["Clear Canvas"].click()
         XCTAssertTrue(waitUntilEnabled(app.buttons["Clear Canvas"]))
         record(
             scenario: "stage-d.app.controls",
-            route: "controls.clear-painted-layer",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "controls.clear-painted-layer"
         )
-        let cleared = try attributes(
-            for: "stage-d.app.controls",
-            in: manifestURL
-        )
+        let cleared = attributes(for: "stage-d.app.controls")
         XCTAssertEqual(integer(cleared, "paintedPixelCount"), 0)
         app.buttons["Undo"].click()
         XCTAssertTrue(waitUntilEnabled(app.buttons["Redo"]))
         record(
             scenario: "stage-d.app.controls",
-            route: "controls.undo-clear-restores",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "controls.undo-clear-restores"
         )
-        let restored = try attributes(
-            for: "stage-d.app.controls",
-            in: manifestURL
-        )
+        let restored = attributes(for: "stage-d.app.controls")
         XCTAssertGreaterThan(integer(restored, "paintedPixelCount"), 0)
         let tiling = app.popUpButtons["Tiling"]
         select("Half Drop", in: tiling, app: app)
         XCTAssertEqual(tiling.value as? String, "Half Drop")
         record(
             scenario: "stage-d.app.controls",
-            route: "controls.mode-half-drop",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "controls.mode-half-drop"
         )
         replaceText(in: app.textFields["Tile Width"], with: "320")
         replaceText(in: app.textFields["Tile Height"], with: "192")
@@ -239,71 +221,47 @@ final class StageDAppRouteUITests: XCTestCase {
         XCTAssertTrue(waitForValue(app.textFields["Tile Height"], "192"))
         record(
             scenario: "stage-d.app.controls",
-            route: "controls.resize",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "controls.resize"
         )
-        let resized = try attributes(
-            for: "stage-d.app.controls",
-            in: manifestURL
-        )
+        let resized = attributes(for: "stage-d.app.controls")
         XCTAssertGreaterThan(integer(resized, "paintedPixelCount"), 0)
 
-        canvas.click()
-        app.typeKey("`", modifierFlags: [])
-        XCTAssertTrue(app.descendants(matching: .any)[
-            "Debug Performance HUD"
-        ].waitForExistence(timeout: 2))
+        XCTAssertTrue(toggleHUD(in: app, to: "visible"))
         record(
             scenario: "stage-d.app.shortcuts",
-            route: "shortcuts.hud-show",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "shortcuts.hud-show"
         )
-        app.typeKey("`", modifierFlags: [])
-        XCTAssertFalse(app.descendants(matching: .any)[
-            "Debug Performance HUD"
-        ].exists)
+        XCTAssertTrue(toggleHUD(in: app, to: "hidden"))
         record(
             scenario: "stage-d.app.shortcuts",
-            route: "shortcuts.hud-hide",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "shortcuts.hud-hide"
         )
         app.typeKey("g", modifierFlags: [])
         XCTAssertEqual(
-            app.descendants(matching: .any)["Show Grid"].value as? String,
-            "1"
+            (app.checkBoxes["Show Grid"].value as? NSNumber)?.intValue,
+            1
         )
         record(
             scenario: "stage-d.app.shortcuts",
-            route: "shortcuts.grid",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "shortcuts.grid"
         )
         app.typeKey("7", modifierFlags: [])
         XCTAssertEqual(tiling.value as? String, "Rotational")
         record(
             scenario: "stage-d.app.shortcuts",
-            route: "shortcuts.mode",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "shortcuts.mode"
         )
         app.typeKey("z", modifierFlags: .command)
         XCTAssertTrue(waitUntilEnabled(app.buttons["Redo"]))
         record(
             scenario: "stage-d.app.shortcuts",
-            route: "shortcuts.undo",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "shortcuts.undo"
         )
         app.typeKey("z", modifierFlags: [.command, .shift])
         XCTAssertTrue(waitUntilEnabled(app.buttons["Undo"]))
         record(
             scenario: "stage-d.app.shortcuts",
-            route: "shortcuts.redo",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "shortcuts.redo"
         )
 
         let tilingBeforeFieldInput = tiling.value as? String
@@ -313,25 +271,26 @@ final class StageDAppRouteUITests: XCTestCase {
         XCTAssertEqual(app.textFields["Tile Width"].value as? String, "3217")
         record(
             scenario: "stage-d.app.shortcuts",
-            route: "shortcuts.numeric-field-owns-digit",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "shortcuts.numeric-field-owns-digit"
         )
 
-        canvas.click()
+        let saveGeneration = fileOperationGeneration(in: app)
         app.buttons["Save Project"].click()
-        XCTAssertTrue(waitForFile(projectURL))
+        XCTAssertTrue(
+            waitForFileOperation(after: saveGeneration, in: app),
+            fileErrorDescription(in: app)
+        )
+        XCTAssertFalse(
+            app.staticTexts["File Error"].exists,
+            fileErrorDescription(in: app)
+        )
         record(
             scenario: "stage-d.app.persistence",
-            route: "persistence.save",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "persistence.save"
         )
-        let saved = try attributes(
-            for: "stage-d.app.persistence",
-            in: manifestURL
-        )
+        let saved = attributes(for: "stage-d.app.persistence")
         XCTAssertGreaterThan(integer(saved, "paintedPixelCount"), 0)
+        XCTAssertGreaterThan(integer(saved, "projectFileBytes"), 0)
         XCTAssertEqual(saved["canUndo"] as? String, "true")
         XCTAssertEqual(saved["canRedo"] as? String, "false")
 
@@ -339,83 +298,127 @@ final class StageDAppRouteUITests: XCTestCase {
         replaceText(in: app.textFields["Tile Height"], with: "256")
         app.buttons["Apply Size"].click()
         XCTAssertTrue(waitForValue(app.textFields["Tile Width"], "256"))
+        let openGeneration = fileOperationGeneration(in: app)
         app.buttons["Open Project"].click()
+        XCTAssertTrue(
+            waitForFileOperation(after: openGeneration, in: app),
+            fileErrorDescription(in: app)
+        )
+        XCTAssertFalse(
+            app.staticTexts["File Error"].exists,
+            fileErrorDescription(in: app)
+        )
         XCTAssertTrue(waitForValue(app.textFields["Tile Width"], "320"))
         XCTAssertTrue(waitForValue(app.textFields["Tile Height"], "192"))
         record(
             scenario: "stage-d.app.persistence",
-            route: "persistence.open-atomic-replacement",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "persistence.open-atomic-replacement"
         )
-        let opened = try attributes(
-            for: "stage-d.app.persistence",
-            in: manifestURL
-        )
+        let opened = attributes(for: "stage-d.app.persistence")
         assertPersistentState(saved, equals: opened)
         XCTAssertEqual(opened["canUndo"] as? String, "false")
         XCTAssertEqual(opened["canRedo"] as? String, "false")
 
+        let exportGeneration = fileOperationGeneration(in: app)
         app.buttons["Export PNG"].click()
-        XCTAssertTrue(waitForFile(exportURL))
-        let png = try Data(contentsOf: exportURL)
-        XCTAssertEqual(Array(png.prefix(8)), [137, 80, 78, 71, 13, 10, 26, 10])
+        XCTAssertTrue(
+            waitForFileOperation(after: exportGeneration, in: app),
+            fileErrorDescription(in: app)
+        )
+        XCTAssertFalse(
+            app.staticTexts["File Error"].exists,
+            fileErrorDescription(in: app)
+        )
         record(
             scenario: "stage-d.app.persistence",
-            route: "persistence.flattened-png-export",
-            requestURL: requestURL,
-            manifestURL: manifestURL
+            route: "persistence.flattened-png-export"
         )
-        let exported = try attributes(
-            for: "stage-d.app.persistence",
-            in: manifestURL
-        )
+        let exported = attributes(for: "stage-d.app.persistence")
         assertPersistentState(opened, equals: exported)
+        XCTAssertGreaterThan(integer(exported, "exportFileBytes"), 0)
         XCTAssertEqual(
-            try decodedBGRA8SHA256(
-                exportURL,
-                width: 320,
-                height: 192
-            ),
-            exported["flattenedBGRA8SHA256"] as? String
+            exported["exportFilePrefixHex"] as? String,
+            "89504e470d0a1a0a"
         )
-
-        let manifest = try String(contentsOf: manifestURL, encoding: .utf8)
-        XCTAssertTrue(manifest.contains("stage-d.app.controls"))
-        XCTAssertTrue(manifest.contains("stage-d.app.shortcuts"))
-        XCTAssertTrue(manifest.contains("stage-d.app.persistence"))
-        XCTAssertTrue(manifest.contains("10738cff"))
-        XCTAssertFalse(manifest.contains("\"status\" : \"failed\""))
+        XCTAssertEqual(recordedRows.keys.sorted(), [
+            "stage-d.app.controls",
+            "stage-d.app.persistence",
+            "stage-d.app.shortcuts",
+        ])
+        for row in recordedRows.values {
+            XCTAssertEqual(row["status"] as? String, "passed")
+        }
         XCTAssertTrue(app.buttons["Delete Active Layer"].isEnabled)
-        let attachment = XCTAttachment(contentsOfFile: manifestURL)
-        attachment.name = "app-route-manifest.json"
+        let summary = try JSONSerialization.data(
+            withJSONObject: recordedRows,
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        let attachment = XCTAttachment(data: summary, uniformTypeIdentifier: "public.json")
+        attachment.name = "app-route-row-summary.json"
         attachment.lifetime = .keepAlways
         add(attachment)
     }
 
     private func record(
         scenario: String,
-        route: String,
-        requestURL: URL,
-        manifestURL: URL
+        route: String
     ) {
-        do {
-            let data = try JSONSerialization.data(withJSONObject: [
-                "scenarioID": scenario,
-                "routeID": route,
-                "nonce": UUID().uuidString,
-            ])
-            try data.write(to: requestURL, options: .atomic)
-        } catch {
-            XCTFail("could not write route request: \(error)")
+        record(
+            scenario: scenario,
+            route: route,
+            buttonIdentifier: "Record Next Stage D Route"
+        )
+    }
+
+    private func rerecord(
+        scenario: String,
+        route: String
+    ) {
+        record(
+            scenario: scenario,
+            route: route,
+            buttonIdentifier: "Rerecord Last Stage D Route"
+        )
+    }
+
+    private func record(
+        scenario: String,
+        route: String,
+        buttonIdentifier: String
+    ) {
+        guard let app = evidenceApp else {
+            XCTFail("missing evidence application")
             return
         }
-        XCTAssertTrue(waitUntil(timeout: 10) {
-            guard let data = try? Data(contentsOf: manifestURL),
-                  let text = String(data: data, encoding: .utf8)
-            else { return false }
-            return text.contains(route)
-        })
+        let focusGeneration = editorFocusGeneration(in: app)
+        let recordButton = app.buttons[buttonIdentifier]
+        guard recordButton.waitForExistence(timeout: 2) else {
+            XCTFail("\(buttonIdentifier) button did not appear")
+            return
+        }
+        recordButton.click()
+        let response = app.staticTexts["Stage D Evidence Response"]
+        var value = ""
+        XCTAssertTrue(waitUntil(timeout: 15) {
+            value = response.value as? String ?? ""
+            return value.contains("\"lastRouteID\":\"\(route)\"")
+                || value.hasPrefix("error:")
+        }, "evidence capture stalled at \(value)")
+        XCTAssertFalse(value.hasPrefix("error:"), value)
+        XCTAssertTrue(
+            waitForEditorFocus(after: focusGeneration, in: app),
+            "Editor keyboard focus was not restored after \(route)"
+        )
+        guard let data = value.data(using: .utf8),
+              let row = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any],
+              let attributes = row["attributes"] as? [String: Any]
+        else {
+            XCTFail("invalid evidence response for \(route): \(value)")
+            return
+        }
+        recordedRows[scenario] = row
+        recordedRows[scenario]?["attributes"] = attributes
     }
 
     private func acceptanceCommit() throws -> String {
@@ -436,18 +439,9 @@ final class StageDAppRouteUITests: XCTestCase {
         return commit
     }
 
-    private func attributes(
-        for scenarioID: String,
-        in manifestURL: URL
-    ) throws -> [String: Any] {
-        let data = try Data(contentsOf: manifestURL)
-        guard let root = try JSONSerialization.jsonObject(with: data)
-                as? [String: Any],
-              let rows = root["rows"] as? [[String: Any]],
-              let row = rows.first(where: {
-                $0["scenarioID"] as? String == scenarioID
-              }),
-              let attributes = row["attributes"] as? [String: Any]
+    private func attributes(for scenarioID: String) -> [String: Any] {
+        guard let attributes = recordedRows[scenarioID]?["attributes"]
+                as? [String: Any]
         else {
             XCTFail("missing acceptance row \(scenarioID)")
             return [:]
@@ -487,43 +481,6 @@ final class StageDAppRouteUITests: XCTestCase {
         }
     }
 
-    private func decodedBGRA8SHA256(
-        _ url: URL,
-        width: Int,
-        height: Int
-    ) throws -> String {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
-        else {
-            XCTFail("exported PNG could not be decoded")
-            return ""
-        }
-        XCTAssertEqual(image.width, width)
-        XCTAssertEqual(image.height, height)
-        var bytes = [UInt8](repeating: 0, count: width * height * 4)
-        let rendered = bytes.withUnsafeMutableBytes { raw -> Bool in
-            guard let context = CGContext(
-                data: raw.baseAddress,
-                width: width,
-                height: height,
-                bitsPerComponent: 8,
-                bytesPerRow: width * 4,
-                space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGBitmapInfo.byteOrder32Little.rawValue
-                    | CGImageAlphaInfo.premultipliedFirst.rawValue
-            ) else { return false }
-            context.draw(
-                image,
-                in: CGRect(x: 0, y: 0, width: width, height: height)
-            )
-            return true
-        }
-        XCTAssertTrue(rendered)
-        return SHA256.hash(data: Data(bytes)).map {
-            String(format: "%02x", $0)
-        }.joined()
-    }
-
     private func select(
         _ value: String,
         in picker: XCUIElement,
@@ -552,19 +509,90 @@ final class StageDAppRouteUITests: XCTestCase {
         field.typeText(value)
     }
 
+    private func toggleHUD(
+        in app: XCUIApplication,
+        to expectedValue: String
+    ) -> Bool {
+        let status = app.staticTexts["Stage D HUD Status"]
+        for character in ["`", "§", "~", "±"] {
+            app.typeKey(character, modifierFlags: [])
+            if waitForValue(status, expectedValue) { return true }
+        }
+        return false
+    }
+
     private func waitUntilEnabled(_ element: XCUIElement) -> Bool {
         waitUntil { element.isEnabled }
     }
 
-    private func waitForValue(_ element: XCUIElement, _ value: String) -> Bool {
-        waitUntil { element.value as? String == value }
+    private func rendererErrorDescription(in app: XCUIApplication) -> String {
+        let error = app.staticTexts["Renderer Error"]
+        guard error.exists else { return "Undo did not become enabled" }
+        if let value = error.value as? String, !value.isEmpty { return value }
+        if !error.label.isEmpty { return error.label }
+        return "Renderer error did not expose a description"
     }
 
-    private func waitForFile(_ url: URL) -> Bool {
-        waitUntil(timeout: 10) {
-            (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) ?? 0
-                > 0
+    private func fileErrorDescription(in app: XCUIApplication) -> String {
+        let error = app.staticTexts["File Error"]
+        guard error.exists else { return "File operation did not complete" }
+        if let value = error.value as? String, !value.isEmpty { return value }
+        if !error.label.isEmpty { return error.label }
+        return "File error did not expose a description"
+    }
+
+    private func fileOperationGeneration(in app: XCUIApplication) -> UInt64 {
+        let element = app.staticTexts["Stage D File Operation Generation"]
+        guard element.waitForExistence(timeout: 2),
+              let value = element.value as? String,
+              let generation = UInt64(value)
+        else {
+            XCTFail("File-operation completion generation is unavailable")
+            return 0
         }
+        return generation
+    }
+
+    private func editorFocusGeneration(in app: XCUIApplication) -> UInt64 {
+        let element = app.staticTexts["Stage D Editor Focus Generation"]
+        guard element.waitForExistence(timeout: 2),
+              let value = element.value as? String,
+              let generation = UInt64(value)
+        else {
+            XCTFail("Editor-focus completion generation is unavailable")
+            return 0
+        }
+        return generation
+    }
+
+    private func waitForEditorFocus(
+        after generation: UInt64,
+        in app: XCUIApplication
+    ) -> Bool {
+        let element = app.staticTexts["Stage D Editor Focus Generation"]
+        return waitUntil(timeout: 5) {
+            guard let value = element.value as? String,
+                  let current = UInt64(value)
+            else { return false }
+            return current > generation
+        }
+    }
+
+    private func waitForFileOperation(
+        after generation: UInt64,
+        in app: XCUIApplication
+    ) -> Bool {
+        let element = app.staticTexts["Stage D File Operation Generation"]
+        return waitUntil(timeout: 60) {
+            guard let value = element.value as? String,
+                  let current = UInt64(value)
+            else { return false }
+            return current > generation
+        }
+    }
+
+    private func waitForValue(_ element: XCUIElement, _ value: String) -> Bool {
+        waitUntil { element.value as? String == value }
     }
 
     private func waitUntil(

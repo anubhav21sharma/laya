@@ -8,6 +8,35 @@ import Testing
 @Suite("Grid renderer sparse cutover", .serialized)
 struct GridRendererSparseCutoverTests {
     @Test
+    func displayPreparationWaitsForPendingTransientAcknowledgement() {
+        #expect(
+            GridRenderer.paintDisplayPreparationAction(for: nil) == .stable
+        )
+        #expect(
+            GridRenderer.paintDisplayPreparationAction(for: .available)
+                == .transient
+        )
+        #expect(
+            GridRenderer.paintDisplayPreparationAction(for: .pending) == .wait
+        )
+        #expect(
+            GridRenderer.paintDisplayPreparationAction(for: .fulfilled)
+                == .stable
+        )
+        #expect(
+            GridRenderer.isDeferredPaintDisplayPreparationFailure(
+                DocumentPaintVisiblePlanControllerError
+                    .transientSourceNotAvailable
+            )
+        )
+        #expect(
+            !GridRenderer.isDeferredPaintDisplayPreparationFailure(
+                DocumentPaintVisiblePlanControllerError.staleSubmission
+            )
+        )
+    }
+
+    @Test
     @MainActor
     func delayedGPUCompletionDoesNotInflateCPUPreparationTime()
         async

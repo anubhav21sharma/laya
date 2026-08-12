@@ -128,6 +128,7 @@ struct TilingInspector: View {
         }
         .pickerStyle(.menu)
         .frame(minHeight: editorControlExtent)
+        .accessibilityIdentifier("Tiling")
 
         if controller.model.tiling.supportsSpacingAndOrientation {
             Divider()

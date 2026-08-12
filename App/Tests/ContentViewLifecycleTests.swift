@@ -102,8 +102,6 @@ func stageDRouteConfigurationRequiresEveryDeterministicBoundary() throws {
             String(repeating: "a", count: 40),
         StageDAppRouteConfiguration.dateEnvironmentKey:
             "2026-08-10T12:00:00Z",
-        StageDAppRouteConfiguration.requestEnvironmentKey:
-            directory.appendingPathComponent("request.json").path,
     ]
 
     let configuration = try #require(
@@ -137,21 +135,20 @@ func stageDRouteRecorderBindsAppStatePixelsAndQuiescentSparseOwnership()
             String(repeating: "b", count: 40),
         StageDAppRouteConfiguration.dateEnvironmentKey:
             "2026-08-10T12:00:00Z",
-        StageDAppRouteConfiguration.requestEnvironmentKey:
-            directory.appendingPathComponent("request.json").path,
     ])
     recorder.bind(controller)
 
-    for (scenarioID, routeIDs) in
-        StageDAppRouteRequirements.routeIDsByScenario
-    {
-        for routeID in routeIDs {
-            try await recorder.record(
-                scenarioID: scenarioID,
-                routeID: routeID
-            )
-        }
+    for expectedRoute in StageDAppRouteRequirements.orderedRoutes {
+        let recordedRoute = try await recorder.recordNext()
+        #expect(recordedRoute.scenarioID == expectedRoute.scenarioID)
+        #expect(recordedRoute.routeID == expectedRoute.routeID)
     }
+    let finalRoute = try #require(
+        StageDAppRouteRequirements.orderedRoutes.last
+    )
+    let rerecordedRoute = try await recorder.rerecordLast()
+    #expect(rerecordedRoute.scenarioID == finalRoute.scenarioID)
+    #expect(rerecordedRoute.routeID == finalRoute.routeID)
 
     let decoder = JSONDecoder()
     decoder.dateDecodingStrategy = .iso8601
@@ -201,6 +198,8 @@ private final class LifecycleBrushSelectionStore:
 @Test func debugHUDToggleAcceptsPhysicalGraveAndShiftedTilde() {
     #expect(isDebugHUDToggleCharacter("`"))
     #expect(isDebugHUDToggleCharacter("~"))
+    #expect(isDebugHUDToggleCharacter("§"))
+    #expect(isDebugHUDToggleCharacter("±"))
     #expect(!isDebugHUDToggleCharacter("1"))
     #expect(!isDebugHUDToggleCharacter(""))
 }

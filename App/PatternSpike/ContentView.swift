@@ -185,6 +185,7 @@ struct ContentView: View {
     @State private var fileErrorMessage: String?
     @State private var projectIdentity = PatternProjectIdentity.new()
     @State private var fileOperationBusy = false
+    @State private var fileOperationCompletionGeneration: UInt64 = 0
     @State private var importPresented = false
     @State private var projectExportPresented = false
     @State private var projectExportURL: URL?
@@ -192,6 +193,7 @@ struct ContentView: View {
     @State private var imageExportURL: URL?
     @State private var stageDRouteEvidence = StageDAppRouteEvidenceRecorder()
     @State private var pointerCancellationGeneration: UInt = 0
+    @State private var editorFocusCompletionGeneration: UInt64 = 0
     @FocusState private var focusTarget: EditorFocusTarget?
     #if DEBUG && os(macOS)
     @State private var debugHUDVisible = false
@@ -310,6 +312,15 @@ struct ContentView: View {
                 reportError: { error in
                     fileErrorMessage = error.localizedDescription
                 }
+            )
+            StageDAppRouteEvidenceControl(
+                recorder: stageDRouteEvidence,
+                fileOperationCompletionGeneration:
+                    fileOperationCompletionGeneration,
+                editorFocusCompletionGeneration:
+                    editorFocusCompletionGeneration,
+                debugHUDVisible: stageDDebugHUDVisible,
+                restoreEditorFocus: restoreEditorKeyboardFocus
             )
             Divider()
             HStack(spacing: 0) {
@@ -445,6 +456,15 @@ struct ContentView: View {
         focusTarget = .editor
     }
 
+    private func restoreEditorKeyboardFocus() {
+        focusTarget = nil
+        Task { @MainActor in
+            await Task.yield()
+            focusTarget = .editor
+            editorFocusCompletionGeneration &+= 1
+        }
+    }
+
     private var defaultProjectFilename: String {
         let base = projectIdentity.title
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -470,6 +490,7 @@ struct ContentView: View {
         fileErrorMessage = nil
         fileOperationBusy = true
         Task {
+            defer { completeFileOperation() }
             do {
                 let captured = try await PatternProjectBridge.capture(
                     renderer: controller.renderer,
@@ -532,7 +553,6 @@ struct ContentView: View {
             } catch {
                 fileErrorMessage = error.localizedDescription
             }
-            fileOperationBusy = false
         }
     }
 
@@ -557,6 +577,7 @@ struct ContentView: View {
         fileOperationBusy = true
         fileErrorMessage = nil
         Task {
+            defer { completeFileOperation() }
             do {
                 let decoded = try await Task.detached(
                     priority: .utility
@@ -611,7 +632,6 @@ struct ContentView: View {
             } catch {
                 fileErrorMessage = error.localizedDescription
             }
-            fileOperationBusy = false
         }
     }
 
@@ -625,6 +645,7 @@ struct ContentView: View {
         fileOperationBusy = true
         fileErrorMessage = nil
         Task {
+            defer { completeFileOperation() }
             do {
                 let output = try await controller.renderer
                     .exportFlattenedScene(
@@ -674,8 +695,20 @@ struct ContentView: View {
             } catch {
                 fileErrorMessage = error.localizedDescription
             }
-            fileOperationBusy = false
         }
+    }
+
+    private func completeFileOperation() {
+        fileOperationBusy = false
+        fileOperationCompletionGeneration &+= 1
+    }
+
+    private var stageDDebugHUDVisible: Bool {
+        #if DEBUG && os(macOS)
+        debugHUDVisible
+        #else
+        false
+        #endif
     }
 
     private func cancelCurrentInteraction(
@@ -944,7 +977,7 @@ struct ContentView: View {
 
 #if DEBUG && os(macOS)
 func isDebugHUDToggleCharacter(_ characters: String) -> Bool {
-    characters == "`" || characters == "~"
+    ["`", "~", "§", "±"].contains(characters)
 }
 #endif
 
@@ -958,6 +991,8 @@ private struct ErrorBanner: View {
             Text(error.localizedDescription)
                 .font(.caption)
                 .lineLimit(2)
+                .accessibilityIdentifier("Renderer Error")
+                .accessibilityValue(error.localizedDescription)
             Button(action: dismiss) {
                 Image(systemName: "xmark")
             }
@@ -981,6 +1016,8 @@ private struct FileErrorBanner: View {
             Text(message)
                 .font(.caption)
                 .lineLimit(2)
+                .accessibilityIdentifier("File Error")
+                .accessibilityValue(message)
             Button(action: dismiss) {
                 Image(systemName: "xmark")
             }

@@ -43,8 +43,11 @@ evidence rather than a fresh claim about this host.
 Manual review of 68 candidate cards, any fixes it identifies, catalog
 admission, and qualifying iPad/Pencil/120 Hz/thermal/memory/Wacom evidence
 remain pending; therefore `manualQualityPassed=false`,
-`physicalProfilePassed=false`, and `productAccepted=false`. The Xcode-hosted
-UI route is being requested again after source-control closeout; direct signed
+`physicalProfilePassed=false`, and `productAccepted=false`. The Xcode-hosted UI
+route now builds and its diagnostic runs exercised the complete 29-route
+controls/shortcuts/persistence sequence while driving the final lifecycle,
+project-replacement, focus, and sandbox repairs. Exact-commit execution remains
+pending the requested post-push manual macOS automation approval; direct signed
 production-UI replay and the hosted non-XCTest regression are already green.
 
 The original task-level commit checkpoints are represented by existing

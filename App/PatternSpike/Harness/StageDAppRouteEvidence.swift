@@ -3,6 +3,7 @@ import EditorCore
 @preconcurrency import Foundation
 import MetalRenderer
 import PatternEngine
+import SwiftUI
 
 struct StageDAppRouteConfiguration: Equatable, Sendable {
     static let manifestEnvironmentKey = "STAGE_D_ACCEPTANCE_MANIFEST"
@@ -10,14 +11,12 @@ struct StageDAppRouteConfiguration: Equatable, Sendable {
     static let exportEnvironmentKey = "STAGE_D_ACCEPTANCE_EXPORT"
     static let commitEnvironmentKey = "STAGE_D_ACCEPTANCE_COMMIT"
     static let dateEnvironmentKey = "STAGE_D_ACCEPTANCE_DATE"
-    static let requestEnvironmentKey = "STAGE_D_ACCEPTANCE_REQUEST"
 
     let manifestURL: URL
     let projectURL: URL
     let exportURL: URL
     let gitCommit: String
     let generatedAt: Date
-    let requestURL: URL
 
     init?(environment: [String: String]) {
         guard let manifest = environment[Self.manifestEnvironmentKey],
@@ -25,16 +24,21 @@ struct StageDAppRouteConfiguration: Equatable, Sendable {
               let export = environment[Self.exportEnvironmentKey],
               let commit = environment[Self.commitEnvironmentKey],
               let dateValue = environment[Self.dateEnvironmentKey],
-              let date = ISO8601DateFormatter().date(from: dateValue),
-              let request = environment[Self.requestEnvironmentKey],
-              !request.isEmpty
+              let date = ISO8601DateFormatter().date(from: dateValue)
         else { return nil }
-        manifestURL = URL(fileURLWithPath: manifest)
-        projectURL = URL(fileURLWithPath: project)
-        exportURL = URL(fileURLWithPath: export)
+        manifestURL = Self.artifactURL(manifest)
+        projectURL = Self.artifactURL(project)
+        exportURL = Self.artifactURL(export)
         gitCommit = commit
         generatedAt = date
-        requestURL = URL(fileURLWithPath: request)
+    }
+
+    private static func artifactURL(_ path: String) -> URL {
+        if path.hasPrefix("/") {
+            return URL(fileURLWithPath: path)
+        }
+        return FileManager.default.temporaryDirectory
+            .appendingPathComponent(path)
     }
 }
 
@@ -76,6 +80,16 @@ enum StageDAppRouteRequirements {
             "persistence.flattened-png-export",
         ],
     ]
+
+    static let orderedRoutes: [(scenarioID: String, routeID: String)] = [
+        StageDAcceptanceRequirements.appControls,
+        StageDAcceptanceRequirements.appShortcuts,
+        StageDAcceptanceRequirements.appPersistence,
+    ].flatMap { scenarioID in
+        routeIDsByScenario[scenarioID, default: []].map {
+            (scenarioID: scenarioID, routeID: $0)
+        }
+    }
 }
 
 private struct StageDAppRouteRecord: Codable, Equatable, Sendable {
@@ -107,6 +121,10 @@ private struct StageDAppRouteRecord: Codable, Equatable, Sendable {
     let gpuCachedPlanCount: Int
     let cachedPlanMetalBufferBytes: Int
     let pendingOwnershipCount: Int
+    let retainedSnapshotReferenceCount: Int
+    let projectFileBytes: Int
+    let exportFileBytes: Int
+    let exportFilePrefixHex: String
 }
 
 private struct StageDNormalizedInputRecord:
@@ -244,33 +262,16 @@ final class StageDAppRouteEvidenceRecorder {
     private var normalizedInputs: [StageDNormalizedInputRecord] = []
     private var strokeTimestampOrigin: TimeInterval?
     private var previousNormalizedInput: ((StrokeSample) -> Void)?
-    #if os(macOS)
-    nonisolated(unsafe) private var requestTimer: Timer?
-    private var lastRequestData: Data?
-    #endif
+    private var nextRouteIndex = 0
+    private var lastRecordedRoute: (
+        scenarioID: String,
+        routeID: String
+    )?
 
     init(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) {
         configuration = StageDAppRouteConfiguration(environment: environment)
-        #if os(macOS)
-        if let configuration {
-            requestTimer = Timer.scheduledTimer(
-                withTimeInterval: 0.05,
-                repeats: true
-            ) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    self?.consumeRouteRequest(at: configuration.requestURL)
-                }
-            }
-        }
-        #endif
-    }
-
-    deinit {
-        #if os(macOS)
-        requestTimer?.invalidate()
-        #endif
     }
 
     var isEnabled: Bool { configuration != nil }
@@ -306,25 +307,6 @@ final class StageDAppRouteEvidenceRecorder {
         self.controller = nil
     }
 
-    #if os(macOS)
-    private func consumeRouteRequest(at url: URL) {
-        guard let data = try? Data(contentsOf: url),
-              data != lastRequestData,
-              let object = try? JSONSerialization.jsonObject(with: data)
-                as? [String: String],
-              let scenarioID = object[Self.scenarioUserInfoKey],
-              let routeID = object[Self.routeUserInfoKey]
-        else { return }
-        lastRequestData = data
-        Task { @MainActor [weak self] in
-            try? await self?.record(
-                scenarioID: scenarioID,
-                routeID: routeID
-            )
-        }
-    }
-    #endif
-
     private func recordNormalizedInput(_ sample: StrokeSample) {
         if sample.phase == .began || strokeTimestampOrigin == nil {
             strokeTimestampOrigin = sample.timestamp
@@ -354,24 +336,31 @@ final class StageDAppRouteEvidenceRecorder {
         }
     }
 
-    func record(scenarioID: String, routeID: String) async throws {
+    func record(
+        scenarioID: String,
+        routeID: String,
+        progress: @MainActor (String) -> Void = { _ in }
+    ) async throws {
         guard let configuration, let controller else { return }
         guard let requiredRouteIDs =
                 StageDAppRouteRequirements.routeIDsByScenario[scenarioID],
               requiredRouteIDs.contains(routeID)
         else { return }
 
+        progress("renderer-evidence")
         let rendererEvidence = await controller.renderer
             .stageDAcceptanceEvidence()
+        progress("native-archive")
         let native = try Self.nativeArchiveEvidence(controller.renderer)
+        progress("flattened-export")
         let flattened = try await controller.renderer.exportFlattenedScene(
             pixelSize: controller.model.pixelSize,
             transparentBackground: true
         )
+        progress("manifest")
         let flattenedBytes = flattened.bgra8Bytes
         let history = controller.historyAvailabilityForTesting
         let pendingOwnershipCount = rendererEvidence.activeSnapshotTokenCount
-            + rendererEvidence.aggregateSnapshotReferenceCount
             + rendererEvidence.activeTileLeaseCount
             + rendererEvidence.activeStrokeSurfaceCount
             + rendererEvidence.activeCommandOperationCount
@@ -380,6 +369,8 @@ final class StageDAppRouteEvidenceRecorder {
             + rendererEvidence.pendingPlanCompletionCount
             + rendererEvidence.pendingConsumerCompletionCount
         let stack = controller.currentLayerStack
+        let projectData = try? Data(contentsOf: configuration.projectURL)
+        let exportData = try? Data(contentsOf: configuration.exportURL)
         let record = StageDAppRouteRecord(
             routeID: routeID,
             tool: String(describing: controller.model.tool),
@@ -422,13 +413,75 @@ final class StageDAppRouteEvidenceRecorder {
             gpuCachedPlanCount: rendererEvidence.gpuCachedPlanCount,
             cachedPlanMetalBufferBytes:
                 rendererEvidence.cachedPlanMetalBufferBytes,
-            pendingOwnershipCount: pendingOwnershipCount
+            pendingOwnershipCount: pendingOwnershipCount,
+            retainedSnapshotReferenceCount:
+                rendererEvidence.aggregateSnapshotReferenceCount,
+            projectFileBytes: projectData?.count ?? 0,
+            exportFileBytes: exportData?.count ?? 0,
+            exportFilePrefixHex: exportData.map {
+                $0.prefix(8).map { String(format: "%02x", $0) }.joined()
+            } ?? ""
         )
         var scenarioRecords = records[scenarioID, default: []]
         scenarioRecords.removeAll { $0.routeID == routeID }
         scenarioRecords.append(record)
         records[scenarioID] = scenarioRecords
         try writeManifest(configuration: configuration)
+    }
+
+    func recordNext(
+        progress: @MainActor (String) -> Void = { _ in }
+    ) async throws -> (
+        scenarioID: String,
+        routeID: String
+    ) {
+        guard nextRouteIndex < StageDAppRouteRequirements.orderedRoutes.count
+        else {
+            throw StageDAppRouteEvidenceError.routeSequenceExhausted
+        }
+        let route = StageDAppRouteRequirements.orderedRoutes[nextRouteIndex]
+        try await record(
+            scenarioID: route.scenarioID,
+            routeID: route.routeID,
+            progress: progress
+        )
+        nextRouteIndex += 1
+        lastRecordedRoute = route
+        return route
+    }
+
+    func rerecordLast(
+        progress: @MainActor (String) -> Void = { _ in }
+    ) async throws -> (
+        scenarioID: String,
+        routeID: String
+    ) {
+        guard let route = lastRecordedRoute else {
+            throw StageDAppRouteEvidenceError.noRouteToRerecord
+        }
+        try await record(
+            scenarioID: route.scenarioID,
+            routeID: route.routeID,
+            progress: progress
+        )
+        return route
+    }
+
+    func responseJSON(for scenarioID: String) throws -> String {
+        guard let configuration else { return "" }
+        let data = try Data(contentsOf: configuration.manifestURL)
+        guard let root = try JSONSerialization.jsonObject(with: data)
+                as? [String: Any],
+              let rows = root["rows"] as? [[String: Any]],
+              let row = rows.first(where: {
+                  $0["scenarioID"] as? String == scenarioID
+              })
+        else { return "" }
+        let response = try JSONSerialization.data(
+            withJSONObject: row,
+            options: [.sortedKeys]
+        )
+        return String(decoding: response, as: UTF8.self)
     }
 
     private func writeManifest(
@@ -494,6 +547,11 @@ final class StageDAppRouteEvidenceRecorder {
                     "pendingOwnershipCount": Double(
                         latest.pendingOwnershipCount
                     ),
+                    "retainedSnapshotReferenceCount": Double(
+                        latest.retainedSnapshotReferenceCount
+                    ),
+                    "projectFileBytes": Double(latest.projectFileBytes),
+                    "exportFileBytes": Double(latest.exportFileBytes),
                 ],
                 attributes: [
                     "lastRouteID": latest.routeID,
@@ -513,6 +571,12 @@ final class StageDAppRouteEvidenceRecorder {
                     "showGrid": String(latest.showGrid),
                     "canUndo": String(latest.canUndo),
                     "canRedo": String(latest.canRedo),
+                    "retainedSnapshotReferenceCount": String(
+                        latest.retainedSnapshotReferenceCount
+                    ),
+                    "projectFileBytes": String(latest.projectFileBytes),
+                    "exportFileBytes": String(latest.exportFileBytes),
+                    "exportFilePrefixHex": latest.exportFilePrefixHex,
                     "observedSemanticHash": Self.sha256(semanticData),
                 ]
             )
@@ -806,5 +870,115 @@ final class StageDAppRouteEvidenceRecorder {
 
     private static func sha256(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+private enum StageDAppRouteEvidenceError: LocalizedError {
+    case routeSequenceExhausted
+    case noRouteToRerecord
+
+    var errorDescription: String? {
+        switch self {
+        case .routeSequenceExhausted:
+            "all required Stage D routes have already been recorded"
+        case .noRouteToRerecord:
+            "no Stage D route has been recorded yet"
+        }
+    }
+}
+
+@MainActor
+struct StageDAppRouteEvidenceControl: View {
+    let recorder: StageDAppRouteEvidenceRecorder
+    let fileOperationCompletionGeneration: UInt64
+    let editorFocusCompletionGeneration: UInt64
+    let debugHUDVisible: Bool
+    let restoreEditorFocus: @MainActor () -> Void
+
+    @State private var response = ""
+    @State private var isRecording = false
+
+    var body: some View {
+        if recorder.isEnabled {
+            HStack(spacing: 8) {
+                Button("Record Next Stage D Route") {
+                    captureNextRoute()
+                }
+                .accessibilityIdentifier("Record Next Stage D Route")
+                .disabled(isRecording)
+
+                Button("Rerecord Last Stage D Route") {
+                    rerecordLastRoute()
+                }
+                .accessibilityIdentifier("Rerecord Last Stage D Route")
+                .disabled(isRecording)
+
+                Text(isRecording ? "recording" : "ready")
+                    .accessibilityIdentifier("Stage D Evidence Response")
+                    .accessibilityValue(response)
+
+                Text(debugHUDVisible ? "visible" : "hidden")
+                    .accessibilityIdentifier("Stage D HUD Status")
+                    .accessibilityValue(
+                        debugHUDVisible ? "visible" : "hidden"
+                    )
+
+                Text(String(fileOperationCompletionGeneration))
+                    .accessibilityIdentifier(
+                        "Stage D File Operation Generation"
+                    )
+                    .accessibilityValue(
+                        String(fileOperationCompletionGeneration)
+                    )
+
+                Text(String(editorFocusCompletionGeneration))
+                    .accessibilityIdentifier(
+                        "Stage D Editor Focus Generation"
+                    )
+                    .accessibilityValue(
+                        String(editorFocusCompletionGeneration)
+                    )
+            }
+            .font(.caption)
+            .frame(height: 24)
+        }
+    }
+
+    private func captureNextRoute() {
+        capture { progress in
+            try await recorder.recordNext(progress: progress)
+        }
+    }
+
+    private func rerecordLastRoute() {
+        capture { progress in
+            try await recorder.rerecordLast(progress: progress)
+        }
+    }
+
+    private func capture(
+        _ operation: @escaping @MainActor (
+            @escaping @MainActor (String) -> Void
+        ) async throws -> (
+            scenarioID: String,
+            routeID: String
+        )
+    ) {
+        isRecording = true
+        response = ""
+        Task { @MainActor in
+            do {
+                let route = try await operation { phase in
+                    response = "recording:\(phase)"
+                }
+                response = try recorder.responseJSON(
+                    for: route.scenarioID
+                )
+            } catch {
+                response = "error: \(error.localizedDescription)"
+            }
+            isRecording = false
+            restoreEditorFocus()
+        }
     }
 }

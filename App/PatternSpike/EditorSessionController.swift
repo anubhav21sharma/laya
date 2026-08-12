@@ -730,6 +730,7 @@ final class EditorSessionController {
 
         let replacement = EditorSessionController(
             renderer: replacementRenderer,
+            layerStack: replacementRenderer.layerStack,
             compileDefinition: compileDefinition,
             selectionStore: selectionStore
         )
