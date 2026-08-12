@@ -450,8 +450,28 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private var paintOutputGeometryRevision: UInt64 = 0
     private var paintDisplayPreparationSequence: UInt64 = 0
     private var paintDisplayPreparationTask: Task<Void, Never>?
+    private var retiringPaintDisplayPreparationTask: Task<Void, Never>?
+    private var paintDisplayPreparationRetirementMonitor: Task<Void, Never>?
+    private var activePaintDisplayPreparationRetirementSequence: UInt64?
+    private var nextPaintDisplayPreparationRetirementSequence: UInt64 = 0
+    private var paintDisplayPreparationScheduleCount: UInt64 = 0
     private var preparedPaintDisplaySubmission:
         PreparedLayerCompositeDisplaySubmission?
+    private var paintDisplayPreparationIsSuspended = false
+    package var paintDisplayPreparationIsSuspendedForTesting: Bool {
+        paintDisplayPreparationIsSuspended
+    }
+    package var paintDisplayPreparationIsRetiringForTesting: Bool {
+        retiringPaintDisplayPreparationTask != nil
+    }
+    package var paintDisplayPreparationScheduleCountForTesting: UInt64 {
+        paintDisplayPreparationScheduleCount
+    }
+    package func installPaintDisplayPreparationTaskForTesting(
+        _ task: Task<Void, Never>
+    ) {
+        paintDisplayPreparationTask = task
+    }
     private var activePaintTransientSource:
         DocumentPaintTransientDisplaySource?
     private var paintCommitTask: Task<Void, Never>?
@@ -1767,7 +1787,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     private func schedulePaintDisplayPreparation(in view: MTKView) {
         paintDisplayView = view
-        guard !exclusiveInteractiveCompletionDrainInProgress,
+        guard !paintDisplayPreparationIsSuspended,
+              retiringPaintDisplayPreparationTask == nil,
+              !exclusiveInteractiveCompletionDrainInProgress,
               paintDisplayPreparationTask == nil,
               preparedPaintDisplaySubmission == nil
         else { return }
@@ -1805,6 +1827,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             return
         }
         paintDisplayPreparationSequence = sequence
+        paintDisplayPreparationScheduleCount &+= 1
         paintDisplayPreparationTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
@@ -1846,6 +1869,146 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 }
             }
         }
+    }
+
+    public func suspendPaintDisplayPreparationForCapture(
+        deadlineUptimeNanoseconds: UInt64? = nil
+    ) async throws {
+        guard !paintDisplayPreparationIsSuspended else {
+            throw MetalRendererError.capturePreparationAlreadySuspended
+        }
+        paintDisplayPreparationIsSuspended = true
+        do {
+            guard await awaitRetiringPaintDisplayPreparation(
+                deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+            ) else {
+                throw MetalRendererError.commandFailed(
+                    "retiring paint display preparation exceeded "
+                        + "the capture deadline"
+                )
+            }
+            let pendingPreparation = paintDisplayPreparationTask
+            invalidatePaintDisplayPreparation(reschedule: false)
+            guard await waitForPaintDisplayPreparationTermination(
+                pendingPreparation,
+                deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+            ) else {
+                if let pendingPreparation {
+                    trackRetiringPaintDisplayPreparation(pendingPreparation)
+                }
+                throw MetalRendererError.commandFailed(
+                    "paint display preparation cancellation exceeded "
+                        + "the capture deadline"
+                )
+            }
+            try checkInteractiveCompletionDeadline(
+                deadlineUptimeNanoseconds
+            )
+            try await paintContext.retryLayerDisplayCompletions()
+            try checkInteractiveCompletionDeadline(
+                deadlineUptimeNanoseconds
+            )
+        } catch {
+            paintDisplayPreparationIsSuspended = false
+            if let paintDisplayView {
+                schedulePaintDisplayPreparation(in: paintDisplayView)
+            }
+            throw error
+        }
+    }
+
+    public func resumePaintDisplayPreparationAfterCapture() throws {
+        guard paintDisplayPreparationIsSuspended else {
+            throw MetalRendererError.capturePreparationNotSuspended
+        }
+        paintDisplayPreparationIsSuspended = false
+        if let paintDisplayView {
+            schedulePaintDisplayPreparation(in: paintDisplayView)
+        }
+    }
+
+    private func waitForPaintDisplayPreparationTermination(
+        _ task: Task<Void, Never>?,
+        deadlineUptimeNanoseconds: UInt64?
+    ) async -> Bool {
+        guard let task else { return true }
+        guard let deadlineUptimeNanoseconds else {
+            await task.value
+            return true
+        }
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now < deadlineUptimeNanoseconds else { return false }
+        let pair = AsyncStream<Bool>.makeStream(
+            bufferingPolicy: .bufferingOldest(1)
+        )
+        let completionWaiter = Task {
+            await task.value
+            pair.continuation.yield(true)
+        }
+        let deadlineWaiter = Task {
+            do {
+                try await Task.sleep(
+                    nanoseconds: deadlineUptimeNanoseconds - now
+                )
+                pair.continuation.yield(false)
+            } catch {
+                return
+            }
+        }
+        var iterator = pair.stream.makeAsyncIterator()
+        let completed = await iterator.next() ?? false
+        completionWaiter.cancel()
+        deadlineWaiter.cancel()
+        pair.continuation.finish()
+        return completed
+    }
+
+    private func awaitRetiringPaintDisplayPreparation(
+        deadlineUptimeNanoseconds: UInt64?
+    ) async -> Bool {
+        guard let retiringPaintDisplayPreparationTask else { return true }
+        guard await waitForPaintDisplayPreparationTermination(
+            retiringPaintDisplayPreparationTask,
+            deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+        ) else { return false }
+        clearRetiringPaintDisplayPreparation()
+        return true
+    }
+
+    private func trackRetiringPaintDisplayPreparation(
+        _ task: Task<Void, Never>
+    ) {
+        guard retiringPaintDisplayPreparationTask == nil else { return }
+        nextPaintDisplayPreparationRetirementSequence &+= 1
+        if nextPaintDisplayPreparationRetirementSequence == 0 {
+            nextPaintDisplayPreparationRetirementSequence = 1
+        }
+        let sequence = nextPaintDisplayPreparationRetirementSequence
+        activePaintDisplayPreparationRetirementSequence = sequence
+        retiringPaintDisplayPreparationTask = task
+        paintDisplayPreparationRetirementMonitor = Task {
+            @MainActor [weak self] in
+            await task.value
+            guard let self,
+                  self.activePaintDisplayPreparationRetirementSequence
+                    == sequence
+            else { return }
+            self.retiringPaintDisplayPreparationTask = nil
+            self.paintDisplayPreparationRetirementMonitor = nil
+            self.activePaintDisplayPreparationRetirementSequence = nil
+            if !self.paintDisplayPreparationIsSuspended,
+               let paintDisplayView = self.paintDisplayView
+            {
+                self.schedulePaintDisplayPreparation(in: paintDisplayView)
+            }
+        }
+    }
+
+    private func clearRetiringPaintDisplayPreparation() {
+        paintDisplayPreparationRetirementMonitor?.cancel()
+        paintDisplayPreparationRetirementMonitor = nil
+        retiringPaintDisplayPreparationTask = nil
+        activePaintDisplayPreparationRetirementSequence = nil
     }
 
     private func makePaintDisplaySubmission(
@@ -1988,9 +2151,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 snapshot.visiblePlan.pendingConsumerCompletionCount
                     + completions.reduce(0) {
                         $0 + $1.pendingConsumerCompletionCount
-                    },
+            },
             revisionResidentBytes: snapshot.revisionResidentBytes,
             activeSnapshotTokenCount: snapshot.activeSnapshotTokenCount,
+            // Display preparation closes exact-reference capture before it
+            // publishes a submission. Durable display state owns plan/texture
+            // leases, which are reported separately, never snapshot tokens.
+            retainedDisplaySnapshotTokenCount: 0,
+            retainedHistorySnapshotTokenCount:
+                snapshot.retainedHistorySnapshotTokenCount,
             aggregateSnapshotReferenceCount:
                 snapshot.aggregateSnapshotReferenceCount,
             activeTileLeaseCount: snapshot.activeTileLeaseCount,
@@ -2404,7 +2573,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     /// Awaits a previously requested current stroke commit and returns only
     /// after the Context-owned stroke surface and worker workspace are reusable.
-    public func completePendingInteractiveStrokeAndAwaitIdle() async throws
+    public func completePendingInteractiveStrokeAndAwaitIdle(
+        deadlineUptimeNanoseconds: UInt64? = nil
+    ) async throws
         -> GPUFrameMetrics
     {
         var frames: [GPUFrameMetrics] = []
@@ -2421,17 +2592,43 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         exclusiveInteractiveCompletionDrainInProgress = true
-        let pendingDisplayPreparation = paintDisplayPreparationTask
-        invalidatePaintDisplayPreparation(reschedule: false)
         defer {
             exclusiveInteractiveCompletionDrainInProgress = false
             if let paintDisplayView {
                 schedulePaintDisplayPreparation(in: paintDisplayView)
             }
         }
-        await pendingDisplayPreparation?.value
+        guard await awaitRetiringPaintDisplayPreparation(
+            deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+        ) else {
+            throw MetalRendererError.commandFailed(
+                "retiring paint display preparation exceeded "
+                    + "the stroke completion deadline"
+            )
+        }
+        let pendingDisplayPreparation = paintDisplayPreparationTask
+        invalidatePaintDisplayPreparation(reschedule: false)
+        guard await waitForPaintDisplayPreparationTermination(
+            pendingDisplayPreparation,
+            deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+        ) else {
+            if let pendingDisplayPreparation {
+                trackRetiringPaintDisplayPreparation(
+                    pendingDisplayPreparation
+                )
+            }
+            throw MetalRendererError.commandFailed(
+                "paint display preparation cancellation exceeded "
+                    + "the stroke completion deadline"
+            )
+        }
+        try checkInteractiveCompletionDeadline(deadlineUptimeNanoseconds)
         try await paintContext.retryLayerDisplayCompletions()
         while true {
+            try Task.checkCancellation()
+            try checkInteractiveCompletionDeadline(
+                deadlineUptimeNanoseconds
+            )
             try drainCompletedInteractiveOperations()
             if activeStroke == nil, isIdle { break }
             if let frame = try await renderCurrentPaintFrameForHarness(
@@ -2440,6 +2637,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 includeTransient: true
             ) {
                 frames.append(frame.metrics)
+                try checkInteractiveCompletionDeadline(
+                    deadlineUptimeNanoseconds
+                )
                 continue
             }
             let progress = StrokePreparationAsyncProgressRegistration(
@@ -2451,7 +2651,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             if activeStroke == nil, isIdle { break }
             if progress.currentRevision != observedRevision { continue }
             guard try await progress.waitForProgress(
-                after: observedRevision
+                after: observedRevision,
+                timeoutNanoseconds: try interactiveCompletionWaitNanoseconds(
+                    deadlineUptimeNanoseconds
+                )
             ) else {
                 let snapshot = mailbox.snapshot
                 let context = await paintContext.snapshot()
@@ -2491,6 +2694,34 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             bufferLeaseCount:
                 frames.map(\.bufferLeaseCount).max() ?? 0
         )
+    }
+
+    private func checkInteractiveCompletionDeadline(
+        _ deadlineUptimeNanoseconds: UInt64?
+    ) throws {
+        guard let deadlineUptimeNanoseconds else { return }
+        guard DispatchTime.now().uptimeNanoseconds
+                < deadlineUptimeNanoseconds
+        else {
+            throw MetalRendererError.commandFailed(
+                "stroke completion exceeded its absolute deadline"
+            )
+        }
+    }
+
+    private func interactiveCompletionWaitNanoseconds(
+        _ deadlineUptimeNanoseconds: UInt64?
+    ) throws -> UInt64 {
+        guard let deadlineUptimeNanoseconds else {
+            return 5_000_000_000
+        }
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now < deadlineUptimeNanoseconds else {
+            throw MetalRendererError.commandFailed(
+                "stroke completion exceeded its absolute deadline"
+            )
+        }
+        return min(5_000_000_000, deadlineUptimeNanoseconds - now)
     }
 
     public func awaitPendingStrokeWorkspaceRetirement() async throws {

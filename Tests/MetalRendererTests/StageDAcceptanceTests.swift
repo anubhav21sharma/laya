@@ -418,6 +418,9 @@ struct StageDAcceptanceTests {
         #expect(evidence.pendingPlanCompletionCount == 0)
         #expect(evidence.pendingConsumerCompletionCount == 0)
         #expect(evidence.activeSnapshotTokenCount == 0)
+        #expect(evidence.retainedDisplaySnapshotTokenCount == 0)
+        #expect(evidence.retainedHistorySnapshotTokenCount == 0)
+        #expect(evidence.pendingOwnershipCount == 0)
         #expect(evidence.aggregateSnapshotReferenceCount == 0)
         #expect(evidence.activeTileLeaseCount == 0)
         #expect(evidence.activeStrokeSurfaceCount == 0)
@@ -445,6 +448,47 @@ struct StageDAcceptanceTests {
             BenchmarkRecord.encode(benchmark)
         )
         #expect(decoded.stageDAcceptanceRendererEvidence == evidence)
+
+        var legacyRoot = try #require(
+            JSONSerialization.jsonObject(
+                with: BenchmarkRecord.encode(benchmark)
+            ) as? [String: Any]
+        )
+        var legacyEvidence = try #require(
+            legacyRoot["stageDAcceptanceRendererEvidence"]
+                as? [String: Any]
+        )
+        legacyEvidence.removeValue(
+            forKey: "retainedDisplaySnapshotTokenCount"
+        )
+        legacyEvidence.removeValue(
+            forKey: "retainedHistorySnapshotTokenCount"
+        )
+        legacyRoot["stageDAcceptanceRendererEvidence"] = legacyEvidence
+        let legacy = try BenchmarkRecord.decode(
+            JSONSerialization.data(withJSONObject: legacyRoot)
+        )
+        let legacyDecoded = try #require(
+            legacy.stageDAcceptanceRendererEvidence
+        )
+        #expect(legacyDecoded.retainedDisplaySnapshotTokenCount == 0)
+        #expect(legacyDecoded.retainedHistorySnapshotTokenCount == 0)
+
+        var inconsistentEvidence = legacyEvidence
+        inconsistentEvidence["activeSnapshotTokenCount"] = 1
+        inconsistentEvidence["retainedDisplaySnapshotTokenCount"] = 2
+        inconsistentEvidence["retainedHistorySnapshotTokenCount"] = 0
+        legacyRoot["stageDAcceptanceRendererEvidence"] = inconsistentEvidence
+        let inconsistent = try BenchmarkRecord.decode(
+            JSONSerialization.data(withJSONObject: legacyRoot)
+        )
+        let inconsistentDecoded = try #require(
+            inconsistent.stageDAcceptanceRendererEvidence
+        )
+        #expect(
+            inconsistentDecoded.snapshotOwnershipAccountingMismatchCount == 1
+        )
+        #expect(inconsistentDecoded.pendingOwnershipCount == 1)
     }
 
     private func row(

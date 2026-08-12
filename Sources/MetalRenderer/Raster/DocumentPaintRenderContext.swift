@@ -138,6 +138,7 @@ struct DocumentPaintRenderContextSnapshot:
     let backingTileBytes: Int
     let tileIndexEntryCount: Int
     let activeSnapshotTokenCount: Int
+    let retainedHistorySnapshotTokenCount: Int
     let aggregateSnapshotReferenceCount: Int
     let activeTileLeaseCount: Int
     let snapshotMetadataByteCount: Int
@@ -702,6 +703,10 @@ final class DocumentPaintRenderContext {
             tileIndexEntryCount: tileStoreSnapshot.tileIndexEntryCount,
             activeSnapshotTokenCount:
                 tileStoreSnapshot.activeSnapshotTokenCount,
+            retainedHistorySnapshotTokenCount:
+                layerHistoryRevisions.values.reduce(into: 0) {
+                    if $1.retainedBytes > 0 { $0 += 1 }
+                },
             aggregateSnapshotReferenceCount:
                 tileStoreSnapshot.aggregateSnapshotReferenceCount,
             activeTileLeaseCount: tileStoreSnapshot.activeLeaseCount,

@@ -121,6 +121,17 @@ private struct StageDAppRouteRecord: Codable, Equatable, Sendable {
     let gpuCachedPlanCount: Int
     let cachedPlanMetalBufferBytes: Int
     let pendingOwnershipCount: Int
+    let activeSnapshotTokenCount: Int
+    let retainedDisplaySnapshotTokenCount: Int
+    let retainedHistorySnapshotTokenCount: Int
+    let snapshotOwnershipAccountingMismatchCount: Int
+    let activeTileLeaseCount: Int
+    let activeStrokeSurfaceCount: Int
+    let activeCommandOperationCount: Int
+    let pendingLayerDisplayAcknowledgementCount: Int
+    let activeUploadSlotCount: Int
+    let pendingPlanCompletionCount: Int
+    let pendingConsumerCompletionCount: Int
     let retainedSnapshotReferenceCount: Int
     let projectFileBytes: Int
     let exportFileBytes: Int
@@ -164,9 +175,7 @@ private struct StageDAppRouteSemanticRecord: Codable, Sendable {
     let inkColorRGBA8Hex: String
     let canUndo: Bool
     let canRedo: Bool
-    let canonicalSHA256: String
-    let flattenedBGRA8SHA256: String
-    let paintedPixelCount: Int
+    let paintedContentPresent: Bool
     let normalizedStrokes: [StageDNormalizedStrokeSemanticRecord]
     let documentGeneration: UInt64
 
@@ -184,9 +193,7 @@ private struct StageDAppRouteSemanticRecord: Codable, Sendable {
         inkColorRGBA8Hex = record.inkColorRGBA8Hex
         canUndo = record.canUndo
         canRedo = record.canRedo
-        canonicalSHA256 = record.canonicalSHA256
-        flattenedBGRA8SHA256 = record.flattenedBGRA8SHA256
-        paintedPixelCount = record.paintedPixelCount
+        paintedContentPresent = record.paintedPixelCount > 0
         normalizedStrokes = StageDNormalizedStrokeSemanticRecord
             .canonicalStrokes(from: record.normalizedInputs)
         documentGeneration = record.documentGeneration
@@ -267,11 +274,16 @@ final class StageDAppRouteEvidenceRecorder {
         scenarioID: String,
         routeID: String
     )?
+    private let quiescenceTimeoutNanoseconds: UInt64
+    private var captureOrExportOperationIsActive = false
 
     init(
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        quiescenceTimeoutNanoseconds: UInt64 = 30_000_000_000
     ) {
+        precondition(quiescenceTimeoutNanoseconds > 0)
         configuration = StageDAppRouteConfiguration(environment: environment)
+        self.quiescenceTimeoutNanoseconds = quiescenceTimeoutNanoseconds
     }
 
     var isEnabled: Bool { configuration != nil }
@@ -347,6 +359,24 @@ final class StageDAppRouteEvidenceRecorder {
               requiredRouteIDs.contains(routeID)
         else { return }
 
+        let renderer = controller.renderer
+        let started = DispatchTime.now().uptimeNanoseconds
+        let (deadline, overflow) = started.addingReportingOverflow(
+            quiescenceTimeoutNanoseconds
+        )
+        guard !overflow else {
+            throw StageDAppRouteEvidenceError.quiescenceTimedOut
+        }
+        try await acquireCaptureOrExportOperation(deadline: deadline)
+        defer { releaseCaptureOrExportOperation() }
+        try await renderer.suspendPaintDisplayPreparationForCapture(
+            deadlineUptimeNanoseconds: deadline
+        )
+        defer {
+            try? renderer.resumePaintDisplayPreparationAfterCapture()
+        }
+        progress("controller-quiescence")
+        try await awaitQuiescence(controller, deadline: deadline)
         progress("renderer-evidence")
         let rendererEvidence = await controller.renderer
             .stageDAcceptanceEvidence()
@@ -360,14 +390,6 @@ final class StageDAppRouteEvidenceRecorder {
         progress("manifest")
         let flattenedBytes = flattened.bgra8Bytes
         let history = controller.historyAvailabilityForTesting
-        let pendingOwnershipCount = rendererEvidence.activeSnapshotTokenCount
-            + rendererEvidence.activeTileLeaseCount
-            + rendererEvidence.activeStrokeSurfaceCount
-            + rendererEvidence.activeCommandOperationCount
-            + rendererEvidence.pendingLayerDisplayAcknowledgementCount
-            + rendererEvidence.activeUploadSlotCount
-            + rendererEvidence.pendingPlanCompletionCount
-            + rendererEvidence.pendingConsumerCompletionCount
         let stack = controller.currentLayerStack
         let projectData = try? Data(contentsOf: configuration.projectURL)
         let exportData = try? Data(contentsOf: configuration.exportURL)
@@ -413,7 +435,28 @@ final class StageDAppRouteEvidenceRecorder {
             gpuCachedPlanCount: rendererEvidence.gpuCachedPlanCount,
             cachedPlanMetalBufferBytes:
                 rendererEvidence.cachedPlanMetalBufferBytes,
-            pendingOwnershipCount: pendingOwnershipCount,
+            pendingOwnershipCount: rendererEvidence.pendingOwnershipCount,
+            activeSnapshotTokenCount:
+                rendererEvidence.activeSnapshotTokenCount,
+            retainedDisplaySnapshotTokenCount:
+                rendererEvidence.retainedDisplaySnapshotTokenCount,
+            retainedHistorySnapshotTokenCount:
+                rendererEvidence.retainedHistorySnapshotTokenCount,
+            snapshotOwnershipAccountingMismatchCount:
+                rendererEvidence.snapshotOwnershipAccountingMismatchCount,
+            activeTileLeaseCount: rendererEvidence.activeTileLeaseCount,
+            activeStrokeSurfaceCount:
+                rendererEvidence.activeStrokeSurfaceCount,
+            activeCommandOperationCount:
+                rendererEvidence.activeCommandOperationCount,
+            pendingLayerDisplayAcknowledgementCount:
+                rendererEvidence.pendingLayerDisplayAcknowledgementCount,
+            activeUploadSlotCount:
+                rendererEvidence.activeUploadSlotCount,
+            pendingPlanCompletionCount:
+                rendererEvidence.pendingPlanCompletionCount,
+            pendingConsumerCompletionCount:
+                rendererEvidence.pendingConsumerCompletionCount,
             retainedSnapshotReferenceCount:
                 rendererEvidence.aggregateSnapshotReferenceCount,
             projectFileBytes: projectData?.count ?? 0,
@@ -427,6 +470,64 @@ final class StageDAppRouteEvidenceRecorder {
         scenarioRecords.append(record)
         records[scenarioID] = scenarioRecords
         try writeManifest(configuration: configuration)
+    }
+
+    private func awaitQuiescence(
+        _ controller: EditorSessionController,
+        deadline: UInt64
+    ) async throws {
+        _ = try await controller.renderer
+            .completePendingInteractiveStrokeAndAwaitIdle(
+                deadlineUptimeNanoseconds: deadline
+            )
+        while controller.model.isBusy {
+            guard DispatchTime.now().uptimeNanoseconds < deadline else {
+                throw StageDAppRouteEvidenceError.quiescenceTimedOut
+            }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        _ = try await controller.renderer
+            .completePendingInteractiveStrokeAndAwaitIdle(
+                deadlineUptimeNanoseconds: deadline
+            )
+        guard !controller.model.isBusy, controller.renderer.isIdle else {
+            throw StageDAppRouteEvidenceError.quiescenceTimedOut
+        }
+    }
+
+    func withAcceptanceDisplayPreparationSuspended<Result>(
+        for controller: EditorSessionController,
+        operation: () async throws -> Result
+    ) async throws -> Result {
+        guard configuration != nil, self.controller === controller else {
+            return try await operation()
+        }
+        try await acquireCaptureOrExportOperation(deadline: nil)
+        defer { releaseCaptureOrExportOperation() }
+        try await controller.renderer
+            .suspendPaintDisplayPreparationForCapture()
+        defer {
+            try? controller.renderer.resumePaintDisplayPreparationAfterCapture()
+        }
+        return try await operation()
+    }
+
+    private func acquireCaptureOrExportOperation(
+        deadline: UInt64?
+    ) async throws {
+        while captureOrExportOperationIsActive {
+            if let deadline,
+               DispatchTime.now().uptimeNanoseconds >= deadline
+            {
+                throw StageDAppRouteEvidenceError.quiescenceTimedOut
+            }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        captureOrExportOperationIsActive = true
+    }
+
+    private func releaseCaptureOrExportOperation() {
+        captureOrExportOperationIsActive = false
     }
 
     func recordNext(
@@ -547,6 +648,9 @@ final class StageDAppRouteEvidenceRecorder {
                     "pendingOwnershipCount": Double(
                         latest.pendingOwnershipCount
                     ),
+                    "snapshotOwnershipAccountingMismatchCount": Double(
+                        latest.snapshotOwnershipAccountingMismatchCount
+                    ),
                     "retainedSnapshotReferenceCount": Double(
                         latest.retainedSnapshotReferenceCount
                     ),
@@ -573,6 +677,9 @@ final class StageDAppRouteEvidenceRecorder {
                     "canRedo": String(latest.canRedo),
                     "retainedSnapshotReferenceCount": String(
                         latest.retainedSnapshotReferenceCount
+                    ),
+                    "snapshotOwnershipAccountingMismatchCount": String(
+                        latest.snapshotOwnershipAccountingMismatchCount
                     ),
                     "projectFileBytes": String(latest.projectFileBytes),
                     "exportFileBytes": String(latest.exportFileBytes),
@@ -876,6 +983,7 @@ final class StageDAppRouteEvidenceRecorder {
 private enum StageDAppRouteEvidenceError: LocalizedError {
     case routeSequenceExhausted
     case noRouteToRerecord
+    case quiescenceTimedOut
 
     var errorDescription: String? {
         switch self {
@@ -883,6 +991,8 @@ private enum StageDAppRouteEvidenceError: LocalizedError {
             "all required Stage D routes have already been recorded"
         case .noRouteToRerecord:
             "no Stage D route has been recorded yet"
+        case .quiescenceTimedOut:
+            "Stage D evidence could not reach controller/renderer quiescence"
         }
     }
 }

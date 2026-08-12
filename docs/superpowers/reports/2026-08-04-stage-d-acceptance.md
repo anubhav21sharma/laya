@@ -1,38 +1,40 @@
 # Stage D Color And Sparse Surface Acceptance Checkpoint
 
-Status: **not accepted — implementation verified; external evidence blocked**
+Status: **not accepted — Xcode UI gate passed; timing/profile evidence pending**
 
 Scope: Stage D Tasks 0 through 8 on the current-only native project and brush
 cutovers. Stage E remains closed.
 
 Stage D base revision: `ca5dff5`
 
-Task 8 acceptance work remains intentionally uncommitted while this report is
-not accepted. No commit, push, or final acceptance manifest was produced.
+The complete 29-route Xcode UI sequence now executes. The definitive
+final-source diagnostic manifest is bound to `f5d3748` while the final
+synchronization/accounting fix is uncommitted, so it is not reused as
+clean-commit acceptance evidence. No final two-run aggregate acceptance
+manifest has been produced.
 
-Execution date: 2026-08-11 (Asia/Kolkata)
+Execution date: 2026-08-12 (Asia/Kolkata)
 
 ## Decision
 
 The locally executable implementation, package tests, Metal ownership and
 allocation gates, product builds, broad regression boundary, app-route source
-boundary, and independent review are complete. Stage D is nevertheless **not
-accepted** because the remaining mandatory evidence cannot be produced on this
-host:
+boundary, exact Xcode-hosted UI route, and independent review are complete.
+Stage D is nevertheless **not accepted** because these mandatory boundaries
+remain:
 
-1. the Xcode-hosted macOS UI worker does not materialize the test process, so
-   zero XCUI tests execute and no app-route manifest is written;
-2. the native-wall event-to-submit gate cannot be satisfied on the Apple
-   Paravirtual GPU host; the unchanged requirement is `<=1%` on native hardware;
+1. the native-wall event-to-submit gate cannot be satisfied on the Apple
+   Paravirtual GPU host; the unchanged requirement is `<=1%` on qualifying
+   native hardware;
+2. the final acceptance script still requires two clean-commit runs from fresh
+   roots with stable semantics and no resource growth; and
 3. physical iPad/Pencil/Wacom/ProMotion/thermal/memory-pressure evidence is not
-   available; and
-4. the final acceptance script requires two clean-commit runs from fresh roots,
-   which is intentionally impossible while the reviewed implementation remains
-   an uncommitted dirty working tree.
+   available.
 
-The user directed work to continue without waiting for hardware review. That
-made the unavailable physical evidence nonblocking for implementation and local
-verification, but it does not weaken the fail-closed acceptance contract.
+The user approved the one required macOS UI Automation prompt. No sudo was
+needed and no further XCTest authorization is pending. Unavailable qualifying
+hardware remains nonblocking for implementation and local verification, but it
+does not weaken the fail-closed acceptance contract.
 
 ## Implemented Task 8 evidence boundary
 
@@ -76,14 +78,15 @@ before replacement and intentionally reset after reopen.
 
 ## Focused Stage D package matrix
 
-The serial acceptance groups passed **637 tests**:
+The serial acceptance groups passed **638 tests** after adding the retained
+resize-history ownership regression:
 
 | Group | Result |
 | --- | ---: |
 | Color | 26 tests / 3 suites |
 | Sparse sampling | 220 tests / 5 suites |
 | Stroke lifecycle | 176 tests / 3 suites |
-| Modes | 49 tests / 3 suites |
+| Modes | 50 tests / 3 suites |
 | Layers | 32 tests / 2 suites |
 | Persistence/export | 36 tests / 4 suites |
 | Negative controls | 98 tests / 4 suites |
@@ -92,9 +95,12 @@ The matrix covers independent color vectors, sparse seam/corner/page-table
 selection, terminal failure and immediate reuse, every current periodic/radial
 mode, one-through-eight-layer linear-premultiplied composition, exact schema-4
 streaming, current-only rejection, stable identities, flattened output, and
-real mutation controls. The final focused app-route recorder regression passed
-1/1 after the semantic-route hardening; its broader bridge/color group had
-already passed 8/8.
+real mutation controls. The post-fix app/renderer/acceptance/resize/mode/export
+selection passed 100/100 in four suites. The final review-fix selection passed
+104/104, including legacy evidence decoding, fail-closed ownership mismatch,
+capture/export serialization, a global deadline, cancellation-insensitive
+display-preparation retirement, deterministic gesture semantics, pending-stroke
+quiescence, and retained resize-history ownership.
 
 ## Allocation and sustained accelerated trace
 
@@ -152,9 +158,12 @@ The final source tree passed:
 - dual-architecture `PatternSpikePad` Debug for iOS Simulator; and
 - dual-architecture `PatternSpikePad` Release for iOS Simulator.
 
-All Xcode commands set `CODE_SIGNING_ALLOWED=NO`, including the acceptance
-script, so local signing state is not an implicit build prerequisite. The final
-build-log hashes are listed under Evidence.
+The Debug/Release product and simulator build matrix sets
+`CODE_SIGNING_ALLOWED=NO`. XCUIApplication has a separate Debug
+`build-for-testing` root that uses Xcode's local ad-hoc **Sign to Run Locally**
+identity; UI Automation cannot materialize an unsigned runner and requires no
+developer certificate or external signing credential. The final build-log
+hashes are listed under Evidence.
 
 ## Production wall-trace blocker
 
@@ -169,17 +178,58 @@ showing CPU, GPU, or queue backlog.
 No threshold was raised and no blocking wait was introduced. The wall gate
 must be rerun on a native GPU/macOS host.
 
-## Xcode UI route blocker
+## Xcode UI route gate
 
-The final `test-without-building` attempt used the successfully built macOS UI
-bundle and signing-disabled configuration. Xcode remained at “waiting for
-workers to materialize”; the worker was idle with no app or test process, so it
-was interrupted rather than allowed to wait indefinitely.
+The earlier worker stall was a stale `testmanagerd` authorization state. After
+the user approved the macOS **Enable UI Automation** prompt, the signed test
+runner launched the production app and executed the exact required method:
 
-The result bundle reports one runner-level `Testing was canceled` failure,
-**0 passed tests**, and no executed test body. Consequently no app-route
-manifest exists. Package hosting/controller tests and a successful UI-target
-build do not substitute for the exact `XCUIApplication` route.
+```text
+StageDAppRouteUITests.testProductionControlsShortcutsAndPersistenceWriteEvidence
+1 test passed, 0 failures, 156.435 seconds
+```
+
+The timestamped log proves active progress through real clicks, drags, key
+events, accessibility assertions, evidence captures, and file operations. It
+completed all 29 routes: 19 controls, 7 shortcuts, and 3 persistence routes.
+Every scenario row passed with `pendingOwnershipCount=0` and
+`snapshotOwnershipAccountingMismatchCount=0`. Save wrote a 528,086-byte
+schema-4 project; reopen replaced the controller and reset history; export
+wrote a 6,088-byte PNG with the required signature and matching flattened
+content.
+
+A second diagnostic run proved the acceptance wrapper's corrected signing and
+build separation: a fresh locally ad-hoc signed `build-for-testing` root fed
+`test-without-building`, and the exact test passed again with zero failures in
+198.722 seconds. Its xcresult summary reports `result=Passed`, one total test,
+one passed test, and no failures or skips. The wrapper timeout is 300 seconds,
+which leaves bounded headroom over both measured healthy runs while preserving
+fail-closed termination.
+
+Three later successful diagnostic manifests were compared directly. Their raw
+macOS gesture streams contained different intermediate sample counts and
+produced different exact raster hashes, as expected for accessibility-driven
+mouse delivery, while each run independently proved exact undo/redo and
+save/open/export equality. The cross-run semantic projection now hashes the
+canonicalized stroke endpoints and state transitions rather than nondeterministic
+intermediate delivery. All three app-route semantic hashes and all six compared
+resource metrics are identical between the runs; both report zero pending and
+zero ownership-accounting mismatch.
+
+The initial authorized run exposed evidence races rather than a false hang:
+capture could overlap pending stroke completion, and flattened export could
+contend with display preparation. The recorder now drives renderer/controller
+quiescence, serializes display preparation around capture/export, returns early
+on a timed-out response, and reports durable resize undo-history snapshot
+ownership separately from pending work. Focused regressions cover both pending
+stroke capture and retained resize history. The definitive final-source run
+passed in 156.435 seconds after all review fixes, including the timed-out task
+retirement quarantine.
+
+This successful run is diagnostic rather than the final acceptance aggregate:
+its manifest identifies `f5d3748` while the synchronization fix was still in
+the working tree. The acceptance script must rerun it against the new clean
+commit in each of its two fresh roots.
 
 ## Environment and physical-evidence boundary
 
@@ -209,8 +259,20 @@ timing in semantic hashes. Commands were separated, clear was bound to the
 painted layer with exact undo restoration, and semantic strokes were quantized
 without timestamps.
 
-The final independent re-review reported **no remaining Critical or Important
-issues**. This review gate is complete; it is no longer an acceptance blocker.
+The prior independent re-review reported no remaining Critical or Important
+issues for its source snapshot. A new review of the capture-quiescence fix
+found no Critical issue and three Important issues: legacy evidence decoding,
+fail-open display/history token classification, and a drain whose inactivity
+timeout did not impose one global deadline. The fixes now default missing
+legacy counters to zero, count inconsistent ownership as pending, classify
+display submissions according to their actual lease-only ownership, and pass
+one monotonic deadline through the full capture drain. Follow-up review then
+found overlapping capture/export acquisition and timed-out display-preparation
+retirement races. The final implementation serializes capture/export work,
+quarantines timed-out preparation until it retires, suppresses replacement
+scheduling during retirement, and schedules exactly once afterward. The final
+independent re-review reported no Critical, Important, or Minor findings and
+independently passed 49 focused tests. The review gate is complete.
 
 ## Evidence
 
@@ -224,16 +286,28 @@ issues**. This review gate is complete; it is no longer an acceptance blocker.
   (`4cd1e336721bde3dccc11978d3ca5e7e20526d18fbb5aca9cccd2a080fb116a2`)
 - iPad Simulator Release build log: `.build/stage-d-pad-release-reviewed.log`
   (`cff11876a13a1e0e4c91c42b13ed56dfc907a8c61c1f35ef49f46423ddc4d933`)
-- UI result: `.build/StageDAppRoutes.semantic.xcresult`
-  (0 passed tests; runner canceled before materialization)
+- Post-fix focused log:
+  `.build/brush-corrective-verification/stage-d-final-focused.log`
+  (104 tests / 4 suites passed)
+- UI log:
+  `.build/brush-corrective-verification/stage-d-definitive-ui-test.log`
+  (`c998d124b21192a502ae6c5e8f6bafc4a0b88fa970d5fafbc90387d481f3bd0a`)
+- UI result: `.build/StageDAppRoutes-definitive.xcresult`
+  (1 passed test / 0 failures / 156.435 seconds)
+- App-route manifest SHA-256:
+  `0e24b9e99019a96cfdb9744d80e1dcf0a2a5238374d4b69a0d28056667ac4e42`
+- Saved project SHA-256:
+  `1e26e764e9d5cc490c4e7f5ae742022072ece1f505bf34e0bddc75c5287a6703`
+- Exported PNG SHA-256:
+  `84f6461ff52d9f2cd6f0a1fc6c0cb90a2dad448adedc17f5fb1edb3a634a816c`
 
 These execution artifacts are local and intentionally uncommitted.
 
 ## Exit boundary
 
-Stage D remains open and Stage E must not start. To change this report to
-`accepted`, run the fail-closed acceptance script twice from clean fresh roots
-on a native GPU host with working Xcode UI automation, obtain identical
-semantic hashes and wall miss fraction `<=1%`, and attach the required physical-
-device evidence. The independent review and all locally executable software
-gates are already complete.
+Stage D remains open. To change this report to `accepted`, commit the current
+fix, run the fail-closed acceptance script twice from clean fresh roots on a
+qualifying native GPU host, obtain identical semantic hashes and wall miss
+fraction `<=1%`, and attach the required physical-device evidence. Xcode UI
+Automation and every other locally executable software gate are now working;
+the current-diff independent review is complete.

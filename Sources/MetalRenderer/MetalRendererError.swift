@@ -28,6 +28,8 @@ public enum MetalRendererError: Error, Equatable, LocalizedError, Sendable {
     case documentDomainLocked
     case tilingChangeRequiresIdle
     case invalidStrokeLifecycle
+    case capturePreparationAlreadySuspended
+    case capturePreparationNotSuspended
     case unsupportedBrushProgram
     case compiledBrushUnavailable(StrokeCompositeMode)
     case compiledBrushIdentityMismatch
@@ -102,6 +104,10 @@ public enum MetalRendererError: Error, Equatable, LocalizedError, Sendable {
             "Tiling can only change while the renderer is idle."
         case .invalidStrokeLifecycle:
             "The requested stroke transition is invalid."
+        case .capturePreparationAlreadySuspended:
+            "Paint display preparation is already suspended for capture."
+        case .capturePreparationNotSuspended:
+            "Paint display preparation is not suspended for capture."
         case .unsupportedBrushProgram:
             "The current renderer cannot render this brush program."
         case let .compiledBrushUnavailable(mode):

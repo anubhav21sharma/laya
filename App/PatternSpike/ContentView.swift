@@ -647,11 +647,15 @@ struct ContentView: View {
         Task {
             defer { completeFileOperation() }
             do {
-                let output = try await controller.renderer
-                    .exportFlattenedScene(
-                        pixelSize: controller.model.pixelSize,
-                        transparentBackground: true
-                    )
+                let output = try await stageDRouteEvidence
+                    .withAcceptanceDisplayPreparationSuspended(
+                        for: controller
+                    ) {
+                        try await controller.renderer.exportFlattenedScene(
+                            pixelSize: controller.model.pixelSize,
+                            transparentBackground: true
+                        )
+                    }
                 let written = try await Task.detached(priority: .utility) {
                     let destination: URL
                     let presentsExporter: Bool

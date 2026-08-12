@@ -1,14 +1,18 @@
 # Stage D Color And Sparse Paint Surfaces Implementation Plan
 
-**Execution status (2026-08-12):** Tasks 0 through 7 and the non-UI portions of
-Task 8 are complete. Debug/Release/simulator builds, sustained probes, direct
-production-app evidence, the hosted non-XCTest route, focused regressions, and
-the Xcode UI-test build are green. Diagnostic `XCUIApplication` runs exercised
-the complete controls/shortcuts/persistence sequence and exposed defects in
-transient-display completion, imported layer-stack adoption, sandbox artifact
-paths, keyboard focus, and evidence routing; focused regressions cover the
-repairs. The two Xcode-hosted checklist items remain pending until the exact
-committed source is run after the requested manual macOS automation approval.
+**Execution status (2026-08-12):** Tasks 0 through 7 and the locally executable
+portions of Task 8 are complete. Debug/Release/simulator builds, sustained
+probes, direct production-app evidence, the hosted non-XCTest route, focused
+regressions, and the exact `XCUIApplication` route gate are green. The user
+approved macOS UI Automation; no sudo was needed. Signed diagnostic runs now
+exercise all 29 controls/shortcuts/persistence routes with one test passed and
+zero failures, including a wrapper-style `build-for-testing` plus
+`test-without-building` run. The gate exposed defects in transient-display
+completion, imported layer-stack adoption, sandbox artifact paths, keyboard
+focus, evidence routing, capture quiescence, and durable history accounting;
+focused regressions cover the repairs, and the final review reported no
+Critical, Important, or Minor findings. Two fresh clean-commit aggregate runs,
+the strict native-wall threshold, and physical-device evidence remain pending.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development (recommended) or
@@ -947,7 +951,7 @@ than being repeated after minor edits.
   deterministic temporary open/save/export URLs at launch so automation never
   depends on a native file-dialog interaction, while still proving the real app
   command, persistence bridge, atomic replacement, and evidence route executed.
-- [ ] Run actual `XCUIApplication` controls in `StageDAppRouteUITests`: click
+- [x] Run actual `XCUIApplication` controls in `StageDAppRouteUITests`: click
   draw/erase/clear, brush/size/layer/mode/resize, undo/redo, save/open/export;
   send tilde, digits, letters, Command-Z, and Command-Shift-Z first to canvas and
   then to focused numeric fields. Assert accessibility value/selection/enabled
@@ -979,12 +983,12 @@ than being repeated after minor edits.
   preparation, event-to-submit, GPU, presentation p95/p99,
   missed-frame fraction, page-in/cache counts, and resident/in-flight high-water;
   do not claim physical 120 Hz performance from this evidence.
-- [x] Run the focused color/surface/history/layer/persistence/export suite and
+- [ ] Run the focused color/surface/history/layer/persistence/export suite and
   every adjacent Stage B/C lifecycle, scheduler, semantic, allocation, and
   telemetry suite, then run `scripts/run-stage-d-acceptance.sh` twice from a
   clean build directory. Both runs must produce identical semantic hashes and
   no unexplained metric or resident-resource growth.
-- [ ] Run the Xcode-hosted app-route gate:
+- [x] Run the Xcode-hosted app-route gate:
 
   ```bash
   STAGE_D_ACCEPTANCE_COMMIT="$(git rev-parse HEAD)" \
@@ -996,11 +1000,16 @@ than being repeated after minor edits.
 
   Convert its test summary plus the app route manifest into the aggregator
   input and require every named UI scenario above to pass. Never treat a
-  successful app build as UI route evidence. The 2026-08-12 final
-  `build-for-testing` succeeded. A subsequent test invocation reached
-  `XCUIInitializeForUITesting` and waited in
-  `enableAutomationModeWithError`; it was stopped so the authorization prompt
-  can be raised only after commit/push and approved manually as requested.
+  successful app build as UI route evidence. On 2026-08-12 the user approved
+  the macOS UI Automation prompt and repeated exact tests executed the complete
+  29-route sequence in 155–199 seconds with one test passed and zero failures;
+  the definitive final-source run passed in 156.435 seconds.
+  The controls, shortcuts, and persistence rows all passed with zero pending
+  ownership; save wrote a nonempty schema-4 project and export wrote a valid
+  PNG. Three post-fix diagnostic manifests have identical projected semantic
+  hashes and compared resource metrics despite variable raw macOS gesture
+  sampling. These diagnostic runs are bound to `f5d3748`; the two fresh clean-commit
+  acceptance-script runs remain the final aggregate boundary.
 - [x] Build `PatternSpikeMac` Debug and Release for `platform=macOS`, and build
   `PatternSpikePad` Debug and Release for `generic/platform=iOS Simulator`, all
   with `CODE_SIGNING_ALLOWED=NO`. Launch the macOS harness route and require a

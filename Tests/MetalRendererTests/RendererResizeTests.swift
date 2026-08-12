@@ -1,4 +1,5 @@
 import Metal
+import MetalKit
 @testable import MetalRenderer
 import PatternEngine
 import Testing
@@ -106,6 +107,75 @@ func currentResizeHistoryRestoresExactDimensionsAndBytes() async throws {
     #expect(renderer.pixelSize == newSize)
     #expect(try await resizeSnapshotBytes(renderer) == resized)
     try await renderer.releasePaintRevisions([history.revision.id])
+}
+
+@Test
+@MainActor
+func resizeHistorySnapshotOwnershipIsRetainedButNotPending() async throws {
+    let oldSize = PixelSize(width: 96, height: 80)
+    let newSize = PixelSize(width: 64, height: 64)
+    guard let renderer = try makeResizeRenderer(pixelSize: oldSize) else { return }
+    try await installResizePixels(
+        deterministicResizePixels(oldSize),
+        into: renderer
+    )
+    var receipt: LayerGeometryMutationReceipt?
+    renderer.onOperationCompleted = {
+        if case let .layerGeometrySuccess(value) = $0 { receipt = value }
+    }
+
+    try await renderer.resizeDocument(
+        token: RendererOperationToken(rawValue: 11),
+        to: newSize
+    )
+    let evidence = await renderer.stageDAcceptanceEvidence()
+
+    #expect(evidence.activeSnapshotTokenCount == 1)
+    #expect(evidence.retainedHistorySnapshotTokenCount == 1)
+    #expect(evidence.pendingOwnershipCount == 0)
+    let history = try #require(receipt)
+    try await renderer.releasePaintRevisions([history.revision.id])
+}
+
+@Test
+@MainActor
+func captureSuspensionDeadlineBoundsCancellationInsensitivePreparation()
+    async throws
+{
+    let size = PixelSize(width: 64, height: 64)
+    guard let renderer = try makeResizeRenderer(pixelSize: size) else { return }
+    let gate = DocumentPaintPreparationTestGate()
+    let blockedPreparation = Task { await gate.wait() }
+    renderer.installPaintDisplayPreparationTaskForTesting(blockedPreparation)
+    let view = MTKView(
+        frame: CGRect(x: 0, y: 0, width: 64, height: 64),
+        device: renderer.device
+    )
+    let started = DispatchTime.now().uptimeNanoseconds
+    let deadline = started + 10_000_000
+
+    await #expect(throws: MetalRendererError.self) {
+        try await renderer.suspendPaintDisplayPreparationForCapture(
+            deadlineUptimeNanoseconds: deadline
+        )
+    }
+
+    let elapsed = DispatchTime.now().uptimeNanoseconds - started
+    #expect(elapsed < 1_000_000_000)
+    #expect(!renderer.paintDisplayPreparationIsSuspendedForTesting)
+    #expect(renderer.paintDisplayPreparationIsRetiringForTesting)
+    renderer.draw(in: view)
+    #expect(renderer.paintDisplayPreparationScheduleCountForTesting == 0)
+    #expect(renderer.lastError == nil)
+    await gate.open()
+    await blockedPreparation.value
+    for _ in 0..<1_000
+    where renderer.paintDisplayPreparationIsRetiringForTesting {
+        await Task.yield()
+    }
+    #expect(!renderer.paintDisplayPreparationIsRetiringForTesting)
+    #expect(renderer.paintDisplayPreparationScheduleCountForTesting == 1)
+    #expect(renderer.lastError == nil)
 }
 
 @Test

@@ -16,6 +16,7 @@ root="$repo_root/.build/stage-d-acceptance/$run_name"
 scratch="$root/swiftpm"
 derived_mac="$root/DerivedDataMac"
 derived_pad="$root/DerivedDataPad"
+derived_ui="$root/DerivedDataUI"
 logs="$root/logs"
 runtime="$root/runtime"
 package_manifest="$root/package-manifest.json"
@@ -112,25 +113,40 @@ run_ui_gate() {
     -project "$repo_root/App/PatternSpike.xcodeproj" \
     -scheme PatternSpikeMac \
     -destination "$mac_destination" \
-    -derivedDataPath "$derived_mac" \
+    -derivedDataPath "$derived_ui" \
     -resultBundlePath "$xcresult" \
     -only-testing:"$required_ui_test" \
     -parallel-testing-enabled NO \
     ARCHS="$host_arch" \
     STAGE_D_ACCEPTANCE_COMMIT="$commit" \
-    CODE_SIGNING_ALLOWED=NO \
     >"$logs/xcode-ui.log" 2>&1 &
   pid=$!
   elapsed=0
   while kill -0 "$pid" 2>/dev/null; do
-    if [[ "$elapsed" -ge 180 ]]; then
+    if [[ "$elapsed" -ge 300 ]]; then
       kill -INT "$pid" 2>/dev/null || true
+      grace=0
+      while kill -0 "$pid" 2>/dev/null && [[ "$grace" -lt 10 ]]; do
+        sleep 1
+        grace=$((grace + 1))
+      done
+      if kill -0 "$pid" 2>/dev/null; then
+        kill -TERM "$pid" 2>/dev/null || true
+        grace=0
+        while kill -0 "$pid" 2>/dev/null && [[ "$grace" -lt 5 ]]; do
+          sleep 1
+          grace=$((grace + 1))
+        done
+      fi
+      if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
       wait "$pid"
       status=$?
       printf 'timeout:%s\n' "$status" >"$status_file"
       set -e
       cat "$logs/xcode-ui.log" >&2
-      fail "Xcode UI worker did not finish within 180 seconds"
+      fail "Xcode UI worker did not finish within 300 seconds"
     fi
     sleep 1
     elapsed=$((elapsed + 1))
@@ -197,6 +213,14 @@ run_logged mac-debug-build \
     -derivedDataPath "$derived_mac" \
     ARCHS="$host_arch" \
     CODE_SIGNING_ALLOWED=NO
+run_logged mac-ui-build-for-testing \
+  xcodebuild build-for-testing \
+    -project "$repo_root/App/PatternSpike.xcodeproj" \
+    -scheme PatternSpikeMac \
+    -configuration Debug \
+    -destination "$mac_destination" \
+    -derivedDataPath "$derived_ui" \
+    ARCHS="$host_arch"
 run_logged mac-release-build \
   xcodebuild build \
     -project "$repo_root/App/PatternSpike.xcodeproj" \

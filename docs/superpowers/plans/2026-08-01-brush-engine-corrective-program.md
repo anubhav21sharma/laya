@@ -44,11 +44,15 @@ Manual review of 68 candidate cards, any fixes it identifies, catalog
 admission, and qualifying iPad/Pencil/120 Hz/thermal/memory/Wacom evidence
 remain pending; therefore `manualQualityPassed=false`,
 `physicalProfilePassed=false`, and `productAccepted=false`. The Xcode-hosted UI
-route now builds and its diagnostic runs exercised the complete 29-route
-controls/shortcuts/persistence sequence while driving the final lifecycle,
-project-replacement, focus, and sandbox repairs. Exact-commit execution remains
-pending the requested post-push manual macOS automation approval; direct signed
-production-UI replay and the hosted non-XCTest regression are already green.
+route now executes after the user approved macOS UI Automation. Its exact
+`StageDAppRouteUITests` gate exercised all 29 controls/shortcuts/persistence
+routes repeatedly with one test passed, zero failures, three passing scenario
+rows, real schema-4 save/open replacement, and a valid PNG export. The
+acceptance wrapper's separate locally signed `build-for-testing` and
+`test-without-building` roots passed in 198.722 seconds; the definitive
+final-source run passed in 156.435 seconds.
+Fresh clean-commit aggregate runs remain pending; direct signed production-UI
+replay and the hosted non-XCTest regression are also green.
 
 The original task-level commit checkpoints are represented by existing
 mainline history plus the authorized consolidated corrective-program closeout

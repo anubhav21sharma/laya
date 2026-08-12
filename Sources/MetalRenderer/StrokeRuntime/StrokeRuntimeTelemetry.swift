@@ -448,7 +448,7 @@ public enum StageDAcceptancePackageSuiteRequirements {
         StageDAcceptanceRequirements.strokeLifecycle:
             .init(testCount: 176, suiteCount: 3),
         StageDAcceptanceRequirements.modes:
-            .init(testCount: 49, suiteCount: 3),
+            .init(testCount: 50, suiteCount: 3),
         StageDAcceptanceRequirements.layers:
             .init(testCount: 32, suiteCount: 2),
         StageDAcceptanceRequirements.persistenceExport:
@@ -777,11 +777,206 @@ public struct StageDAcceptanceRendererEvidence:
     public let pendingConsumerCompletionCount: Int
     public let revisionResidentBytes: Int
     public let activeSnapshotTokenCount: Int
+    public let retainedDisplaySnapshotTokenCount: Int
+    public let retainedHistorySnapshotTokenCount: Int
     public let aggregateSnapshotReferenceCount: Int
     public let activeTileLeaseCount: Int
     public let activeStrokeSurfaceCount: Int
     public let activeCommandOperationCount: Int
     public let pendingLayerDisplayAcknowledgementCount: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case storageAuthority
+        case backend
+        case documentGeneration
+        case layerCount
+        case tileByteBudget
+        case residentTileBytes
+        case residentTileHighWaterBytes
+        case backingTileBytes
+        case tileIndexEntryCount
+        case cpuCachedPlanCount
+        case gpuCachedPlanCount
+        case cpuPlanCacheHitCount
+        case cpuPlanCacheMissCount
+        case gpuPlanCacheHitCount
+        case gpuPlanCacheMissCount
+        case cachedPlanMetalBufferBytes
+        case uploadRingMetalBufferBytes
+        case residentResourceBytes
+        case residentResourceHighWaterBytes
+        case planMetalBufferAllocationCount
+        case activeUploadSlotCount
+        case uploadSlotHighWater
+        case pendingPlanCompletionCount
+        case pendingConsumerCompletionCount
+        case revisionResidentBytes
+        case activeSnapshotTokenCount
+        case retainedDisplaySnapshotTokenCount
+        case retainedHistorySnapshotTokenCount
+        case aggregateSnapshotReferenceCount
+        case activeTileLeaseCount
+        case activeStrokeSurfaceCount
+        case activeCommandOperationCount
+        case pendingLayerDisplayAcknowledgementCount
+    }
+
+    public var snapshotOwnershipAccountingMismatchCount: Int {
+        let retained = retainedDisplaySnapshotTokenCount
+            + retainedHistorySnapshotTokenCount
+        return retained > activeSnapshotTokenCount
+            ? retained - activeSnapshotTokenCount
+            : 0
+    }
+
+    public var pendingOwnershipCount: Int {
+        let retained = retainedDisplaySnapshotTokenCount
+            + retainedHistorySnapshotTokenCount
+        let unclassifiedOrInconsistentSnapshotCount =
+            activeSnapshotTokenCount >= retained
+                ? activeSnapshotTokenCount - retained
+                : retained - activeSnapshotTokenCount
+        return unclassifiedOrInconsistentSnapshotCount
+            + activeTileLeaseCount
+            + activeStrokeSurfaceCount
+            + activeCommandOperationCount
+            + pendingLayerDisplayAcknowledgementCount
+            + activeUploadSlotCount
+            + pendingPlanCompletionCount
+            + pendingConsumerCompletionCount
+    }
+}
+
+extension StageDAcceptanceRendererEvidence {
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        storageAuthority = try container.decode(
+            StageDAcceptanceStorageAuthority.self,
+            forKey: .storageAuthority
+        )
+        backend = try container.decode(
+            StageDAcceptanceBackend.self,
+            forKey: .backend
+        )
+        documentGeneration = try container.decode(
+            UInt64.self,
+            forKey: .documentGeneration
+        )
+        layerCount = try container.decode(Int.self, forKey: .layerCount)
+        tileByteBudget = try container.decode(Int.self, forKey: .tileByteBudget)
+        residentTileBytes = try container.decode(
+            Int.self,
+            forKey: .residentTileBytes
+        )
+        residentTileHighWaterBytes = try container.decode(
+            Int.self,
+            forKey: .residentTileHighWaterBytes
+        )
+        backingTileBytes = try container.decode(
+            Int.self,
+            forKey: .backingTileBytes
+        )
+        tileIndexEntryCount = try container.decode(
+            Int.self,
+            forKey: .tileIndexEntryCount
+        )
+        cpuCachedPlanCount = try container.decode(
+            Int.self,
+            forKey: .cpuCachedPlanCount
+        )
+        gpuCachedPlanCount = try container.decode(
+            Int.self,
+            forKey: .gpuCachedPlanCount
+        )
+        cpuPlanCacheHitCount = try container.decode(
+            UInt64.self,
+            forKey: .cpuPlanCacheHitCount
+        )
+        cpuPlanCacheMissCount = try container.decode(
+            UInt64.self,
+            forKey: .cpuPlanCacheMissCount
+        )
+        gpuPlanCacheHitCount = try container.decode(
+            UInt64.self,
+            forKey: .gpuPlanCacheHitCount
+        )
+        gpuPlanCacheMissCount = try container.decode(
+            UInt64.self,
+            forKey: .gpuPlanCacheMissCount
+        )
+        cachedPlanMetalBufferBytes = try container.decode(
+            Int.self,
+            forKey: .cachedPlanMetalBufferBytes
+        )
+        uploadRingMetalBufferBytes = try container.decode(
+            Int.self,
+            forKey: .uploadRingMetalBufferBytes
+        )
+        residentResourceBytes = try container.decode(
+            Int.self,
+            forKey: .residentResourceBytes
+        )
+        residentResourceHighWaterBytes = try container.decode(
+            Int.self,
+            forKey: .residentResourceHighWaterBytes
+        )
+        planMetalBufferAllocationCount = try container.decode(
+            Int.self,
+            forKey: .planMetalBufferAllocationCount
+        )
+        activeUploadSlotCount = try container.decode(
+            Int.self,
+            forKey: .activeUploadSlotCount
+        )
+        uploadSlotHighWater = try container.decode(
+            Int.self,
+            forKey: .uploadSlotHighWater
+        )
+        pendingPlanCompletionCount = try container.decode(
+            Int.self,
+            forKey: .pendingPlanCompletionCount
+        )
+        pendingConsumerCompletionCount = try container.decode(
+            Int.self,
+            forKey: .pendingConsumerCompletionCount
+        )
+        revisionResidentBytes = try container.decode(
+            Int.self,
+            forKey: .revisionResidentBytes
+        )
+        activeSnapshotTokenCount = try container.decode(
+            Int.self,
+            forKey: .activeSnapshotTokenCount
+        )
+        retainedDisplaySnapshotTokenCount = try container.decodeIfPresent(
+            Int.self,
+            forKey: .retainedDisplaySnapshotTokenCount
+        ) ?? 0
+        retainedHistorySnapshotTokenCount = try container.decodeIfPresent(
+            Int.self,
+            forKey: .retainedHistorySnapshotTokenCount
+        ) ?? 0
+        aggregateSnapshotReferenceCount = try container.decode(
+            Int.self,
+            forKey: .aggregateSnapshotReferenceCount
+        )
+        activeTileLeaseCount = try container.decode(
+            Int.self,
+            forKey: .activeTileLeaseCount
+        )
+        activeStrokeSurfaceCount = try container.decode(
+            Int.self,
+            forKey: .activeStrokeSurfaceCount
+        )
+        activeCommandOperationCount = try container.decode(
+            Int.self,
+            forKey: .activeCommandOperationCount
+        )
+        pendingLayerDisplayAcknowledgementCount = try container.decode(
+            Int.self,
+            forKey: .pendingLayerDisplayAcknowledgementCount
+        )
+    }
 }
 
 public enum StageDAcceptanceStorageAuthority: String, Codable, Sendable {

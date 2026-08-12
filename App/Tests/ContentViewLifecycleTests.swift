@@ -167,10 +167,227 @@ func stageDRouteRecorderBindsAppStatePixelsAndQuiescentSparseOwnership()
             && $0.expectedSemanticHash == nil
             && $0.numericOracle?.expected == $0.numericOracle?.actual
             && $0.metrics["pendingOwnershipCount"] == 0
+            && $0.metrics[
+                "snapshotOwnershipAccountingMismatchCount"
+            ] == 0
             && $0.attributes["canonicalSHA256"]?.count == 64
             && $0.attributes["normalizedInputCount"] == "0"
             && $0.attributes["observedSemanticHash"]?.count == 64
     })
+}
+
+@Test
+@MainActor
+func stageDRouteRecorderDrivesPendingStrokeToQuiescence() async throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let manifestURL = directory.appendingPathComponent("routes.json")
+    let recorder = StageDAppRouteEvidenceRecorder(environment: [
+        StageDAppRouteConfiguration.manifestEnvironmentKey: manifestURL.path,
+        StageDAppRouteConfiguration.projectEnvironmentKey:
+            directory.appendingPathComponent("project.patternproj").path,
+        StageDAppRouteConfiguration.exportEnvironmentKey:
+            directory.appendingPathComponent("export.png").path,
+        StageDAppRouteConfiguration.commitEnvironmentKey:
+            String(repeating: "c", count: 40),
+        StageDAppRouteConfiguration.dateEnvironmentKey:
+            "2026-08-10T12:00:00Z",
+    ])
+    recorder.bind(controller)
+
+    controller.handleStrokeSample(.mouse(
+        position: ScreenPoint(x: 24, y: 24),
+        timestamp: 0,
+        phase: .began
+    ))
+    controller.handleStrokeSample(.mouse(
+        position: ScreenPoint(x: 40, y: 40),
+        timestamp: 1,
+        phase: .ended
+    ))
+    #expect(controller.model.isBusy)
+
+    try await recorder.record(
+        scenarioID: StageDAcceptanceRequirements.appControls,
+        routeID: "controls.draw"
+    )
+
+    #expect(!controller.model.isBusy)
+    #expect(renderer.isIdle)
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let manifest = try decoder.decode(
+        StageDAcceptanceManifest.self,
+        from: Data(contentsOf: manifestURL)
+    )
+    let row = try #require(manifest.rows.first)
+    #expect(row.metrics["pendingOwnershipCount"] == 0)
+    #expect(row.attributes["paintedPixelCount"] != "0")
+}
+
+@Test
+@MainActor
+func stageDRouteSemanticHashIgnoresVariableIntermediateGestureSamples()
+    async throws
+{
+    let direct = try await recordedDrawEvidence(intermediatePoints: [])
+    let sampled = try await recordedDrawEvidence(intermediatePoints: [
+        ScreenPoint(x: 30, y: 52),
+        ScreenPoint(x: 42, y: 20),
+    ])
+
+    #expect(direct.canonicalHash != sampled.canonicalHash)
+    #expect(direct.semanticHash == sampled.semanticHash)
+}
+
+@Test
+@MainActor
+func stageDRouteRecorderReleasesDisplaySuspensionAfterGlobalTimeout()
+    async throws
+{
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let recorder = StageDAppRouteEvidenceRecorder(
+        environment: stageDRouteEnvironment(
+            directory: directory,
+            commitCharacter: "e"
+        ),
+        quiescenceTimeoutNanoseconds: 1
+    )
+    recorder.bind(controller)
+    controller.handleStrokeSample(.mouse(
+        position: ScreenPoint(x: 24, y: 24),
+        timestamp: 0,
+        phase: .began
+    ))
+    controller.handleStrokeSample(.mouse(
+        position: ScreenPoint(x: 40, y: 40),
+        timestamp: 1,
+        phase: .ended
+    ))
+
+    await #expect(throws: Error.self) {
+        try await recorder.record(
+            scenarioID: StageDAcceptanceRequirements.appControls,
+            routeID: "controls.draw"
+        )
+    }
+    #expect(!renderer.paintDisplayPreparationIsSuspendedForTesting)
+}
+
+@Test
+@MainActor
+func stageDRouteCaptureSerializesAnOverlappingAcceptanceExport() async throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let recorder = StageDAppRouteEvidenceRecorder(environment:
+        stageDRouteEnvironment(directory: directory, commitCharacter: "f")
+    )
+    recorder.bind(controller)
+    let gate = DocumentPaintPreparationTestGate()
+    let export = Task { @MainActor in
+        try await recorder.withAcceptanceDisplayPreparationSuspended(
+            for: controller
+        ) {
+            await gate.wait()
+        }
+    }
+    for _ in 0..<1_000
+    where !renderer.paintDisplayPreparationIsSuspendedForTesting {
+        await Task.yield()
+    }
+    #expect(renderer.paintDisplayPreparationIsSuspendedForTesting)
+
+    let capture = Task { @MainActor in
+        try await recorder.record(
+            scenarioID: StageDAcceptanceRequirements.appControls,
+            routeID: "controls.initial"
+        )
+    }
+    try await Task.sleep(nanoseconds: 10_000_000)
+    #expect(renderer.paintDisplayPreparationIsSuspendedForTesting)
+
+    await gate.open()
+    try await export.value
+    try await capture.value
+    #expect(!renderer.paintDisplayPreparationIsSuspendedForTesting)
+}
+
+@MainActor
+private func recordedDrawEvidence(
+    intermediatePoints: [ScreenPoint]
+) async throws -> (semanticHash: String, canonicalHash: String) {
+    let renderer = try #require(try makeControllerRenderer())
+    let controller = EditorSessionController(renderer: renderer)
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let manifestURL = directory.appendingPathComponent("routes.json")
+    let recorder = StageDAppRouteEvidenceRecorder(environment:
+        stageDRouteEnvironment(directory: directory, commitCharacter: "d")
+    )
+    recorder.bind(controller)
+
+    controller.handleStrokeSample(.mouse(
+        position: ScreenPoint(x: 24, y: 24),
+        timestamp: 0,
+        phase: .began
+    ))
+    for (index, point) in intermediatePoints.enumerated() {
+        controller.handleStrokeSample(.mouse(
+            position: point,
+            timestamp: TimeInterval(index + 1),
+            phase: .moved
+        ))
+    }
+    controller.handleStrokeSample(.mouse(
+        position: ScreenPoint(x: 48, y: 48),
+        timestamp: TimeInterval(intermediatePoints.count + 1),
+        phase: .ended
+    ))
+    try await recorder.record(
+        scenarioID: StageDAcceptanceRequirements.appControls,
+        routeID: "controls.draw"
+    )
+
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let manifest = try decoder.decode(
+        StageDAcceptanceManifest.self,
+        from: Data(contentsOf: manifestURL)
+    )
+    let row = try #require(manifest.rows.first)
+    return (
+        try #require(row.attributes["observedSemanticHash"]),
+        try #require(row.attributes["canonicalSHA256"])
+    )
+}
+
+private func stageDRouteEnvironment(
+    directory: URL,
+    commitCharacter: Character
+) -> [String: String] {
+    [
+        StageDAppRouteConfiguration.manifestEnvironmentKey:
+            directory.appendingPathComponent("routes.json").path,
+        StageDAppRouteConfiguration.projectEnvironmentKey:
+            directory.appendingPathComponent("project.patternproj").path,
+        StageDAppRouteConfiguration.exportEnvironmentKey:
+            directory.appendingPathComponent("export.png").path,
+        StageDAppRouteConfiguration.commitEnvironmentKey:
+            String(repeating: commitCharacter, count: 40),
+        StageDAppRouteConfiguration.dateEnvironmentKey:
+            "2026-08-10T12:00:00Z",
+    ]
 }
 
 @MainActor

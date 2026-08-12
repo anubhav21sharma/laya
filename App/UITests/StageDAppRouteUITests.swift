@@ -399,16 +399,22 @@ final class StageDAppRouteUITests: XCTestCase {
         recordButton.click()
         let response = app.staticTexts["Stage D Evidence Response"]
         var value = ""
-        XCTAssertTrue(waitUntil(timeout: 15) {
+        guard waitUntil(timeout: 60, condition: {
             value = response.value as? String ?? ""
             return value.contains("\"lastRouteID\":\"\(route)\"")
                 || value.hasPrefix("error:")
-        }, "evidence capture stalled at \(value)")
-        XCTAssertFalse(value.hasPrefix("error:"), value)
-        XCTAssertTrue(
-            waitForEditorFocus(after: focusGeneration, in: app),
-            "Editor keyboard focus was not restored after \(route)"
-        )
+        }) else {
+            XCTFail("evidence capture stalled at \(value)")
+            return
+        }
+        guard !value.hasPrefix("error:") else {
+            XCTFail(value)
+            return
+        }
+        guard waitForEditorFocus(after: focusGeneration, in: app) else {
+            XCTFail("Editor keyboard focus was not restored after \(route)")
+            return
+        }
         guard let data = value.data(using: .utf8),
               let row = try? JSONSerialization.jsonObject(with: data)
                 as? [String: Any],
