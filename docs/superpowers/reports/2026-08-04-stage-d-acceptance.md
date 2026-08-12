@@ -306,6 +306,14 @@ controls/shortcuts ownership of one history token and two layer references.
 This was a pre-commit candidate run; an exact pushed-revision replay remains a
 post-commit evidence step, not a substitute for either qualifying aggregate.
 
+The exact pushed `99924f8` replay subsequently passed one test with zero
+failures in **153.393 seconds** and wrote commit-bound runner artifacts. During
+exact-commit review, a separate stress rerun exposed one remaining test-only
+callback-delivery race after workspace retirement. The assertion now uses a
+monotonic five-second async deadline, drains completed renderer events, and
+waits for the controller's actual `.collecting` state. The repaired test passed
+26 consecutive runs; production renderer behavior was unchanged.
+
 This successful run proves the pushed implementation commit's Xcode route, but
 it is not the final acceptance aggregate. The acceptance script must still run
 twice from clean fresh roots and combine this route with the package, broad,
@@ -396,6 +404,9 @@ and 13-test selections, shell parse, and diff check all passed.
   (1 passed test / 0 failures / 151.837 seconds)
 - Fixed-path app manifest:
   `.build/stage-d-ui-handoff-fix/AppRouteArtifacts/app-route-manifest.json`
+- Exact pushed `99924f8` UI result:
+  `.build/stage-d-ui-handoff-fix/StageDAppRoutes-99924f8fcea8f482c4d9520d2821a297f39e65c5.xcresult`
+  (1 passed test / 0 failures / 153.393 seconds)
 - Final post-review broad log:
   `.build/brush-corrective-verification/stage-d-final-post-review-broad-green.log`
   (`7f5780f871ec6f112fc14e492d1a07929d188fe04967487297b849c4d65ed303`;

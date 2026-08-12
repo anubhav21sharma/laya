@@ -2439,7 +2439,17 @@ func retiringWorkspaceResumesDeferredPrefixBeforePointerEnds()
     #expect(normalizedTimestamps.isEmpty)
 
     try await renderer.awaitPendingStrokeWorkspaceRetirement()
-    try renderer.drainCompletedInteractiveOperations()
+    let resumeDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while ContinuousClock.now < resumeDeadline {
+        try renderer.drainCompletedInteractiveOperations()
+        if case let .drawing(drawing) =
+            controller.transactionStateForTesting,
+           drawing.phase == .collecting
+        {
+            break
+        }
+        try await Task.sleep(for: .milliseconds(1))
+    }
     guard case let .drawing(resumedDrawing) =
             controller.transactionStateForTesting
     else {

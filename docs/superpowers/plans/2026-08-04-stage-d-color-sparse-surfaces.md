@@ -1072,7 +1072,11 @@ than being repeated after minor edits.
   Final independent re-review reports zero Critical, Important, or Minor
   findings. A full final-source rerun passes all 2,206 tests in 120 suites in
   1,712.339 seconds with zero issues after replacing one scheduler-speed test
-  loop with the renderer's bounded production retirement wait.
+  loop with the renderer's bounded production retirement wait. Exact-commit
+  stress then exposed queued idle-callback delivery after retirement; the test
+  now uses a monotonic five-second async wait for `.collecting` and passes 26
+  consecutive runs. The pushed `99924f8` UI route independently passed in
+  153.393 seconds with zero failures.
 - [ ] Run the corrected aggregate twice from independent fresh roots on the
   same pushed commit and compare the resulting manifests.
 - [ ] Commit final Stage D acceptance only after the two clean aggregate runs

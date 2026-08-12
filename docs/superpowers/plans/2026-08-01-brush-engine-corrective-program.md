@@ -64,6 +64,8 @@ gaps. Those are now repaired; the real fixed-path XCTest route and affected
 94-test matrix pass, the captured paravirtual package fails closed without
 writing a manifest, and independent re-review reports zero unresolved findings.
 The final broad rerun passes all 2,206 tests in 120 suites with zero issues.
+The exact pushed UI route passes in 153.393 seconds; its final test-only
+retirement callback wait passes 26 consecutive stress runs.
 That interrupted attempt
 does not count, so two fresh clean-commit aggregate runs remain pending; direct
 signed production-UI replay and the hosted non-XCTest regression are green.
