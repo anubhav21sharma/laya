@@ -76,6 +76,37 @@ struct StageDAcceptanceTests {
     }
 
     @Test
+    func packageSuiteRequirementsMatchCurrentReviewedInventories() {
+        #expect(
+            StageDAcceptancePackageSuiteRequirements
+                .expectedCountsByScenario
+                == [
+                    StageDAcceptanceRequirements.color:
+                        .init(testCount: 26, suiteCount: 3),
+                    StageDAcceptanceRequirements.sparseSampling:
+                        .init(testCount: 220, suiteCount: 5),
+                    StageDAcceptanceRequirements.strokeLifecycle:
+                        .init(testCount: 189, suiteCount: 3),
+                    StageDAcceptanceRequirements.modes:
+                        .init(testCount: 51, suiteCount: 3),
+                    StageDAcceptanceRequirements.layers:
+                        .init(testCount: 35, suiteCount: 2),
+                    StageDAcceptanceRequirements.persistenceExport:
+                        .init(testCount: 36, suiteCount: 4),
+                    StageDAcceptanceRequirements.negativeControls:
+                        .init(testCount: 99, suiteCount: 4),
+                ]
+        )
+        #expect(
+            StageDAcceptancePackageSuiteRequirements.broadCounts
+                == .init(testCount: 2_206, suiteCount: 120)
+        )
+        #expect(
+            StageDAcceptancePackageSuiteRequirements.broadKnownIssueCount == 0
+        )
+    }
+
+    @Test
     func allocationEvidenceParsesExactAnchoredProductionMetrics() throws {
         let log = """
         ALLOCATOR PROBE STAGE D TILES PASS partition=20/0 lease=13/0 metal_driver=10/159
@@ -124,14 +155,26 @@ struct StageDAcceptanceTests {
         let commit = String(repeating: "a", count: 40)
         let counts = try StageDAcceptanceBroadSuiteEvidenceValidator.validate(
             suiteLog: """
-            ✘ Test run with 2,134 tests in 110 suites failed after 1,168 seconds.
+            ✔ Test run with 2,206 tests in 120 suites passed after 1,982 seconds.
             """,
             baselineVerifierLog:
-                "Swift Testing baseline verified: 5 complete issue records.",
-            expectedCounts: .init(testCount: 2_134, suiteCount: 110),
-            expectedIssueCount: 5
+                "Swift Testing baseline verified: 0 complete issue records.",
+            expectedCounts: .init(testCount: 2_206, suiteCount: 120),
+            expectedIssueCount: 0
         )
-        #expect(counts == .init(testCount: 2_134, suiteCount: 110))
+        #expect(counts == .init(testCount: 2_206, suiteCount: 120))
+        #expect(throws: StageDAcceptanceBroadSuiteValidationError
+            .suiteDidNotPass) {
+            _ = try StageDAcceptanceBroadSuiteEvidenceValidator.validate(
+                suiteLog: """
+                ✘ Test run with 2,206 tests in 120 suites failed after 1,982 seconds.
+                """,
+                baselineVerifierLog:
+                    "Swift Testing baseline verified: 0 complete issue records.",
+                expectedCounts: .init(testCount: 2_206, suiteCount: 120),
+                expectedIssueCount: 0
+            )
+        }
 
         let review = StageDAcceptanceReviewDisposition(
             schemaVersion: 1,

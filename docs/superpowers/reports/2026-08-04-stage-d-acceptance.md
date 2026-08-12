@@ -77,18 +77,18 @@ before replacement and intentionally reset after reopen.
 
 ## Focused Stage D package matrix
 
-The serial acceptance groups passed **638 tests** after adding the retained
-resize-history ownership regression:
+The current reviewed serial acceptance inventories contain **656 tests** after
+the final lifecycle and inventory regressions:
 
 | Group | Result |
 | --- | ---: |
 | Color | 26 tests / 3 suites |
 | Sparse sampling | 220 tests / 5 suites |
-| Stroke lifecycle | 176 tests / 3 suites |
-| Modes | 50 tests / 3 suites |
-| Layers | 32 tests / 2 suites |
+| Stroke lifecycle | 189 tests / 3 suites |
+| Modes | 51 tests / 3 suites |
+| Layers | 35 tests / 2 suites |
 | Persistence/export | 36 tests / 4 suites |
-| Negative controls | 98 tests / 4 suites |
+| Negative controls | 99 tests / 4 suites |
 
 The matrix covers independent color vectors, sparse seam/corner/page-table
 selection, terminal failure and immediate reuse, every current periodic/radial
@@ -123,29 +123,29 @@ application allocation.
 
 ## Broad regression checkpoint
 
-The final frozen-source serial run completed **2,134 tests in 110 suites** in
-**1,030.215 seconds** and recorded exactly **5 issues**. The strict verifier
-exited `0`:
+The corrective-program completion added ten suites and resolved the five
+remaining Stage D brush-quality records without relaxing their graphite,
+charcoal, or chisel thresholds. Independent review approved their explicit
+removal. The current oracle is therefore exactly **2,206 tests in 120 suites**
+with **0 known issues**, and the tracked Stage D baseline is intentionally
+empty rather than regenerated from current output.
+
+The first current-source measurement completed the full 2,206/120 inventory in
+1,982.791 seconds, but correctly failed closed on one unreviewed, host-sensitive
+natural-charcoal CPU-quartile observation. The exact end-to-end artifact test
+then passed in isolation in 402.504 seconds on the same source. The required
+complete rerun passed all **2,206 tests in 120 suites** in **1,840.787 seconds**
+with zero issues, and the strict verifier reported:
 
 ```text
-Swift Testing baseline verified: 5 complete issue records.
+Swift Testing baseline verified: 0 complete issue records.
 ```
 
-The reviewed Stage D baseline has SHA-256
-`f6c364600d96606d191e3bb98a7c7185940c7096a5efd422d623bc8077213173`.
-It was not regenerated from the run. The five records are only the separately
-deferred Brush Corrective Tasks 21–23:
-
-- Graphite 40 px support p50: `10` versus `>=20`;
-- Graphite 40 px support p95: `10` versus `>=24`;
-- Charcoal neutral-pressure changed pixels: `0` versus `>=512`;
-- Charcoal neutral-pressure median alpha: `0` versus `>=0.10`; and
-- Chisel right-angle protrusion: `14.416489` versus `<=4`.
-
-No Stage D color, sparse storage, lifecycle, layer, persistence, export,
-allocation, telemetry, manifest, or app-route package issue appears in the
-broad result. The final broad log SHA-256 is
-`0e2db14458d080a58928ed7bb15aeabfa55cb0c116f7dc4f276fdcaad01bfedc`.
+The passing broad log SHA-256 is
+`45e1a13aec58c192f1243d2f36296cd4867f9d689b85f73277a05a683f7088e8`;
+the intentionally empty Stage D baseline SHA-256 is
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+The transient observation was not added to the baseline.
 
 ## Builds
 
@@ -277,10 +277,11 @@ independently passed 49 focused tests. The review gate is complete.
 
 ## Evidence
 
-- Broad log: `.build/stage-d-broad-reviewed-final.log`
-  (`0e2db14458d080a58928ed7bb15aeabfa55cb0c116f7dc4f276fdcaad01bfedc`)
+- Broad log:
+  `.build/brush-corrective-verification/stage-d-current-broad-zero.log`
+  (`45e1a13aec58c192f1243d2f36296cd4867f9d689b85f73277a05a683f7088e8`)
 - Stage D baseline: `Tests/Baselines/stage-d-known-issues.txt`
-  (`f6c364600d96606d191e3bb98a7c7185940c7096a5efd422d623bc8077213173`)
+  (`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`)
 - macOS Release build log: `.build/stage-d-mac-release-reviewed.log`
   (`b0c63202e1088d42f80a676f573ac5113be749ac89c84b59acf3d36aa101abe1`)
 - iPad Simulator Debug build log: `.build/stage-d-pad-debug-reviewed.log`

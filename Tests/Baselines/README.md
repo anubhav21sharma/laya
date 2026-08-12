@@ -26,10 +26,12 @@ replace or rewrite the immutable Stage B artifact. Twenty-two Stage B records
 were removed only after the current native sparse route independently passed
 the Professional producer, raw-artifact, complete-root, validator, and
 Deposition evidence gates, and after the corresponding frozen-hash-only tests
-were retired. The amendment retains exactly the five still-open corrective
-program observations for graphite width, charcoal visibility/alpha, and
-chisel turn protrusion. The chisel record reflects the current independently
-measured support-bound result; its `<= 4 px` requirement remains unchanged.
+were retired. The five remaining corrective observations were explicitly
+removed after independent review on 2026-08-12 confirmed that the production
+Metal graphite-width, charcoal visibility/alpha, and chisel-turn regressions
+all pass without relaxing their original thresholds. The tracked Stage D file
+is therefore intentionally empty; any current issue is unreviewed and fails
+verification rather than becoming a new baseline record.
 
 Task 18 adds `deposition-composite` and its paired negative control to the
 native deposition matrix. The project-owned fixture is the maximum supported

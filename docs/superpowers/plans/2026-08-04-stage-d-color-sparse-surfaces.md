@@ -1017,15 +1017,14 @@ than being repeated after minor edits.
   `PatternSpikePad` Debug and Release for `generic/platform=iOS Simulator`, all
   with `CODE_SIGNING_ALLOWED=NO`. Launch the macOS harness route and require a
   completed production JSONL segment; simulator build is compile evidence only.
-- [x] Run the broad suite. It must contain only the exact five records in the
-  reviewed Stage D amendment to the immutable 27-record Stage B baseline and
-  no new issue. A resolved frozen record requires independent evidence plus an
-  explicit reviewed baseline removal; never regenerate the allowlist or golden
-  from current output. Capture the expected nonzero `swift test` output and
-  validate it with
-  `scripts/verify-swift-testing-baseline.sh`; a raw nonzero status is not by
-  itself a regression and a raw green is not a substitute for allowlist
-  verification.
+- [x] Rerun the broad suite against the current reviewed inventory: exactly
+  2,206 tests in 120 suites and zero issues. Independent review approved the
+  explicit removal of the five resolved graphite/charcoal/chisel records; the
+  tracked Stage D baseline is intentionally empty and must never be regenerated
+  from current output. Validate the log with
+  `scripts/verify-swift-testing-baseline.sh`; any issue or inventory change is
+  an unreviewed regression. The final rerun passed 2,206/120 in 1,840.787
+  seconds with zero issues, and the empty baseline verifier passed.
 - [x] Run a fresh independent review over `ca5dff5..HEAD` against this plan and
   the parent corrective program. Resolve every Critical/Important finding,
   rerun the complete affected matrix plus broad/build gates, and require the

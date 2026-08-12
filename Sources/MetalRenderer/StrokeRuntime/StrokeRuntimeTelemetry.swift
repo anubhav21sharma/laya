@@ -178,6 +178,7 @@ public enum StageDAcceptanceBroadSuiteValidationError:
     Error, Equatable, Sendable
 {
     case missingCompleteSummary
+    case suiteDidNotPass
     case unexpectedCounts(
         expected: StageDAcceptanceSuiteCounts,
         actual: StageDAcceptanceSuiteCounts
@@ -192,7 +193,7 @@ public enum StageDAcceptanceBroadSuiteEvidenceValidator {
         expectedCounts: StageDAcceptanceSuiteCounts,
         expectedIssueCount: Int
     ) throws -> StageDAcceptanceSuiteCounts {
-        var summaries: [StageDAcceptanceSuiteCounts] = []
+        var summaries: [(counts: StageDAcceptanceSuiteCounts, passed: Bool)] = []
         for line in suiteLog.split(whereSeparator: \.isNewline) {
             let tokens = line.split(whereSeparator: \.isWhitespace)
             guard let start = tokens.indices.first(where: {
@@ -216,20 +217,27 @@ public enum StageDAcceptanceBroadSuiteEvidenceValidator {
             testCount > 0,
             suiteCount > 0
             else { continue }
-            summaries.append(.init(
-                testCount: testCount,
-                suiteCount: suiteCount
+            summaries.append((
+                counts: .init(
+                    testCount: testCount,
+                    suiteCount: suiteCount
+                ),
+                passed: tokens[start + 8] == "passed"
             ))
         }
-        guard summaries.count == 1, let actual = summaries.first else {
+        guard summaries.count == 1, let summary = summaries.first else {
             throw StageDAcceptanceBroadSuiteValidationError
                 .missingCompleteSummary
         }
+        let actual = summary.counts
         guard actual == expectedCounts else {
             throw StageDAcceptanceBroadSuiteValidationError.unexpectedCounts(
                 expected: expectedCounts,
                 actual: actual
             )
+        }
+        guard expectedIssueCount != 0 || summary.passed else {
+            throw StageDAcceptanceBroadSuiteValidationError.suiteDidNotPass
         }
         let expectedApproval = "Swift Testing baseline verified: "
             + "\(expectedIssueCount) complete issue records."
@@ -446,22 +454,22 @@ public enum StageDAcceptancePackageSuiteRequirements {
         StageDAcceptanceRequirements.sparseSampling:
             .init(testCount: 220, suiteCount: 5),
         StageDAcceptanceRequirements.strokeLifecycle:
-            .init(testCount: 176, suiteCount: 3),
+            .init(testCount: 189, suiteCount: 3),
         StageDAcceptanceRequirements.modes:
-            .init(testCount: 50, suiteCount: 3),
+            .init(testCount: 51, suiteCount: 3),
         StageDAcceptanceRequirements.layers:
-            .init(testCount: 32, suiteCount: 2),
+            .init(testCount: 35, suiteCount: 2),
         StageDAcceptanceRequirements.persistenceExport:
             .init(testCount: 36, suiteCount: 4),
         StageDAcceptanceRequirements.negativeControls:
-            .init(testCount: 98, suiteCount: 4),
+            .init(testCount: 99, suiteCount: 4),
     ]
 
     public static let broadCounts = StageDAcceptanceSuiteCounts(
-        testCount: 2_134,
-        suiteCount: 110
+        testCount: 2_206,
+        suiteCount: 120
     )
-    public static let broadKnownIssueCount = 5
+    public static let broadKnownIssueCount = 0
 }
 
 public struct StageDAcceptanceRepeatabilityResult:
