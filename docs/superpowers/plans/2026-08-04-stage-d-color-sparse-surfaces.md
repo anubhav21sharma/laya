@@ -15,6 +15,10 @@ Critical, Important, or Minor findings. The requested post-commit exact route
 passed `1810dce` in 145.050 seconds without another authorization prompt. Two
 fresh clean-commit aggregate runs,
 the strict native-wall threshold, and physical-device evidence remain pending.
+The first clean-root aggregate attempt also exposed and corrected a hardcoded
+default SwiftPM build path in the CLI subprocess tests; isolated-scratch
+subprocess verification is green, but the clean aggregate count remains zero
+until the full runner completes.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development (recommended) or

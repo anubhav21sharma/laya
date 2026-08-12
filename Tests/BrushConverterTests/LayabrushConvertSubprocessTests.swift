@@ -316,12 +316,9 @@ private func runCLI(_ arguments: [String]) throws -> CLIProcessResult {
 }
 
 private func layabrushConvertExecutable() throws -> URL {
-    var directory = URL(fileURLWithPath: #filePath)
-    for _ in 0 ..< 3 {
-        directory.deleteLastPathComponent()
-    }
-    let executable = directory
-        .appendingPathComponent(".build/debug/layabrush-convert")
+    let executable = Bundle.module.bundleURL
+        .deletingLastPathComponent()
+        .appendingPathComponent("layabrush-convert")
     guard FileManager.default.isExecutableFile(atPath: executable.path) else {
         throw CLITestError.missingExecutable(executable.path)
     }

@@ -147,6 +147,14 @@ the intentionally empty Stage D baseline SHA-256 is
 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
 The transient observation was not added to the baseline.
 
+The first clean-root aggregate attempt then exposed a separate reproducibility
+defect before acceptance: nine CLI subprocess cases looked only in the
+repository's default `.build/debug` directory and could not find the executable
+in the acceptance runner's isolated SwiftPM scratch path. The tests now resolve
+`layabrush-convert` beside their SwiftPM resource bundle. A nondefault fresh
+scratch run passed all 8 tests (10 parameterized cases); a new clean-root
+aggregate run remains required.
+
 ## Builds
 
 The final source tree passed:
