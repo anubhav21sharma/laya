@@ -263,6 +263,11 @@ enum SparseTileSourceDisposition: Equatable, Sendable {
 }
 
 struct SparseTileSourceRequest: @unchecked Sendable {
+    enum ReferenceScope {
+        case identity
+        case entitlement
+    }
+
     let contentKey: SparseTileRoleContentKey
     let addressing: SparseTileAddressing
     let provider: TiledRasterExactReferenceProvider
@@ -277,7 +282,8 @@ struct SparseTileSourceRequest: @unchecked Sendable {
         addressing: SparseTileAddressing,
         provider: TiledRasterExactReferenceProvider,
         changedCoordinates: [PaintTileCoordinate],
-        disposition: SparseTileSourceDisposition
+        disposition: SparseTileSourceDisposition,
+        referenceScope: ReferenceScope = .identity
     ) throws {
         for index in changedCoordinates.indices.dropFirst() {
             let previous = changedCoordinates[index - 1]
@@ -293,7 +299,14 @@ struct SparseTileSourceRequest: @unchecked Sendable {
         self.contentKey = contentKey
         self.addressing = addressing
         self.provider = provider
-        references = provider.references
+        // Ordinary captures preserve the complete logical identity even when
+        // their provider entitlement is viewport-restricted. Independently
+        // numbered tile-local child plans opt into the exact entitlement so
+        // they cannot bind the same global slots again for every child region.
+        references = switch referenceScope {
+        case .identity: provider.references
+        case .entitlement: provider.entitledReferences
+        }
         self.changedCoordinates = changedCoordinates
         self.disposition = disposition
     }
@@ -331,7 +344,9 @@ struct SparseTileSourceSelection: @unchecked Sendable {
         return total
     }
 
-    func restrictedSources() throws -> [SparseTileSourceRequest] {
+    func restrictedSources(
+        referenceScope: SparseTileSourceRequest.ReferenceScope = .identity
+    ) throws -> [SparseTileSourceRequest] {
         guard selectedReferencesBySource.count == sources.count else {
             throw SparseTileSamplingPlanError
                 .sourceBatchSelectionMismatch(
@@ -350,7 +365,8 @@ struct SparseTileSourceSelection: @unchecked Sendable {
                 addressing: source.addressing,
                 provider: provider,
                 changedCoordinates: source.changedCoordinates,
-                disposition: source.disposition
+                disposition: source.disposition,
+                referenceScope: referenceScope
             )
         }
     }

@@ -82,12 +82,15 @@ enum StrokeCommitter {
             guard let capability, capability.isTerminal else {
                 throw MetalRendererError.invalidStrokeLifecycle
             }
+            let identity = await context.canonicalStateIdentity()
             return DocumentPaintSurfaceApplicationResult(
                 didPublish: false,
                 layerID: capability.layerID,
                 generation: capability.generation,
                 dirtyCoordinates: [],
-                canonicalIdentity: await context.canonicalStateIdentity(),
+                baseCanonicalIdentity: identity,
+                canonicalIdentity: identity,
+                compositeInvalidation: .none,
                 historyPair: nil
             )
         }

@@ -16,7 +16,7 @@ struct PreparedLayerCompositeLayer: @unchecked Sendable {
     let blendMode: LayerBlendMode
     let samplingPlan: SparseTileSamplingPlanContent
     let samplingParameters: SparseTileSamplingEncodeParameters
-    fileprivate let sourceSelection: SparseTileSourceSelection
+    let sourceSelection: SparseTileSourceSelection
 
     init(
         layerID: UUID,
@@ -93,7 +93,7 @@ final class PreparedLayerCompositePlan: @unchecked Sendable {
         )
     }
 
-    fileprivate func sourceBatch(
+    func sourceBatch(
         for selection: SparseTileSourceSelection
     ) throws -> SparseTileOwnedSourceBatch {
         lock.lock()
@@ -118,7 +118,9 @@ final class PreparedLayerCompositePlan: @unchecked Sendable {
               childRegion.maxY <= outputRegion.maxY
         else { throw LayerCompositorError.invalidPlan }
         return try layers.compactMap { layer in
-            let sources = try layer.sourceSelection.restrictedSources()
+            let sources = try layer.sourceSelection.restrictedSources(
+                referenceScope: .entitlement
+            )
             let originalKey = layer.samplingPlan.key
             let key = SparseTileSamplingPlanKey(
                 documentGeneration: documentGeneration,
@@ -329,6 +331,256 @@ struct LayerCompositorSnapshot: Equatable, Sendable {
     let cpuPlanCache: SparseTileSamplingPlanCacheSnapshot
     let gpuPlanCache: SparseTileSamplingGPUCacheSnapshot
     let completion: SparseTileSamplingCompletionSnapshot
+    let tileReductionBytes: Int
+    let physicalWorkspaceBytes: Int
+    let physicalWorkspaceByteHighWater: Int
+    let lastTileBatchMetrics: CanvasCompositeBatchMetrics?
+}
+
+struct LayerCompositorGPUPlanProfile: Equatable, Sendable {
+    let maximumInflightEncodes: Int
+    let maximumCachedPlans: Int
+    let maximumCachedBufferBytes: Int
+    let allowsCacheEviction: Bool
+    let declaredTileBatchWorkspaceBytes: Int
+
+    static let standard = LayerCompositorGPUPlanProfile(
+        maximumInflightEncodes: 1,
+        maximumCachedPlans: LayerStack.maximumLayerCount,
+        maximumCachedBufferBytes: 64 * 1_024 * 1_024,
+        allowsCacheEviction: true,
+        declaredTileBatchWorkspaceBytes: 66 * 1_024 * 1_024
+    )
+
+    static func canonicalTileBatch(
+        workspaceByteBudget: Int
+    ) throws -> LayerCompositorGPUPlanProfile {
+        // One physical 256² RGBA16F scratch set is 1.5 MiB. Reserve another
+        // 0.5 MiB for the reduction buffer and allocation alignment; the GPU
+        // plan cache owns the exact remainder and may not evict within a live
+        // 8x8 tile/layer command chunk.
+        let nonPlanWorkspace = 2 * 1_024 * 1_024
+        guard workspaceByteBudget > nonPlanWorkspace else {
+            throw LayerCompositorError.invalidLimit
+        }
+        return LayerCompositorGPUPlanProfile(
+            maximumInflightEncodes: LayerStack.maximumLayerCount * 8,
+            maximumCachedPlans: LayerStack.maximumLayerCount * 8,
+            maximumCachedBufferBytes: workspaceByteBudget - nonPlanWorkspace,
+            allowsCacheEviction: false,
+            declaredTileBatchWorkspaceBytes: workspaceByteBudget
+        )
+    }
+}
+
+struct LayerCompositeTileBatchResult: Equatable, Sendable {
+    let fullyTransparentCoordinates: [PaintTileCoordinate]
+    let metrics: CanvasCompositeBatchMetrics
+}
+
+struct LayerCompositeTileBatchFailureInjection: Equatable, Sendable {
+    let failingSampleEncodeIndex: Int?
+    let failingCommandTerminalChunkIndex: Int?
+
+    init(
+        failingSampleEncodeIndex: Int? = nil,
+        failingCommandTerminalChunkIndex: Int? = nil
+    ) {
+        self.failingSampleEncodeIndex = failingSampleEncodeIndex
+        self.failingCommandTerminalChunkIndex =
+            failingCommandTerminalChunkIndex
+    }
+}
+
+final class CanonicalWorkspaceObservation: @unchecked Sendable {
+    let snapshot: LayerCompositorSnapshot
+    private let lock = NSLock()
+    private var closeAction: (@Sendable () -> Void)?
+
+    init(
+        snapshot: LayerCompositorSnapshot,
+        closeAction: @escaping @Sendable () -> Void
+    ) {
+        self.snapshot = snapshot
+        self.closeAction = closeAction
+    }
+
+    func close() {
+        lock.lock()
+        let action = closeAction
+        closeAction = nil
+        lock.unlock()
+        action?()
+    }
+
+    deinit { close() }
+}
+
+/// Capability boundary for persistent canonical composition. The cache cannot
+/// invoke full-drawable display, collect, readback, or export scratch paths.
+actor CanonicalTileCompositor {
+    nonisolated let declaredTileBatchWorkspaceBytes: Int
+    private let core: LayerCompositor
+    #if DEBUG
+    private var testingWorkspaceSnapshotOverride: Int?
+    #endif
+    private var workspaceMutationActive = false
+    private var workspaceObservationActive = false
+    private var workspaceGateWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(wrapping core: LayerCompositor) {
+        self.core = core
+        declaredTileBatchWorkspaceBytes =
+            core.declaredTileBatchWorkspaceBytes
+    }
+
+    @MainActor
+    static func make(
+        device: any MTLDevice,
+        library: any MTLLibrary,
+        backendRequest: SparseTileSamplingBackendRequest = .automatic,
+        planLimits: SparseTilePlanLimits = .documentProduction,
+        workspaceByteBudget: Int
+    ) throws -> CanonicalTileCompositor {
+        CanonicalTileCompositor(wrapping: try LayerCompositor.make(
+            device: device,
+            library: library,
+            backendRequest: backendRequest,
+            limits: .production,
+            planLimits: planLimits,
+            gpuPlanProfile: try .canonicalTileBatch(
+                workspaceByteBudget: workspaceByteBudget
+            )
+        ))
+    }
+
+    #if DEBUG
+    @MainActor
+    static func makeForTesting(
+        device: any MTLDevice,
+        library: any MTLLibrary,
+        workspaceByteBudget: Int,
+        returnLease: @escaping SparseTileLeaseReturner = { lease in
+            try lease.returnLease()
+        },
+        completionFailureInjector:
+            SparseTileSamplingCompletionFailureInjector? = nil
+    ) throws -> CanonicalTileCompositor {
+        CanonicalTileCompositor(wrapping: try LayerCompositor.make(
+            device: device,
+            library: library,
+            backendRequest: .forceFallback,
+            gpuPlanProfile: try .canonicalTileBatch(
+                workspaceByteBudget: workspaceByteBudget
+            ),
+            planCache: SparseTileSamplingPlanCache(returnLease: returnLease),
+            completionFailureInjector: completionFailureInjector
+        ))
+    }
+    #endif
+
+    func compositeTiles(
+        _ plan: CanvasCompositeTileUpdatePlan,
+        into bindings: [PaintTileBinding],
+        policy: CanvasCompositeBatchPolicy,
+        failureInjection: LayerCompositeTileBatchFailureInjection?
+    ) async throws -> LayerCompositeTileBatchResult {
+        await beginWorkspaceMutation()
+        defer { finishWorkspaceMutation() }
+        return try await core.compositeTiles(
+            plan,
+            into: bindings,
+            policy: policy,
+            failureInjection: failureInjection
+        )
+    }
+
+    func snapshot() async -> LayerCompositorSnapshot {
+        let observation = await acquireWorkspaceObservation()
+        defer { observation.close() }
+        return observation.snapshot
+    }
+
+    func acquireWorkspaceObservation() async -> CanonicalWorkspaceObservation {
+        while workspaceMutationActive || workspaceObservationActive {
+            await withCheckedContinuation { workspaceGateWaiters.append($0) }
+        }
+        workspaceObservationActive = true
+        let value = await core.snapshot()
+        let observed: LayerCompositorSnapshot
+        #if DEBUG
+        if let testingWorkspaceSnapshotOverride {
+            observed = LayerCompositorSnapshot(
+                isBusy: value.isBusy,
+                scratchBytes: value.scratchBytes,
+                cpuPlanCache: value.cpuPlanCache,
+                gpuPlanCache: value.gpuPlanCache,
+                completion: value.completion,
+                tileReductionBytes: value.tileReductionBytes,
+                physicalWorkspaceBytes: testingWorkspaceSnapshotOverride,
+                physicalWorkspaceByteHighWater: max(
+                    value.physicalWorkspaceByteHighWater,
+                    testingWorkspaceSnapshotOverride
+                ),
+                lastTileBatchMetrics: value.lastTileBatchMetrics
+            )
+        } else {
+            observed = value
+        }
+        #else
+        observed = value
+        #endif
+        return CanonicalWorkspaceObservation(
+            snapshot: observed,
+            closeAction: { [weak self] in
+                Task { await self?.finishWorkspaceObservation() }
+            }
+        )
+    }
+
+    #if DEBUG
+    func testingSetWorkspaceSnapshotOverride(_ bytes: Int?) {
+        precondition(bytes == nil || bytes! >= 0)
+        testingWorkspaceSnapshotOverride = bytes
+    }
+    #endif
+
+    func retryCleanup() async throws {
+        await beginWorkspaceMutation()
+        defer { finishWorkspaceMutation() }
+        try await core.retryDisplayCompletion()
+    }
+
+    func shutdown() async throws {
+        await beginWorkspaceMutation()
+        defer { finishWorkspaceMutation() }
+        try await core.shutdown()
+    }
+
+    private func beginWorkspaceMutation() async {
+        while workspaceMutationActive || workspaceObservationActive {
+            await withCheckedContinuation { workspaceGateWaiters.append($0) }
+        }
+        workspaceMutationActive = true
+    }
+
+    private func finishWorkspaceMutation() {
+        precondition(workspaceMutationActive)
+        workspaceMutationActive = false
+        resumeWorkspaceGateWaiters()
+    }
+
+    private func finishWorkspaceObservation() {
+        guard workspaceObservationActive else { return }
+        workspaceObservationActive = false
+        resumeWorkspaceGateWaiters()
+    }
+
+    private func resumeWorkspaceGateWaiters() {
+        let waiters = workspaceGateWaiters
+        workspaceGateWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
 }
 
 /// Exclusive destination ownership for one compositor invocation. Callers
@@ -563,6 +815,12 @@ final class PreparedLayerCompositeDisplaySubmission: @unchecked Sendable {
 /// batch is pinned at a time. Two reusable accumulation textures carry only
 /// the current output chunk; there is no viewport or per-layer composite cache.
 actor LayerCompositor {
+    nonisolated let declaredTileBatchWorkspaceBytes: Int
+    private struct PreparedTileSampling: @unchecked Sendable {
+        let submission: SparseTileSamplingPreparedSubmission
+        let content: SparseTileSamplingPlanContent
+    }
+
     private struct Scratch: @unchecked Sendable {
         let sample: any MTLTexture
         let accumulationA: any MTLTexture
@@ -593,6 +851,9 @@ actor LayerCompositor {
     private let planCache: SparseTileSamplingPlanCache
     private let gpuPlanCache: SparseTileSamplingGPUPlanCache
     private var scratch: Scratch?
+    private var tileReductionBuffer: (any MTLBuffer)?
+    private var physicalWorkspaceByteHighWater = 0
+    private var lastTileBatchMetrics: CanvasCompositeBatchMetrics?
     private var exportScratch: ExportScratch?
     private var isBusy = false
     private var inflightCommandCount = 0
@@ -605,7 +866,11 @@ actor LayerCompositor {
         library: any MTLLibrary,
         backendRequest: SparseTileSamplingBackendRequest = .automatic,
         limits: LayerCompositorLimits = .production,
-        planLimits: SparseTilePlanLimits = .documentProduction
+        planLimits: SparseTilePlanLimits = .documentProduction,
+        gpuPlanProfile: LayerCompositorGPUPlanProfile = .standard,
+        planCache: SparseTileSamplingPlanCache = SparseTileSamplingPlanCache(),
+        completionFailureInjector:
+            SparseTileSamplingCompletionFailureInjector? = nil
     ) throws -> LayerCompositor {
         ShaderABI.preconditionValid()
         let backend = try SparseTileSamplingBackend.select(
@@ -647,7 +912,8 @@ actor LayerCompositor {
             ),
             limits: limits,
             planLimits: planLimits,
-            planCache: SparseTileSamplingPlanCache(),
+            gpuPlanProfile: gpuPlanProfile,
+            planCache: planCache,
             gpuPlanCache: SparseTileSamplingGPUPlanCache(
                 device: device,
                 limits: SparseTileSamplingGPUPlanLimits(
@@ -655,15 +921,20 @@ actor LayerCompositor {
                     maximumPageEntries: planLimits.maximumPageEntries,
                     maximumBufferBytes: min(
                         planLimits.maximumPageTableBytes,
-                        64 * 1_024 * 1_024
+                        gpuPlanProfile.maximumCachedBufferBytes
                     ),
-                    maximumInflightEncodes: 1,
-                    maximumCachedPlans: LayerStack.maximumLayerCount,
-                    maximumCachedBufferBytes: 64 * 1_024 * 1_024
-                )
+                    maximumInflightEncodes:
+                        gpuPlanProfile.maximumInflightEncodes,
+                    maximumCachedPlans: gpuPlanProfile.maximumCachedPlans,
+                    maximumCachedBufferBytes:
+                        gpuPlanProfile.maximumCachedBufferBytes,
+                    allowsCacheEviction: gpuPlanProfile.allowsCacheEviction
+                ),
+                completionFailureInjector: completionFailureInjector
             )
         )
     }
+
 
     private init(
         device: any MTLDevice,
@@ -675,6 +946,7 @@ actor LayerCompositor {
         blendPipeline: LayerBlendPipelineBinding,
         limits: LayerCompositorLimits,
         planLimits: SparseTilePlanLimits,
+        gpuPlanProfile: LayerCompositorGPUPlanProfile,
         planCache: SparseTileSamplingPlanCache,
         gpuPlanCache: SparseTileSamplingGPUPlanCache
     ) {
@@ -686,6 +958,8 @@ actor LayerCompositor {
         self.planLimits = planLimits
         self.planCache = planCache
         self.gpuPlanCache = gpuPlanCache
+        declaredTileBatchWorkspaceBytes =
+            gpuPlanProfile.declaredTileBatchWorkspaceBytes
     }
 
     /// Consumes `plan`. Its aggregate exact-reference root is closed exactly
@@ -827,13 +1101,393 @@ actor LayerCompositor {
 
     func snapshot() async -> LayerCompositorSnapshot {
         reconcileDisplaySubmission()
+        let gpu = await gpuPlanCache.allocationSnapshot
+        let completion = await gpuPlanCache.completionSnapshot
+        let workspace = physicalWorkspaceBytes(
+            gpu: gpu,
+            completion: completion
+        )
+        physicalWorkspaceByteHighWater = max(
+            physicalWorkspaceByteHighWater,
+            workspace
+        )
         return LayerCompositorSnapshot(
             isBusy: isBusy,
             scratchBytes: (scratch?.bytes ?? 0) + (exportScratch?.bytes ?? 0),
             cpuPlanCache: planCache.snapshot(),
-            gpuPlanCache: await gpuPlanCache.allocationSnapshot,
-            completion: await gpuPlanCache.completionSnapshot
+            gpuPlanCache: gpu,
+            completion: completion,
+            tileReductionBytes: tileReductionBuffer?.length ?? 0,
+            physicalWorkspaceBytes: workspace,
+            physicalWorkspaceByteHighWater:
+                physicalWorkspaceByteHighWater,
+            lastTileBatchMetrics: lastTileBatchMetrics
         )
+    }
+
+    private func physicalWorkspaceBytes(
+        gpu: SparseTileSamplingGPUCacheSnapshot,
+        completion: SparseTileSamplingCompletionSnapshot
+    ) -> Int {
+        (scratch?.bytes ?? 0)
+            + (exportScratch?.bytes ?? 0)
+            + (tileReductionBuffer?.length ?? 0)
+            + gpu.cachedPlanMetalBufferBytes
+            + (gpu.uploadRing?.metalBufferBytes ?? 0)
+            + completion.pendingPlanMetalBufferBytes
+    }
+
+    private func recordPhysicalWorkspaceHighWater() async {
+        let gpu = await gpuPlanCache.allocationSnapshot
+        let completion = await gpuPlanCache.completionSnapshot
+        physicalWorkspaceByteHighWater = max(
+            physicalWorkspaceByteHighWater,
+            physicalWorkspaceBytes(gpu: gpu, completion: completion)
+        )
+    }
+
+    /// Consumes one raw-canonical update plan. Tiles are sorted and encoded in
+    /// bounded serial chunks: one command submission/wait per chunk, never per
+    /// tile or layer. One tracked-hazard scratch set is reused in command order.
+    func compositeTiles(
+        _ plan: CanvasCompositeTileUpdatePlan,
+        into bindings: [PaintTileBinding],
+        policy: CanvasCompositeBatchPolicy = try! .init(
+            maximumTilesPerChunk: 8,
+            maximumLayersPerTile: LayerStack.maximumLayerCount
+        ),
+        failureInjection: LayerCompositeTileBatchFailureInjection? = nil
+    ) async throws -> LayerCompositeTileBatchResult {
+        await settleActiveDisplaySubmission()
+        if await hasCleanupDebt() {
+            guard await performBoundedCleanup() else {
+                throw LayerCompositorError.cleanupPending
+            }
+        }
+        guard !isBusy else { throw LayerCompositorError.busy }
+        guard !plan.isClosed,
+              !bindings.isEmpty,
+              plan.preparedTiles.count >= bindings.count,
+              plan.preparedTiles.count == plan.dirtyCoordinates.count
+        else { throw LayerCompositorError.invalidPlan }
+        let bindingByCoordinate = Dictionary(
+            uniqueKeysWithValues: bindings.map {
+                ($0.descriptor.coordinate, $0)
+            }
+        )
+        guard bindingByCoordinate.count == bindings.count,
+              bindings.allSatisfy({ binding in
+                  plan.preparedTiles.contains {
+                    $0.coordinate == binding.descriptor.coordinate
+                  }
+              }),
+              plan.preparedTiles.allSatisfy({
+                  $0.layers.count <= policy.maximumLayersPerTile
+              })
+        else { throw LayerCompositorError.invalidPlan }
+
+        isBusy = true
+        defer { isBusy = false }
+        var transparent: [PaintTileCoordinate] = []
+        var commandCount = 0
+        var sampleEncodeCount = 0
+        var sampleEncodeAttemptCount = 0
+        var maximumPrepared = 0
+        do {
+            try Task.checkCancellation()
+            guard plan.validatesPublicationClaim() else {
+                throw LayerCompositorError.invalidPlan
+            }
+            guard !plan.preparedTiles.isEmpty else {
+                let metrics = try policy.structuralMetrics(
+                    tileCount: 0,
+                    layerCount: 0
+                )
+                lastTileBatchMetrics = metrics
+                return LayerCompositeTileBatchResult(
+                    fullyTransparentCoordinates: [],
+                    metrics: metrics
+                )
+            }
+            let fullTileRegion = try SparseTileOutputRegion(
+                minX: 0,
+                minY: 0,
+                maxX: PaintTileDescriptor.side,
+                maxY: PaintTileDescriptor.side
+            )
+            let scratch = try ensureScratch(for: fullTileRegion)
+            let reduction = try ensureTileReductionBuffer(
+                tileCapacity: policy.maximumTilesPerChunk
+            )
+            let bindingCoordinates = Set(bindingByCoordinate.keys)
+            let sortedTiles = plan.preparedTiles.filter {
+                bindingCoordinates.contains($0.coordinate)
+            }.sorted {
+                $0.coordinate < $1.coordinate
+            }
+            guard sortedTiles.count == bindings.count else {
+                throw LayerCompositorError.invalidPlan
+            }
+            var chunkStart = 0
+            while chunkStart < sortedTiles.count {
+                try Task.checkCancellation()
+                guard plan.validatesPublicationClaim() else {
+                    throw LayerCompositorError.invalidPlan
+                }
+                let chunkEnd = min(
+                    sortedTiles.count,
+                    chunkStart + policy.maximumTilesPerChunk
+                )
+                let chunk = Array(sortedTiles[chunkStart..<chunkEnd])
+                memset(
+                    reduction.contents(),
+                    0,
+                    Self.tileReductionStride * chunk.count
+                )
+                guard let commandBuffer = commandQueue.makeCommandBuffer()
+                else { throw LayerCompositorError.commandCreationFailed }
+                var terminals: [(
+                    prepared: SparseTileSamplingPreparedSubmission,
+                    content: SparseTileSamplingPlanContent,
+                    waiter: LayerCompositorSamplingTerminalWaiter
+                )] = []
+                terminals.reserveCapacity(
+                    chunk.count * policy.maximumLayersPerTile
+                )
+                var encodedWork = false
+                do {
+                    for (tileIndex, tile) in chunk.enumerated() {
+                        try Task.checkCancellation()
+                        guard let binding = bindingByCoordinate[tile.coordinate]
+                        else { throw LayerCompositorError.invalidPlan }
+                        try validateTarget(binding.texture, for: fullTileRegion)
+                        if tile.layers.isEmpty {
+                            try encodeClear(
+                                binding.texture,
+                                commandBuffer: commandBuffer
+                            )
+                            encodedWork = true
+                        } else {
+                            var backdrop = scratch.accumulationA
+                            for (layerIndex, layer) in tile.layers.enumerated() {
+                                let prepared = try await prepareTileSubmission(
+                                    layer: layer,
+                                    from: plan,
+                                    outputRegion: tile.outputRegion
+                                )
+                                let waiter = LayerCompositorSamplingTerminalWaiter()
+                                var samplingSubmitted = false
+                                do {
+                                    let encodeIndex = sampleEncodeAttemptCount
+                                    sampleEncodeAttemptCount += 1
+                                    if failureInjection?
+                                        .failingSampleEncodeIndex == encodeIndex {
+                                        throw LayerCompositorError.commandFailed(
+                                            "injected tile sample encode failure"
+                                        )
+                                    }
+                                    if layerIndex == 0 {
+                                        try encodeClear(
+                                            backdrop,
+                                            commandBuffer: commandBuffer
+                                        )
+                                        encodedWork = true
+                                    }
+                                    let pass = MTLRenderPassDescriptor()
+                                    pass.colorAttachments[0].texture = scratch.sample
+                                    pass.colorAttachments[0].loadAction = .clear
+                                    pass.colorAttachments[0].storeAction = .store
+                                    pass.colorAttachments[0].clearColor = .init(
+                                        red: 0, green: 0, blue: 0, alpha: 0
+                                    )
+                                    try prepared.submission.encode(
+                                        target: scratch.sample,
+                                        commandBuffer: commandBuffer,
+                                        renderPassDescriptor: pass,
+                                        afterResourcesReturned: { _, succeeded in
+                                            waiter.recordAuthenticatedReturn(
+                                                commandSucceeded: succeeded
+                                            )
+                                        },
+                                        afterTerminalRecorded: { terminal in
+                                            waiter.recordTerminal(terminal)
+                                        }
+                                    )
+                                    samplingSubmitted = true
+                                    terminals.append((
+                                        prepared.submission,
+                                        prepared.content,
+                                        waiter
+                                    ))
+                                    sampleEncodeCount += 1
+                                    maximumPrepared = max(
+                                        maximumPrepared,
+                                        terminals.count
+                                    )
+                                    encodedWork = true
+                                    let last = layerIndex == tile.layers.count - 1
+                                    let destination: any MTLTexture = last
+                                        ? binding.texture
+                                        : (backdrop === scratch.accumulationA
+                                            ? scratch.accumulationB
+                                            : scratch.accumulationA)
+                                    try blendPipeline.encode(
+                                        source: scratch.sample,
+                                        backdrop: backdrop,
+                                        target: destination,
+                                        opacity: layer.opacity,
+                                        mode: layer.blendMode,
+                                        commandBuffer: commandBuffer
+                                    )
+                                    backdrop = destination
+                                } catch {
+                                    if !samplingSubmitted {
+                                        prepared.submission.abandon(
+                                            afterResourcesReturned: { _ in
+                                                waiter.recordAuthenticatedReturn(
+                                                    commandSucceeded: nil
+                                                )
+                                            },
+                                            afterTerminalRecorded: { terminal in
+                                                waiter.recordTerminal(terminal)
+                                            }
+                                        )
+                                        _ = await waiter.wait()
+                                        await gpuPlanCache.invalidate(
+                                            content: prepared.content
+                                        )
+                                    }
+                                    throw error
+                                }
+                            }
+                        }
+                        let logical = binding.descriptor.logicalBounds
+                        try blendPipeline.encodeAlphaReduction(
+                            source: binding.texture,
+                            logicalExtent: SIMD2(
+                                UInt32(logical.width),
+                                UInt32(logical.height)
+                            ),
+                            reductionBuffer: reduction,
+                            reductionOffset:
+                                tileIndex * Self.tileReductionStride,
+                            commandBuffer: commandBuffer
+                        )
+                        encodedWork = true
+                    }
+                } catch {
+                    let operationError = error
+                    if encodedWork {
+                        let commandWaiter = LayerCompositorCommandWaiter()
+                        commandBuffer.addCompletedHandler { command in
+                            commandWaiter.record(command.status == .completed)
+                        }
+                        inflightCommandCount += 1
+                        commandBuffer.commit()
+                        for terminal in terminals {
+                            _ = await terminal.waiter.wait()
+                            await gpuPlanCache.invalidate(
+                                content: terminal.content
+                            )
+                        }
+                        _ = await commandWaiter.wait()
+                        inflightCommandCount -= 1
+                    } else {
+                        for terminal in terminals {
+                            terminal.prepared.abandon(
+                                afterResourcesReturned: { _ in
+                                    terminal.waiter.recordAuthenticatedReturn(
+                                        commandSucceeded: nil
+                                    )
+                                },
+                                afterTerminalRecorded: { value in
+                                    terminal.waiter.recordTerminal(value)
+                                }
+                            )
+                        }
+                        for terminal in terminals {
+                            _ = await terminal.waiter.wait()
+                            await gpuPlanCache.invalidate(
+                                content: terminal.content
+                            )
+                        }
+                    }
+                    throw operationError
+                }
+
+                let commandWaiter = LayerCompositorCommandWaiter()
+                commandBuffer.addCompletedHandler { command in
+                    commandWaiter.record(command.status == .completed)
+                }
+                inflightCommandCount += 1
+                commandBuffer.commit()
+                commandCount += 1
+                var authenticated = true
+                for terminal in terminals {
+                    let resolution = await terminal.waiter.wait()
+                    authenticated = authenticated
+                        && resolution.terminal.resourcesReturned
+                        && resolution.authenticatedCommandSucceeded == true
+                }
+                let commandSucceeded = await commandWaiter.wait()
+                inflightCommandCount -= 1
+                for terminal in terminals {
+                    await gpuPlanCache.invalidate(content: terminal.content)
+                }
+                guard authenticated, commandSucceeded,
+                      commandBuffer.status == .completed
+                else {
+                    throw LayerCompositorError.commandFailed(
+                        commandBuffer.error?.localizedDescription
+                            ?? "command status \(commandBuffer.status.rawValue)"
+                    )
+                }
+                if failureInjection?.failingCommandTerminalChunkIndex
+                    == commandCount - 1 {
+                    throw LayerCompositorError.commandFailed(
+                        "injected tile command terminal failure"
+                    )
+                }
+                for (tileIndex, tile) in chunk.enumerated() {
+                    let pointer = reduction.contents()
+                        .advanced(by: tileIndex * Self.tileReductionStride)
+                        .assumingMemoryBound(
+                            to: PatternDocumentPaintMutationReduction.self
+                        )
+                    guard pointer.pointee.invalid == 0 else {
+                        throw LayerCompositorError.commandFailed(
+                            "canonical tile contains invalid premultiplied pixels"
+                        )
+                    }
+                    if pointer.pointee.maximumAlphaBits == 0 {
+                        transparent.append(tile.coordinate)
+                    }
+                }
+                chunkStart = chunkEnd
+            }
+            guard plan.validatesPublicationClaim() else {
+                throw LayerCompositorError.invalidPlan
+            }
+            let metrics = CanvasCompositeBatchMetrics(
+                commandSubmissionCount: commandCount,
+                commandWaitCount: commandCount,
+                sampleEncodeCount: sampleEncodeCount,
+                scratchSetCount: 1,
+                maximumScratchPixelCount:
+                    PaintTileDescriptor.side * PaintTileDescriptor.side,
+                maximumPreparedSubmissionCount: maximumPrepared
+            )
+            lastTileBatchMetrics = metrics
+            return LayerCompositeTileBatchResult(
+                fullyTransparentCoordinates: transparent.sorted(),
+                metrics: metrics
+            )
+        } catch {
+            guard await performBoundedCleanup() else {
+                throw LayerCompositorError.cleanupPending
+            }
+            throw error
+        }
     }
 
     /// Consumes one coherent layer plan into the reusable bounded display
@@ -887,6 +1541,7 @@ actor LayerCompositor {
         }
         scratch = nil
         exportScratch = nil
+        tileReductionBuffer = nil
     }
 
     private func settleActiveDisplaySubmission() async {
@@ -1081,6 +1736,88 @@ actor LayerCompositor {
                 cpuPlan = nil
             }
             throw operationError
+        }
+    }
+
+    private static let tileReductionStride = 256
+
+    private func ensureTileReductionBuffer(
+        tileCapacity: Int
+    ) throws -> any MTLBuffer {
+        let (required, overflow) = Self.tileReductionStride
+            .multipliedReportingOverflow(by: tileCapacity)
+        guard !overflow, required > 0 else {
+            throw LayerCompositorError.invalidLimit
+        }
+        if let tileReductionBuffer,
+           tileReductionBuffer.length >= required {
+            return tileReductionBuffer
+        }
+        guard let buffer = device.makeBuffer(
+            length: required,
+            options: .storageModeShared
+        ) else { throw LayerCompositorError.scratchAllocationFailed }
+        buffer.label = "Canonical Tile Alpha Reductions"
+        tileReductionBuffer = buffer
+        return buffer
+    }
+
+    private func prepareTileSubmission(
+        layer: PreparedLayerCompositeLayer,
+        from plan: CanvasCompositeTileUpdatePlan,
+        outputRegion: SparseTileOutputRegion
+    ) async throws -> PreparedTileSampling {
+        guard let pipeline = samplingPipelines[
+            layer.samplingPlan.outputMapping.kind
+        ] else { throw LayerCompositorError.invalidPlan }
+        var cpuPlan: SparseTileSamplingPlanLease?
+        var gpuPlan: SparseTileSamplingGPUPlanLease?
+        do {
+            let sourceBatch = try plan.sourceBatch(
+                for: layer.sourceSelection
+            )
+            cpuPlan = try planCache.acquire(
+                key: layer.samplingPlan.key,
+                sourceBatch: sourceBatch,
+                outputRegion: outputRegion,
+                limits: planLimits,
+                // Tile-local plans are independently numbered from slot zero.
+                // They are immutable preparation evidence, not a predecessor
+                // for this shared live-slot generation.
+                updating: nil
+            )
+            gpuPlan = try await gpuPlanCache.acquire(
+                plan: cpuPlan!,
+                pipeline: pipeline
+            )
+            let content = cpuPlan!.content
+            _ = planCache.evictContent(
+                key: content.key,
+                outputRegion: outputRegion
+            )
+            try cpuPlan!.retire()
+            cpuPlan = nil
+            let prepared = try SparseTileSamplingEncoder.prepareSubmission(
+                plan: gpuPlan!,
+                parameters: layer.samplingParameters
+            )
+            gpuPlan = nil
+            await recordPhysicalWorkspaceHighWater()
+            return PreparedTileSampling(
+                submission: prepared,
+                content: content
+            )
+        } catch {
+            if let gpuPlan { try? gpuPlan.complete() }
+            if let cpuPlan {
+                _ = planCache.evictContent(
+                    key: cpuPlan.content.key,
+                    outputRegion: outputRegion
+                )
+                await gpuPlanCache.invalidate(content: cpuPlan.content)
+                try? cpuPlan.retire()
+            }
+            throw error
         }
     }
 

@@ -269,6 +269,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         InteractiveBrushTraceRecorder
     private let interactiveStrokePresentationCache:
         InteractiveStrokePresentationCache
+    /// Task 5 ownership root. Display adoption remains intentionally deferred
+    /// to Task 6; establishing the bounded cache here prevents production from
+    /// silently stacking another memory pool later.
+    private let canvasCompositeTileCache: CanvasCompositeTileCache?
+    private let presentationMemoryEnvelope: CanvasPresentationMemoryEnvelope
     private struct PendingInteractiveBrushInputTrace {
         let sample: StrokeSample
         let lineage: InteractiveBrushInputTrace
@@ -781,19 +786,23 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             storagePixelSize: storageSize,
             radialLayout: strategy.compiledSymmetry.domain.finite?.radial.layout
         )
+        let presentationMemory = try CanvasPresentationMemoryEnvelope
+            .production(for: device)
+        presentationMemoryEnvelope = presentationMemory
         let paintContext = try DocumentPaintRenderContext(
             device: device,
             commandQueue: commandQueue,
             library: library,
             geometry: geometry,
             initialLayerStack: initialLayerStack,
-            byteBudget: 512 * 1_024 * 1_024,
-            snapshotPayloadLiabilityByteBudget: 512 * 1_024 * 1_024,
-            transferByteCapacity: 64 * 1_024 * 1_024,
+            byteBudget: presentationMemory.documentStoreBytes,
+            snapshotPayloadLiabilityByteBudget:
+                presentationMemory.documentStoreBytes,
+            transferByteCapacity: presentationMemory.documentStoreBytes,
             maximumRevisionBytes: historyByteBudget
         )
         let traceRecorder = InteractiveBrushTraceRecorder()
-        let transientCacheByteBudget = 512 * 1_024 * 1_024
+        let transientCacheByteBudget = presentationMemory.transientCacheBytes
         let transientCacheBytesPerTile =
             PaintTileDescriptor.residentByteCount
             + DepositionComponentCoverage.residentByteCount(
@@ -815,6 +824,27 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     transientCacheByteBudget / transientCacheBytesPerTile,
                 traceRecorder: traceRecorder
             )
+        if presentationMemory.canonicalCacheBytes > 0 {
+            canvasCompositeTileCache = try CanvasCompositeTileCache(
+                device: device,
+                compositor: CanonicalTileCompositor.make(
+                    device: device,
+                    library: library,
+                    planLimits: .documentProduction,
+                    workspaceByteBudget:
+                        presentationMemory.canonicalBatchWorkspaceBytes
+                ),
+                storagePixelSize: storageSize,
+                baselineIdentity: paintContext.canonicalStateIdentity(),
+                envelope: presentationMemory
+            )
+        } else {
+            // Task 5 is not yet a display dependency. On a device without an
+            // additive canonical allowance, keep the shipping renderer alive;
+            // Task 6 will surface explicit unsupported-cache capacity only
+            // when direct-cache presentation is requested.
+            canvasCompositeTileCache = nil
+        }
         documentPixelSizeState = configuration.pixelSize
         storagePixelSizeState = storageSize
         let frameBudget = try DepositionFrameBudget(
@@ -3191,6 +3221,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             _ = try await completePendingInteractiveStrokeAndAwaitIdle()
         }
         let snapshot = try await paintContext.shutdown(reason: reason)
+        try await canvasCompositeTileCache?.shutdown()
         guard activeStroke == nil, isIdle else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
@@ -5594,6 +5625,18 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         -> InteractiveStrokePresentationCache
     {
         interactiveStrokePresentationCache
+    }
+
+    func presentationMemoryEnvelopeForTesting()
+        -> CanvasPresentationMemoryEnvelope
+    {
+        presentationMemoryEnvelope
+    }
+
+    func canvasCompositeCacheSnapshotForTesting() async
+        -> CanvasCompositeTileCacheSnapshot?
+    {
+        await canvasCompositeTileCache?.snapshot()
     }
 
     func interactiveStrokeCacheLifecycleIdentityForTesting() -> UUID? {

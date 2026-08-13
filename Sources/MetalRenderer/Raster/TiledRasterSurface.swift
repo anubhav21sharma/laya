@@ -215,7 +215,9 @@ final class TiledRasterExactReferenceProvider: @unchecked Sendable {
     func leaseExactReferences(
         _ selectedReferences: [PaintTileReference],
         using capture: TiledRasterExactReferenceCapture,
-        pinReasons: [PaintTilePinReason]
+        pinReasons: [PaintTilePinReason],
+        aggregateTransferAdmission:
+            PaintTileAggregateTransferAdmission? = nil
     ) throws -> TiledRasterExactReferenceLease {
         try Self.validateExactSubset(
             selectedReferences,
@@ -224,14 +226,17 @@ final class TiledRasterExactReferenceProvider: @unchecked Sendable {
         return try capture.reserve(
             selectedReferences,
             from: self,
-            pinReasons: Array(Set(pinReasons)).sorted()
+            pinReasons: Array(Set(pinReasons)).sorted(),
+            aggregateTransferAdmission: aggregateTransferAdmission
         )
     }
 
     func leaseExactReferences(
         _ selectedReferences: [PaintTileReference],
         using borrow: TiledRasterExactReferenceCapture.Borrow,
-        pinReasons: [PaintTilePinReason]
+        pinReasons: [PaintTilePinReason],
+        aggregateTransferAdmission:
+            PaintTileAggregateTransferAdmission? = nil
     ) throws -> TiledRasterExactReferenceLease {
         try Self.validateExactSubset(
             selectedReferences,
@@ -240,7 +245,8 @@ final class TiledRasterExactReferenceProvider: @unchecked Sendable {
         return try borrow.reserve(
             selectedReferences,
             from: self,
-            pinReasons: Array(Set(pinReasons)).sorted()
+            pinReasons: Array(Set(pinReasons)).sorted(),
+            aggregateTransferAdmission: aggregateTransferAdmission
         )
     }
 
@@ -359,13 +365,30 @@ final class TiledRasterExactReferenceCapture: @unchecked Sendable {
         fileprivate func reserve(
             _ references: [PaintTileReference],
             from provider: TiledRasterExactReferenceProvider,
-            pinReasons: [PaintTilePinReason]
+            pinReasons: [PaintTilePinReason],
+            aggregateTransferAdmission:
+                PaintTileAggregateTransferAdmission? = nil
         ) throws -> TiledRasterExactReferenceLease {
             try capture.reserveBorrowed(
                 references,
                 from: provider,
                 borrowID: id,
-                pinReasons: pinReasons
+                pinReasons: pinReasons,
+                aggregateTransferAdmission: aggregateTransferAdmission
+            )
+        }
+
+        func payloadWithTransferReceipt(
+            _ reference: PaintTileReference,
+            from provider: TiledRasterExactReferenceProvider,
+            aggregateTransferAdmission:
+                PaintTileAggregateTransferAdmission? = nil
+        ) throws -> PaintTileTransferOperationResult<PaintTilePayload> {
+            try capture.payloadBorrowedWithTransferReceipt(
+                reference,
+                from: provider,
+                borrowID: id,
+                aggregateTransferAdmission: aggregateTransferAdmission
             )
         }
 
@@ -507,7 +530,9 @@ final class TiledRasterExactReferenceCapture: @unchecked Sendable {
     fileprivate func reserve(
         _ references: [PaintTileReference],
         from provider: TiledRasterExactReferenceProvider,
-        pinReasons: [PaintTilePinReason]
+        pinReasons: [PaintTilePinReason],
+        aggregateTransferAdmission:
+            PaintTileAggregateTransferAdmission? = nil
     ) throws -> TiledRasterExactReferenceLease {
         lock.lock()
         defer { lock.unlock() }
@@ -518,17 +543,20 @@ final class TiledRasterExactReferenceCapture: @unchecked Sendable {
             for: provider,
             references: references
         )
-        let lease = try group.store.reserveRetainedReferences(
+        let operation = try group.store
+            .reserveRetainedReferencesWithTransferReceipt(
             references,
             token: group.token,
             leaseSurfaceID: provider.surfaceID,
             leaseLayerID: provider.layerID,
             leaseGeneration: provider.generation,
-            pinReasons: pinReasons
+            pinReasons: pinReasons,
+            aggregateTransferAdmission: aggregateTransferAdmission
         )
         return TiledRasterExactReferenceLease(
             provider: provider,
-            lease: lease
+            lease: operation.value,
+            transferAccounting: operation.transferAccounting
         )
     }
 
@@ -536,6 +564,18 @@ final class TiledRasterExactReferenceCapture: @unchecked Sendable {
         _ reference: PaintTileReference,
         from provider: TiledRasterExactReferenceProvider
     ) throws -> PaintTilePayload {
+        try payloadWithTransferReceipt(
+            reference,
+            from: provider
+        ).value
+    }
+
+    func payloadWithTransferReceipt(
+        _ reference: PaintTileReference,
+        from provider: TiledRasterExactReferenceProvider,
+        aggregateTransferAdmission:
+            PaintTileAggregateTransferAdmission? = nil
+    ) throws -> PaintTileTransferOperationResult<PaintTilePayload> {
         lock.lock()
         defer { lock.unlock() }
         guard !closeRequested else {
@@ -545,9 +585,10 @@ final class TiledRasterExactReferenceCapture: @unchecked Sendable {
             for: provider,
             references: [reference]
         )
-        return try group.store.payload(
+        return try group.store.payloadWithTransferReceipt(
             exactReference: reference,
-            retainedBy: group.token
+            retainedBy: group.token,
+            aggregateTransferAdmission: aggregateTransferAdmission
         )
     }
 
@@ -555,7 +596,9 @@ final class TiledRasterExactReferenceCapture: @unchecked Sendable {
         _ references: [PaintTileReference],
         from provider: TiledRasterExactReferenceProvider,
         borrowID: UUID,
-        pinReasons: [PaintTilePinReason]
+        pinReasons: [PaintTilePinReason],
+        aggregateTransferAdmission:
+            PaintTileAggregateTransferAdmission? = nil
     ) throws -> TiledRasterExactReferenceLease {
         lock.lock()
         defer { lock.unlock() }
@@ -567,17 +610,44 @@ final class TiledRasterExactReferenceCapture: @unchecked Sendable {
             for: provider,
             references: references
         )
-        let lease = try group.store.reserveRetainedReferences(
+        let operation = try group.store
+            .reserveRetainedReferencesWithTransferReceipt(
             references,
             token: group.token,
             leaseSurfaceID: provider.surfaceID,
             leaseLayerID: provider.layerID,
             leaseGeneration: provider.generation,
-            pinReasons: pinReasons
+            pinReasons: pinReasons,
+            aggregateTransferAdmission: aggregateTransferAdmission
         )
         return TiledRasterExactReferenceLease(
             provider: provider,
-            lease: lease
+            lease: operation.value,
+            transferAccounting: operation.transferAccounting
+        )
+    }
+
+    private func payloadBorrowedWithTransferReceipt(
+        _ reference: PaintTileReference,
+        from provider: TiledRasterExactReferenceProvider,
+        borrowID: UUID,
+        aggregateTransferAdmission:
+            PaintTileAggregateTransferAdmission? = nil
+    ) throws -> PaintTileTransferOperationResult<PaintTilePayload> {
+        lock.lock()
+        defer { lock.unlock() }
+        let lineageID = ObjectIdentifier(provider.lineage)
+        guard activeBorrows[borrowID]?.contains(lineageID) == true else {
+            throw TiledRasterSurfaceError.exactReferenceCaptureClosed
+        }
+        let group = try retainedGroup(
+            for: provider,
+            references: [reference]
+        )
+        return try group.store.payloadWithTransferReceipt(
+            exactReference: reference,
+            retainedBy: group.token,
+            aggregateTransferAdmission: aggregateTransferAdmission
         )
     }
 
@@ -630,6 +700,7 @@ final class TiledRasterExactReferenceLease: @unchecked Sendable {
     let layerID: UUID
     let generation: UInt64
     let bindings: [PaintTileBinding]
+    let transferAccounting: PaintTileTransferAccounting?
 
     private let lock = NSLock()
     private let provider: TiledRasterExactReferenceProvider
@@ -637,7 +708,8 @@ final class TiledRasterExactReferenceLease: @unchecked Sendable {
 
     fileprivate init(
         provider: TiledRasterExactReferenceProvider,
-        lease: PaintTileLease
+        lease: PaintTileLease,
+        transferAccounting: PaintTileTransferAccounting?
     ) {
         self.provider = provider
         self.lease = lease
@@ -645,6 +717,7 @@ final class TiledRasterExactReferenceLease: @unchecked Sendable {
         layerID = provider.layerID
         generation = provider.generation
         bindings = lease.bindings
+        self.transferAccounting = transferAccounting
     }
 
     func returnLease() throws {
@@ -919,20 +992,38 @@ public final class TiledRasterSurface: RasterSurface, @unchecked Sendable {
     public func reserveSortedUniqueTiles(
         at coordinates: [PaintTileCoordinate],
         pinReasons: [PaintTilePinReason],
-        failureInjection: PaintTileAllocationFailureInjection? = nil
+        failureInjection: PaintTileAllocationFailureInjection? = nil,
+        aggregateTransferAdmission:
+            PaintTileAggregateTransferAdmission? = nil
     ) throws -> PaintTileLease {
+        try reserveSortedUniqueTilesWithTransferReceipt(
+            at: coordinates,
+            pinReasons: pinReasons,
+            failureInjection: failureInjection,
+            aggregateTransferAdmission: aggregateTransferAdmission
+        ).value
+    }
+
+    func reserveSortedUniqueTilesWithTransferReceipt(
+        at coordinates: [PaintTileCoordinate],
+        pinReasons: [PaintTilePinReason],
+        failureInjection: PaintTileAllocationFailureInjection? = nil,
+        aggregateTransferAdmission:
+            PaintTileAggregateTransferAdmission? = nil
+    ) throws -> PaintTileTransferOperationResult<PaintTileLease> {
         guard referenceView == nil else {
             throw TiledRasterSurfaceError.immutableReferenceView
         }
         return try withLock {
-            try store.reserveSortedUnique(
+            try store.reserveSortedUniqueWithTransferReceipt(
                 surfaceID: surfaceID,
                 layerID: layerID,
                 generation: currentGeneration,
                 pixelSize: pixelSize,
                 coordinates: coordinates,
                 pinReasons: pinReasons,
-                failureInjection: failureInjection
+                failureInjection: failureInjection,
+                aggregateTransferAdmission: aggregateTransferAdmission
             )
         }
     }

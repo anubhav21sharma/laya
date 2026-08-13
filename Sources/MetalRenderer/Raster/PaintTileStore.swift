@@ -622,6 +622,10 @@ public struct PaintTileTransferAccounting: Equatable, Sendable {
     public let capturedPayloadBytes: Int
     public let peakTrackedBytes: Int
     public let capacityBytes: Int
+    public let snapshotMetadataBytesAtPeak: Int
+    public let additionalPhysicalBytesAtPeak: Int
+    public let aggregatePeakTrackedBytes: Int
+    public let aggregateCapacityBytes: Int?
 
     public init(
         residentTextureBytesBefore: Int,
@@ -632,7 +636,11 @@ public struct PaintTileTransferAccounting: Equatable, Sendable {
         readbackStagingBytes: Int,
         capturedPayloadBytes: Int,
         peakTrackedBytes: Int,
-        capacityBytes: Int
+        capacityBytes: Int,
+        snapshotMetadataBytesAtPeak: Int = 0,
+        additionalPhysicalBytesAtPeak: Int = 0,
+        aggregatePeakTrackedBytes: Int? = nil,
+        aggregateCapacityBytes: Int? = nil
     ) {
         self.residentTextureBytesBefore = residentTextureBytesBefore
         self.allocatedTextureBytes = allocatedTextureBytes
@@ -643,6 +651,34 @@ public struct PaintTileTransferAccounting: Equatable, Sendable {
         self.capturedPayloadBytes = capturedPayloadBytes
         self.peakTrackedBytes = peakTrackedBytes
         self.capacityBytes = capacityBytes
+        self.snapshotMetadataBytesAtPeak = snapshotMetadataBytesAtPeak
+        self.additionalPhysicalBytesAtPeak = additionalPhysicalBytesAtPeak
+        self.aggregatePeakTrackedBytes = aggregatePeakTrackedBytes
+            ?? peakTrackedBytes
+        self.aggregateCapacityBytes = aggregateCapacityBytes
+    }
+}
+
+/// Operation-scoped accounting returned by the exact store mutation that
+/// produced it. Callers must not infer ownership from the store's diagnostic
+/// `lastTransferAccounting`, because another operation may replace that value.
+struct PaintTileTransferOperationResult<Value> {
+    let value: Value
+    let transferAccounting: PaintTileTransferAccounting?
+}
+
+public struct PaintTileAggregateTransferAdmission: Equatable, Sendable {
+    public let additionalPhysicalBytes: Int
+    public let maximumPhysicalBytes: Int
+
+    public init(
+        additionalPhysicalBytes: Int,
+        maximumPhysicalBytes: Int
+    ) {
+        precondition(additionalPhysicalBytes >= 0)
+        precondition(maximumPhysicalBytes >= 0)
+        self.additionalPhysicalBytes = additionalPhysicalBytes
+        self.maximumPhysicalBytes = maximumPhysicalBytes
     }
 }
 
@@ -684,6 +720,7 @@ public struct PaintTileStoreSnapshot: Equatable, Sendable {
     public let entries: [PaintTileStoreEntrySnapshot]
     public let leastRecentlyUsedOrder: [PaintTileIdentity]
     public let lastTransferAccounting: PaintTileTransferAccounting?
+    public let transferAccountingSequence: UInt64
     public let transferPeakTrackedByteHighWater: Int
 }
 
@@ -921,6 +958,7 @@ public final class PaintTileStore: @unchecked Sendable {
     private var nextLeaseID: UInt64 = 0
     private var stateRevision: UInt64 = 0
     private var lastTransferAccounting: PaintTileTransferAccounting?
+    private var transferAccountingSequence: UInt64 = 0
     private var transferPeakTrackedByteHighWater = 0
     private var persistentZeroSource: (any MTLBuffer)?
     private var persistentZeroAllocationCount = 0
@@ -1219,6 +1257,18 @@ public final class PaintTileStore: @unchecked Sendable {
         exactReference reference: PaintTileReference,
         retainedBy token: PaintTileSnapshotToken
     ) throws -> PaintTilePayload {
+        try payloadWithTransferReceipt(
+            exactReference: reference,
+            retainedBy: token
+        ).value
+    }
+
+    func payloadWithTransferReceipt(
+        exactReference reference: PaintTileReference,
+        retainedBy token: PaintTileSnapshotToken,
+        aggregateTransferAdmission:
+            PaintTileAggregateTransferAdmission? = nil
+    ) throws -> PaintTileTransferOperationResult<PaintTilePayload> {
         try withLock {
             guard reference.storeIdentity == identity else {
                 throw PaintTileStoreError.foreignStoreReference
@@ -1246,27 +1296,36 @@ public final class PaintTileStore: @unchecked Sendable {
             else { throw PaintTileStoreError.staleTileReference }
 
             let backing: PaintTileBackingSnapshot?
+            var receipt: PaintTileTransferAccounting?
             if let installed = record.backing {
                 backing = installed
             } else {
                 let accounting = try transferAccounting(
                     captureIdentities: [record.identity],
-                    allocationBackings: []
+                    allocationBackings: [],
+                    aggregateAdmission: aggregateTransferAdmission
                 )
                 backing = try transfer(
                     evicted: [record.identity],
                     allocations: []
                 ).captured[record.identity]
                 recordTransferAccounting(accounting)
+                receipt = accounting
             }
             switch backing {
             case .knownClear:
-                return .knownClear
+                return PaintTileTransferOperationResult(
+                    value: .knownClear,
+                    transferAccounting: receipt
+                )
             case let .rgba16Float(data):
                 guard data.count == PaintTileDescriptor.residentByteCount else {
                     throw PaintTileStoreError.leaseBindingMismatch
                 }
-                return .rgba16Float(data)
+                return PaintTileTransferOperationResult(
+                    value: .rgba16Float(data),
+                    transferAccounting: receipt
+                )
             case .residentOnly, nil:
                 throw PaintTileStoreError.leaseBindingMismatch
             }
@@ -1553,7 +1612,7 @@ public final class PaintTileStore: @unchecked Sendable {
             leaseLayerID: leaseLayerID,
             leaseGeneration: leaseGeneration,
             pinReasons: pinReasons
-        )
+        ).value
     }
 
     func reserveRetainedReferences(
@@ -1562,15 +1621,39 @@ public final class PaintTileStore: @unchecked Sendable {
         leaseSurfaceID: UUID,
         leaseLayerID: UUID,
         leaseGeneration: UInt64,
-        pinReasons: [PaintTilePinReason]
+        pinReasons: [PaintTilePinReason],
+        aggregateTransferAdmission:
+            PaintTileAggregateTransferAdmission? = nil
     ) throws -> PaintTileLease {
+        try reserveRetainedReferencesWithTransferReceipt(
+            references,
+            token: token,
+            leaseSurfaceID: leaseSurfaceID,
+            leaseLayerID: leaseLayerID,
+            leaseGeneration: leaseGeneration,
+            pinReasons: pinReasons,
+            aggregateTransferAdmission: aggregateTransferAdmission
+        ).value
+    }
+
+    func reserveRetainedReferencesWithTransferReceipt(
+        _ references: [PaintTileReference],
+        token: PaintTileSnapshotToken,
+        leaseSurfaceID: UUID,
+        leaseLayerID: UUID,
+        leaseGeneration: UInt64,
+        pinReasons: [PaintTilePinReason],
+        aggregateTransferAdmission:
+            PaintTileAggregateTransferAdmission? = nil
+    ) throws -> PaintTileTransferOperationResult<PaintTileLease> {
         try reserveReferencesImpl(
             references,
             token: token,
             leaseSurfaceID: leaseSurfaceID,
             leaseLayerID: leaseLayerID,
             leaseGeneration: leaseGeneration,
-            pinReasons: pinReasons
+            pinReasons: pinReasons,
+            aggregateTransferAdmission: aggregateTransferAdmission
         )
     }
 
@@ -1580,8 +1663,10 @@ public final class PaintTileStore: @unchecked Sendable {
         leaseSurfaceID: UUID,
         leaseLayerID: UUID,
         leaseGeneration: UInt64,
-        pinReasons: [PaintTilePinReason]
-    ) throws -> PaintTileLease {
+        pinReasons: [PaintTilePinReason],
+        aggregateTransferAdmission:
+            PaintTileAggregateTransferAdmission? = nil
+    ) throws -> PaintTileTransferOperationResult<PaintTileLease> {
         guard !pinReasons.isEmpty else {
             throw PaintTileStoreError.emptyPinReasons
         }
@@ -1692,12 +1777,16 @@ public final class PaintTileStore: @unchecked Sendable {
             let allocationCount = requested.reduce(into: 0) {
                 if $1.1.texture == nil { $0 += 1 }
             }
-            let accounting = try transferAccounting(
-                captureIdentities: evicted,
-                allocationBackings: requested.compactMap {
-                    $0.1.texture == nil ? ($0.1.backing ?? .knownClear) : nil
-                }
-            )
+            let allocationBackings = requested.compactMap {
+                $0.1.texture == nil ? ($0.1.backing ?? .knownClear) : nil
+            }
+            let accounting = evicted.isEmpty && allocationBackings.isEmpty
+                ? nil
+                : try transferAccounting(
+                    captureIdentities: evicted,
+                    allocationBackings: allocationBackings,
+                    aggregateAdmission: aggregateTransferAdmission
+                )
             var allocations: [Allocation] = []
             allocations.reserveCapacity(allocationCount)
             for (key, record) in requested where record.texture == nil {
@@ -1785,15 +1874,18 @@ public final class PaintTileStore: @unchecked Sendable {
             nextLeaseID = leaseRawID
             stateRevision = nextRevision
             installPersistentZeroSource(from: transferResult)
-            recordTransferAccounting(accounting)
-            return PaintTileLease(
-                id: leaseID,
-                surfaceID: leaseSurfaceID,
-                layerID: leaseLayerID,
-                generation: leaseGeneration,
-                storeIdentity: identity,
-                pinReasons: pinReasons,
-                bindings: bindings
+            if let accounting { recordTransferAccounting(accounting) }
+            return PaintTileTransferOperationResult(
+                value: PaintTileLease(
+                    id: leaseID,
+                    surfaceID: leaseSurfaceID,
+                    layerID: leaseLayerID,
+                    generation: leaseGeneration,
+                    storeIdentity: identity,
+                    pinReasons: pinReasons,
+                    bindings: bindings
+                ),
+                transferAccounting: accounting
             )
         }
     }
@@ -2018,6 +2110,7 @@ public final class PaintTileStore: @unchecked Sendable {
                 entries: entrySnapshots,
                 leastRecentlyUsedOrder: residency.leastRecentlyUsedOrder,
                 lastTransferAccounting: lastTransferAccounting,
+                transferAccountingSequence: transferAccountingSequence,
                 transferPeakTrackedByteHighWater:
                     transferPeakTrackedByteHighWater
             )
@@ -2135,8 +2228,33 @@ public final class PaintTileStore: @unchecked Sendable {
         pixelSize: PixelSize,
         coordinates: [PaintTileCoordinate],
         pinReasons: [PaintTilePinReason],
-        failureInjection: PaintTileAllocationFailureInjection? = nil
+        failureInjection: PaintTileAllocationFailureInjection? = nil,
+        aggregateTransferAdmission:
+            PaintTileAggregateTransferAdmission? = nil
     ) throws -> PaintTileLease {
+        try reserveSortedUniqueWithTransferReceipt(
+            surfaceID: surfaceID,
+            layerID: layerID,
+            generation: generation,
+            pixelSize: pixelSize,
+            coordinates: coordinates,
+            pinReasons: pinReasons,
+            failureInjection: failureInjection,
+            aggregateTransferAdmission: aggregateTransferAdmission
+        ).value
+    }
+
+    func reserveSortedUniqueWithTransferReceipt(
+        surfaceID: UUID,
+        layerID: UUID,
+        generation: UInt64,
+        pixelSize: PixelSize,
+        coordinates: [PaintTileCoordinate],
+        pinReasons: [PaintTilePinReason],
+        failureInjection: PaintTileAllocationFailureInjection? = nil,
+        aggregateTransferAdmission:
+            PaintTileAggregateTransferAdmission? = nil
+    ) throws -> PaintTileTransferOperationResult<PaintTileLease> {
         guard !pinReasons.isEmpty else {
             throw PaintTileStoreError.emptyPinReasons
         }
@@ -2173,7 +2291,10 @@ public final class PaintTileStore: @unchecked Sendable {
                 pinReasons: pinReasons
             )
         }) {
-            return existing
+            return PaintTileTransferOperationResult(
+                value: existing,
+                transferAccounting: nil
+            )
         }
         let descriptors = try sortedCoordinates.map {
             try PaintTileDescriptor(
@@ -2275,7 +2396,8 @@ public final class PaintTileStore: @unchecked Sendable {
                 allocationBackings: requested.compactMap {
                     guard records[$0.0]?.texture == nil else { return nil }
                     return records[$0.0]?.backing ?? .knownClear
-                }
+                },
+                aggregateAdmission: aggregateTransferAdmission
             )
 
             var allocations: [Allocation] = []
@@ -2403,14 +2525,17 @@ public final class PaintTileStore: @unchecked Sendable {
             stateRevision = nextStateRevision
             installPersistentZeroSource(from: transferResult)
             recordTransferAccounting(accounting)
-            return PaintTileLease(
-                id: leaseID,
-                surfaceID: surfaceID,
-                layerID: layerID,
-                generation: generation,
-                storeIdentity: identity,
-                pinReasons: pinReasons,
-                bindings: bindings
+            return PaintTileTransferOperationResult(
+                value: PaintTileLease(
+                    id: leaseID,
+                    surfaceID: surfaceID,
+                    layerID: layerID,
+                    generation: generation,
+                    storeIdentity: identity,
+                    pinReasons: pinReasons,
+                    bindings: bindings
+                ),
+                transferAccounting: accounting
             )
         }
     }
@@ -3616,8 +3741,21 @@ public final class PaintTileStore: @unchecked Sendable {
     }
 
     public func applyMemoryPressure(
-        targetResidentBytes: Int
+        targetResidentBytes: Int,
+        aggregateTransferAdmission:
+            PaintTileAggregateTransferAdmission? = nil
     ) throws -> PaintTilePressureResult {
+        try applyMemoryPressureWithTransferReceipt(
+            targetResidentBytes: targetResidentBytes,
+            aggregateTransferAdmission: aggregateTransferAdmission
+        ).value
+    }
+
+    func applyMemoryPressureWithTransferReceipt(
+        targetResidentBytes: Int,
+        aggregateTransferAdmission:
+            PaintTileAggregateTransferAdmission? = nil
+    ) throws -> PaintTileTransferOperationResult<PaintTilePressureResult> {
         try withLock {
             var stagedResidency = residency
             let colorTarget = targetResidentBytes < 0
@@ -3650,7 +3788,8 @@ public final class PaintTileStore: @unchecked Sendable {
             if !evicted.isEmpty {
                 let measured = try transferAccounting(
                     captureIdentities: evicted,
-                    allocationBackings: []
+                    allocationBackings: [],
+                    aggregateAdmission: aggregateTransferAdmission
                 )
                 let captured = try transfer(
                     evicted: evicted,
@@ -3677,18 +3816,24 @@ public final class PaintTileStore: @unchecked Sendable {
             if let accounting { recordTransferAccounting(accounting) }
             let backingBytes = Self.backingByteCount(in: stagedRecords)
             if remainingBytes > targetResidentBytes {
-                return .unsatisfied(
-                    targetBytes: targetResidentBytes,
-                    remainingResidentBytes: remainingBytes,
-                    pinnedBytes: pinnedBytes,
-                    backingByteCount: backingBytes,
-                    evictedIdentities: evicted
+                return PaintTileTransferOperationResult(
+                    value: .unsatisfied(
+                        targetBytes: targetResidentBytes,
+                        remainingResidentBytes: remainingBytes,
+                        pinnedBytes: pinnedBytes,
+                        backingByteCount: backingBytes,
+                        evictedIdentities: evicted
+                    ),
+                    transferAccounting: accounting
                 )
             }
-            return .satisfied(
-                evictedIdentities: evicted,
-                residentByteCount: remainingBytes,
-                backingByteCount: backingBytes
+            return PaintTileTransferOperationResult(
+                value: .satisfied(
+                    evictedIdentities: evicted,
+                    residentByteCount: remainingBytes,
+                    backingByteCount: backingBytes
+                ),
+                transferAccounting: accounting
             )
         }
     }
@@ -4167,7 +4312,8 @@ public final class PaintTileStore: @unchecked Sendable {
     private func transferAccounting(
         captureIdentities: [PaintTileIdentity],
         allocationBackings: [PaintTileBackingSnapshot],
-        additionalStagingBytes: Int = 0
+        additionalStagingBytes: Int = 0,
+        aggregateAdmission: PaintTileAggregateTransferAdmission? = nil
     ) throws -> PaintTileTransferAccounting {
         let captureCount = captureIdentities.reduce(into: 0) {
             count, identity in
@@ -4239,6 +4385,41 @@ public final class PaintTileStore: @unchecked Sendable {
                 stagingBytes: stagingBytes
             )
         }
+        let aggregatePeakBytes: Int
+        if let aggregateAdmission {
+            let availableAfterMetadata = aggregateAdmission
+                .maximumPhysicalBytes >= snapshotMetadataByteCount
+                    ? aggregateAdmission.maximumPhysicalBytes
+                        - snapshotMetadataByteCount
+                    : 0
+            let availableStoreBytes = availableAfterMetadata
+                >= aggregateAdmission.additionalPhysicalBytes
+                    ? availableAfterMetadata
+                        - aggregateAdmission.additionalPhysicalBytes
+                    : 0
+            guard peakBytes <= availableStoreBytes else {
+                throw PaintTileStoreError.transferCapacityExceeded(
+                    requiredBytes: peakBytes,
+                    capacityBytes: availableStoreBytes,
+                    residentBytes: residentBytes,
+                    allocationBytes: allocatedBytes,
+                    persistentZeroBytes: existingPersistentZeroBytes
+                        + persistentZeroAllocationBytes,
+                    stagingBytes: stagingBytes
+                )
+            }
+            aggregatePeakBytes = try checkedSum([
+                peakBytes,
+                snapshotMetadataByteCount,
+                aggregateAdmission.additionalPhysicalBytes,
+            ])
+            precondition(
+                aggregatePeakBytes
+                    <= aggregateAdmission.maximumPhysicalBytes
+            )
+        } else {
+            aggregatePeakBytes = peakBytes
+        }
         return PaintTileTransferAccounting(
             residentTextureBytesBefore: residentBytes,
             allocatedTextureBytes: allocatedBytes,
@@ -4248,7 +4429,14 @@ public final class PaintTileStore: @unchecked Sendable {
             readbackStagingBytes: readbackBytes,
             capturedPayloadBytes: capturedBytes,
             peakTrackedBytes: peakBytes,
-            capacityBytes: transferByteCapacity
+            capacityBytes: transferByteCapacity,
+            snapshotMetadataBytesAtPeak: aggregateAdmission == nil
+                ? 0 : snapshotMetadataByteCount,
+            additionalPhysicalBytesAtPeak:
+                aggregateAdmission?.additionalPhysicalBytes ?? 0,
+            aggregatePeakTrackedBytes: aggregatePeakBytes,
+            aggregateCapacityBytes:
+                aggregateAdmission?.maximumPhysicalBytes
         )
     }
 
@@ -4412,6 +4600,8 @@ public final class PaintTileStore: @unchecked Sendable {
         _ accounting: PaintTileTransferAccounting
     ) {
         lastTransferAccounting = accounting
+        transferAccountingSequence = transferAccountingSequence == .max
+            ? .max : transferAccountingSequence + 1
         transferPeakTrackedByteHighWater = max(
             transferPeakTrackedByteHighWater,
             accounting.peakTrackedBytes

@@ -1196,7 +1196,10 @@ struct PaintTileSnapshotRetentionTests {
         let store = PaintTileStore(
             device: device,
             byteBudget: bytes,
-            transferByteCapacity: bytes * 5,
+            // The third eviction owns one resident tile, two backed tiles,
+            // the persistent-zero source, readback staging, and captured
+            // Data simultaneously.
+            transferByteCapacity: bytes * 6,
             snapshotPayloadLiabilityByteBudget:
                 snapshotPayloadLiabilityByteBudget
         )
@@ -1230,6 +1233,7 @@ struct PaintTileSnapshotRetentionTests {
             )
             _ = try store.applyMemoryPressure(targetResidentBytes: 0)
         }
+        #expect(store.snapshot().transferPeakTrackedByteHighWater == bytes * 6)
         return BackedStoreFixture(
             store: store,
             references: try store.references(

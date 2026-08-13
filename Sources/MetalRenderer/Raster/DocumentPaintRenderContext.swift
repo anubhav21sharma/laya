@@ -3,6 +3,128 @@ import Foundation
 import EditorCore
 import PatternEngine
 
+struct CanvasCanonicalApplicationDescriptor: Equatable, Sendable {
+    let baseIdentity: CanvasCanonicalStateIdentity
+    let targetIdentity: CanvasCanonicalStateIdentity
+    let invalidation: CanvasCompositeInvalidation
+    let targetVisibleCoordinates: [PaintTileCoordinate]
+
+    init(
+        baseIdentity: CanvasCanonicalStateIdentity,
+        targetIdentity: CanvasCanonicalStateIdentity,
+        invalidation: CanvasCompositeInvalidation,
+        targetVisibleCoordinates: [PaintTileCoordinate]
+    ) {
+        self.baseIdentity = baseIdentity
+        self.targetIdentity = targetIdentity
+        switch invalidation {
+        case .exact(let coordinates):
+            self.invalidation = .exact(
+                CanvasCompositeInvalidation.sortedUnique(coordinates)
+            )
+        case .none:
+            self.invalidation = .none
+        case .full:
+            self.invalidation = .full
+        case .metadataOnly:
+            self.invalidation = .metadataOnly
+        }
+        self.targetVisibleCoordinates = CanvasCompositeInvalidation
+            .sortedUnique(targetVisibleCoordinates)
+    }
+}
+
+/// Synchronous one-shot publication capability minted only by one Context.
+/// Validation for source preparation is non-consuming. Cache publication must
+/// atomically acquire the claim immediately before assigning its published
+/// root; a newer Context identity can revoke only a still-pending claim.
+final class CanvasCanonicalIdentityClaim: @unchecked Sendable {
+    private enum State {
+        case pending
+        case publicationOwned
+        case published
+        case revoked
+    }
+
+    let descriptor: CanvasCanonicalApplicationDescriptor
+    private let contextIdentity: UUID
+    private let lock = NSLock()
+    private var state = State.pending
+    private var revokingIdentity: CanvasCanonicalStateIdentity?
+
+    fileprivate init(
+        descriptor: CanvasCanonicalApplicationDescriptor,
+        contextIdentity: UUID
+    ) {
+        self.descriptor = descriptor
+        self.contextIdentity = contextIdentity
+    }
+
+    var identity: CanvasCanonicalStateIdentity {
+        descriptor.targetIdentity
+    }
+
+    fileprivate func invalidate(
+        from contextIdentity: UUID,
+        currentIdentity: CanvasCanonicalStateIdentity
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard self.contextIdentity == contextIdentity else { return }
+        if state == .pending {
+            state = .revoked
+            revokingIdentity = currentIdentity
+        }
+    }
+
+    var currentIdentityForDiagnostics: CanvasCanonicalStateIdentity {
+        lock.lock()
+        defer { lock.unlock() }
+        return revokingIdentity ?? descriptor.targetIdentity
+    }
+
+    func validatesPreparation(
+        baseIdentity: CanvasCanonicalStateIdentity,
+        targetIdentity: CanvasCanonicalStateIdentity,
+        invalidation: CanvasCompositeInvalidation
+    ) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let expected = CanvasCanonicalApplicationDescriptor(
+            baseIdentity: baseIdentity,
+            targetIdentity: targetIdentity,
+            invalidation: invalidation,
+            targetVisibleCoordinates: descriptor.targetVisibleCoordinates
+        )
+        return state == .pending && expected == descriptor
+    }
+
+    func validatesPendingPublication(
+        _ expected: CanvasCanonicalApplicationDescriptor
+    ) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return state == .pending && expected == descriptor
+    }
+
+    func acquirePublication(
+        _ expected: CanvasCanonicalApplicationDescriptor
+    ) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard state == .pending, expected == descriptor else { return false }
+        state = .publicationOwned
+        return true
+    }
+
+    func completePublication() {
+        lock.lock()
+        defer { lock.unlock() }
+        precondition(state == .publicationOwned)
+        state = .published
+    }
+}
+
 enum DocumentPaintRenderContextError: Error, Equatable, Sendable {
     case activeStrokeExists
     case noActiveStroke
@@ -23,7 +145,9 @@ struct DocumentPaintSurfaceApplicationResult: Equatable, Sendable {
     let layerID: UUID
     let generation: UInt64
     let dirtyCoordinates: [PaintTileCoordinate]
+    let baseCanonicalIdentity: CanvasCanonicalStateIdentity
     let canonicalIdentity: CanvasCanonicalStateIdentity
+    let compositeInvalidation: CanvasCompositeInvalidation
     let historyPair: PendingRasterRevisionPair?
 }
 
@@ -142,6 +266,9 @@ struct DocumentPaintLayerApplicationResult: Equatable, Sendable {
     let baseGeneration: UInt64
     let generation: UInt64
     let revision: LayerSurfaceRevisionReference?
+    let baseCanonicalIdentity: CanvasCanonicalStateIdentity
+    let targetCanonicalIdentity: CanvasCanonicalStateIdentity
+    let compositeInvalidation: CanvasCompositeInvalidation
 }
 
 struct DocumentPaintTransientDisplaySource: @unchecked Sendable {
@@ -745,6 +872,7 @@ final class DocumentPaintRenderContext {
     private var geometryRevision: UInt64 = 0
     private var layerStackRevision: UInt64 = 0
     private var compositeRevision: UInt64 = 0
+    private var canonicalIdentityClaim: CanvasCanonicalIdentityClaim?
     private var activeCanonicalReservation:
         DocumentPaintCanonicalRevisionReservation?
     private var activeRasterEndpoint: RasterRevisionReference?
@@ -762,6 +890,13 @@ final class DocumentPaintRenderContext {
     private var hasShutdown = false
 
     #if DEBUG
+    func testingInvalidateCanonicalIdentityClaim() {
+        canonicalIdentityClaim?.invalidate(
+            from: identity,
+            currentIdentity: canonicalStateIdentity()
+        )
+    }
+
     func testingReleaseTransientDisplaySourceWithoutAcknowledgement(
         _ source: DocumentPaintTransientDisplaySource
     ) throws {
@@ -937,25 +1072,133 @@ final class DocumentPaintRenderContext {
     }
 
     private func publishCanonicalRevisionAdvance(
-        _ prepared: DocumentPaintPreparedCanonicalRevisionAdvance
+        _ prepared: DocumentPaintPreparedCanonicalRevisionAdvance,
+        baseIdentity: CanvasCanonicalStateIdentity,
+        invalidation: CanvasCompositeInvalidation
     ) -> CanvasCanonicalStateIdentity {
+        let priorClaim = canonicalIdentityClaim
         canonicalGeometry = registry.geometry
         geometryRevision = prepared.geometryRevision
         layerStackRevision = prepared.layerStackRevision
         compositeRevision = prepared.compositeRevision
-        return canonicalStateIdentity()
+        let published = canonicalStateIdentity()
+        priorClaim?.invalidate(
+            from: identity,
+            currentIdentity: published
+        )
+        canonicalIdentityClaim = CanvasCanonicalIdentityClaim(
+            descriptor: CanvasCanonicalApplicationDescriptor(
+                baseIdentity: baseIdentity,
+                targetIdentity: published,
+                invalidation: invalidation,
+                targetVisibleCoordinates: canonicalVisibleCoordinates()
+            ),
+            contextIdentity: identity
+        )
+        return published
+    }
+
+    private func canonicalVisibleCoordinates() -> [PaintTileCoordinate] {
+        let snapshot = registry.snapshot()
+        let visibleLayerIDs = Set(snapshot.layerStack.layers.compactMap {
+            layer in
+            layer.isVisible && layer.opacity > 0 ? layer.id : nil
+        })
+        return CanvasCompositeInvalidation.sortedUnique(
+            snapshot.layers.filter {
+                visibleLayerIDs.contains($0.layerID)
+            }.flatMap(\.references).map(\.coordinate)
+        )
+    }
+
+    private func claimCurrentCanonicalIdentity()
+        -> CanvasCanonicalIdentityClaim
+    {
+        let current = canonicalStateIdentity()
+        if let canonicalIdentityClaim,
+           canonicalIdentityClaim.identity == current {
+            return canonicalIdentityClaim
+        }
+        let claim = CanvasCanonicalIdentityClaim(
+            descriptor: CanvasCanonicalApplicationDescriptor(
+                baseIdentity: current,
+                targetIdentity: current,
+                invalidation: .full,
+                targetVisibleCoordinates: canonicalVisibleCoordinates()
+            ),
+            contextIdentity: identity
+        )
+        canonicalIdentityClaim = claim
+        return claim
+    }
+
+    func prepareCompositeTileUpdatePlan(
+        baseIdentity: CanvasCanonicalStateIdentity,
+        targetIdentity: CanvasCanonicalStateIdentity,
+        invalidation: CanvasCompositeInvalidation,
+        cachedCoordinates: [PaintTileCoordinate],
+        limits: SparseTilePlanLimits = .documentProduction
+    ) throws -> CanvasCompositeTileUpdatePlan {
+        let current = canonicalStateIdentity()
+        guard current == targetIdentity else {
+            throw CanvasCompositeTileCacheError.staleIdentity(
+                expected: targetIdentity,
+                current: current
+            )
+        }
+        var identityClaim = claimCurrentCanonicalIdentity()
+        if !identityClaim.validatesPreparation(
+            baseIdentity: baseIdentity,
+            targetIdentity: targetIdentity,
+            invalidation: invalidation
+        ), baseIdentity == targetIdentity,
+           invalidation == .full || invalidation == .none {
+            identityClaim = CanvasCanonicalIdentityClaim(
+                descriptor: CanvasCanonicalApplicationDescriptor(
+                    baseIdentity: baseIdentity,
+                    targetIdentity: targetIdentity,
+                    invalidation: invalidation,
+                    targetVisibleCoordinates: canonicalVisibleCoordinates()
+                ),
+                contextIdentity: identity
+            )
+            canonicalIdentityClaim = identityClaim
+        }
+        guard identityClaim.validatesPreparation(
+            baseIdentity: baseIdentity,
+            targetIdentity: targetIdentity,
+            invalidation: invalidation
+        ) else {
+            throw CanvasCompositeTileCacheError.invalidPlan
+        }
+        return try registry.prepareCompositeTileUpdatePlan(
+            baseIdentity: baseIdentity,
+            targetIdentity: targetIdentity,
+            invalidation: invalidation,
+            cachedCoordinates: cachedCoordinates,
+            identityClaim: identityClaim,
+            limits: limits
+        )
     }
 
     private func applicationResult(
         _ result: DocumentPaintSurfaceWorkerResult,
-        reservation: DocumentPaintCanonicalRevisionReservation
+        reservation: DocumentPaintCanonicalRevisionReservation,
+        baseIdentity: CanvasCanonicalStateIdentity,
+        publishedInvalidation: CanvasCompositeInvalidation? = nil
     ) -> DocumentPaintSurfaceApplicationResult {
         let identity: CanvasCanonicalStateIdentity
         if result.didPublish {
             guard let prepared = reservation.result() else {
                 preconditionFailure("Published mutation lost revision reservation")
             }
-            identity = publishCanonicalRevisionAdvance(prepared)
+            let invalidation = publishedInvalidation
+                ?? .exact(result.dirtyCoordinates)
+            identity = publishCanonicalRevisionAdvance(
+                prepared,
+                baseIdentity: baseIdentity,
+                invalidation: invalidation
+            )
             activeRasterEndpoint = result.historyPair?.after
         } else {
             identity = canonicalStateIdentity()
@@ -965,7 +1208,11 @@ final class DocumentPaintRenderContext {
             layerID: result.layerID,
             generation: result.generation,
             dirtyCoordinates: result.dirtyCoordinates,
+            baseCanonicalIdentity: baseIdentity,
             canonicalIdentity: identity,
+            compositeInvalidation: result.didPublish
+                ? publishedInvalidation ?? .exact(result.dirtyCoordinates)
+                : .none,
             historyPair: result.historyPair
         )
     }
@@ -1373,6 +1620,7 @@ final class DocumentPaintRenderContext {
     ) async throws {
         let claim = try beginCommandOperation()
         defer { finishCommandOperation(claim) }
+        let baseIdentity = canonicalStateIdentity()
         let canonicalReservation = canonicalRevisionReservation(
             geometry: true,
             layerStack: true
@@ -1392,7 +1640,11 @@ final class DocumentPaintRenderContext {
             guard let prepared = canonicalReservation.result() else {
                 preconditionFailure("Native import lost revision reservation")
             }
-            _ = publishCanonicalRevisionAdvance(prepared)
+            _ = publishCanonicalRevisionAdvance(
+                prepared,
+                baseIdentity: baseIdentity,
+                invalidation: .full
+            )
             activeRasterEndpoint = nil
         } catch {
             do {
@@ -1621,6 +1873,7 @@ final class DocumentPaintRenderContext {
         if let source = activeTransientDisplaySource {
             try await abandonTransientDisplaySource(source)
         }
+        let baseIdentity = canonicalStateIdentity()
         let reservation = canonicalRevisionReservation()
         activeCanonicalReservation = reservation
         defer { activeCanonicalReservation = nil }
@@ -1630,7 +1883,11 @@ final class DocumentPaintRenderContext {
             canonicalReservation: reservation,
             publicationState: publicationState
         )
-        return applicationResult(result, reservation: reservation)
+        return applicationResult(
+            result,
+            reservation: reservation,
+            baseIdentity: baseIdentity
+        )
     }
 
     func clear() async throws -> DocumentPaintSurfaceApplicationResult {
@@ -1643,6 +1900,7 @@ final class DocumentPaintRenderContext {
         } catch LayerStackError.activeLayerLocked(let lockedID) {
             throw DocumentPaintRenderContextError.activeLayerLocked(lockedID)
         }
+        let baseIdentity = canonicalStateIdentity()
         let reservation = canonicalRevisionReservation()
         activeCanonicalReservation = reservation
         defer { activeCanonicalReservation = nil }
@@ -1650,7 +1908,11 @@ final class DocumentPaintRenderContext {
             layerID: layerID,
             canonicalReservation: reservation
         )
-        return applicationResult(result, reservation: reservation)
+        return applicationResult(
+            result,
+            reservation: reservation,
+            baseIdentity: baseIdentity
+        )
     }
 
     func applyLayerStack(
@@ -1659,6 +1921,7 @@ final class DocumentPaintRenderContext {
         let claim = try beginCommandOperation()
         defer { finishCommandOperation(claim) }
         let current = registry.snapshot()
+        let baseIdentity = canonicalStateIdentity()
         if target == current.layerStack {
             return DocumentPaintLayerApplicationResult(
                 didPublish: false,
@@ -1668,25 +1931,39 @@ final class DocumentPaintRenderContext {
                 afterGeometry: current.geometry,
                 baseGeneration: current.generation,
                 generation: current.generation,
-                revision: nil
+                revision: nil,
+                baseCanonicalIdentity: baseIdentity,
+                targetCanonicalIdentity: baseIdentity,
+                compositeInvalidation: .none
             )
         }
+        let invalidation = CanvasCompositeInvalidation.classify(
+            before: current.layerStack,
+            after: target,
+            rasterDirtyCoordinates: [],
+            geometryChanged: false,
+            documentReplaced: false
+        )
         let transaction = try registry.prepareLayerSurfaceTransaction(
             layerStack: target
         )
         return try publishLayerTransaction(
             transaction,
-            geometryChanges: false
+            geometryChanges: false,
+            compositeInvalidation: invalidation
         )
     }
 
     private func publishLayerTransaction(
         _ transaction: LayerSurfaceTransaction,
-        geometryChanges: Bool
+        geometryChanges: Bool,
+        compositeInvalidation: CanvasCompositeInvalidation
     ) throws -> DocumentPaintLayerApplicationResult {
+        let baseIdentity = canonicalStateIdentity()
         let canonicalReservation = canonicalRevisionReservation(
             geometry: geometryChanges,
-            layerStack: true
+            layerStack: true,
+            composite: compositeInvalidation.affectsPixels
         )
         try canonicalReservation.prepare()
         let retainedBytes = transaction.historyRetainedBytes
@@ -1730,7 +2007,11 @@ final class DocumentPaintRenderContext {
         guard let prepared = canonicalReservation.result() else {
             preconditionFailure("Layer transaction lost revision reservation")
         }
-        _ = publishCanonicalRevisionAdvance(prepared)
+        let targetIdentity = publishCanonicalRevisionAdvance(
+            prepared,
+            baseIdentity: baseIdentity,
+            invalidation: compositeInvalidation
+        )
         activeRasterEndpoint = nil
         nextLayerRevisionID += 1
         layerHistoryRevisions[id] = receipt.historyRevision
@@ -1746,7 +2027,10 @@ final class DocumentPaintRenderContext {
             revision: LayerSurfaceRevisionReference(
                 id: id,
                 retainedBytes: retainedBytes
-            )
+            ),
+            baseCanonicalIdentity: baseIdentity,
+            targetCanonicalIdentity: targetIdentity,
+            compositeInvalidation: compositeInvalidation
         )
     }
 
@@ -1764,6 +2048,7 @@ final class DocumentPaintRenderContext {
         }
         if registry.currentStateMatches(revision, endpoint: endpoint) {
             let current = registry.snapshot()
+            let identity = canonicalStateIdentity()
             return DocumentPaintLayerApplicationResult(
                 didPublish: false,
                 before: current.layerStack,
@@ -1772,14 +2057,26 @@ final class DocumentPaintRenderContext {
                 afterGeometry: current.geometry,
                 baseGeneration: current.generation,
                 generation: current.generation,
-                revision: reference
+                revision: reference,
+                baseCanonicalIdentity: identity,
+                targetCanonicalIdentity: identity,
+                compositeInvalidation: .none
             )
         }
         let targetGeometry = revision.geometry(for: endpoint)
         let beforeGeometry = registry.geometry
+        let baseIdentity = canonicalStateIdentity()
+        let invalidation = CanvasCompositeInvalidation.classify(
+            before: registry.layerStack,
+            after: revision.layerStack(for: endpoint),
+            rasterDirtyCoordinates: [],
+            geometryChanged: targetGeometry != beforeGeometry,
+            documentReplaced: false
+        )
         let canonicalReservation = canonicalRevisionReservation(
             geometry: targetGeometry != beforeGeometry,
-            layerStack: true
+            layerStack: true,
+            composite: invalidation.affectsPixels
         )
         try canonicalReservation.prepare()
         let receipt = try registry.prepareLayerSurfaceRestore(
@@ -1789,7 +2086,11 @@ final class DocumentPaintRenderContext {
         guard let prepared = canonicalReservation.result() else {
             preconditionFailure("Layer restore lost revision reservation")
         }
-        _ = publishCanonicalRevisionAdvance(prepared)
+        let targetIdentity = publishCanonicalRevisionAdvance(
+            prepared,
+            baseIdentity: baseIdentity,
+            invalidation: invalidation
+        )
         activeRasterEndpoint = nil
         return DocumentPaintLayerApplicationResult(
             didPublish: true,
@@ -1799,7 +2100,10 @@ final class DocumentPaintRenderContext {
             afterGeometry: registry.geometry,
             baseGeneration: receipt.baseGeneration,
             generation: receipt.generation,
-            revision: reference
+            revision: reference,
+            baseCanonicalIdentity: baseIdentity,
+            targetCanonicalIdentity: targetIdentity,
+            compositeInvalidation: invalidation
         )
     }
 
@@ -1821,7 +2125,8 @@ final class DocumentPaintRenderContext {
             try Task.checkCancellation()
             return try publishLayerTransaction(
                 transaction,
-                geometryChanges: true
+                geometryChanges: true,
+                compositeInvalidation: .full
             )
         } catch {
             transaction.cancel()
@@ -1848,6 +2153,7 @@ final class DocumentPaintRenderContext {
             )
         }.value
         try Task.checkCancellation()
+        let baseIdentity = canonicalStateIdentity()
         let reservation = canonicalRevisionReservation(
             geometry: true,
             layerStack: true
@@ -1858,7 +2164,12 @@ final class DocumentPaintRenderContext {
             request,
             canonicalReservation: reservation
         )
-        return applicationResult(result, reservation: reservation)
+        return applicationResult(
+            result,
+            reservation: reservation,
+            baseIdentity: baseIdentity,
+            publishedInvalidation: .full
+        )
     }
 
     func restorePublishedRevision(
@@ -1884,6 +2195,7 @@ final class DocumentPaintRenderContext {
                 restoredCoordinates: []
             )
         }
+        let baseIdentity = canonicalStateIdentity()
         let geometryChanges = targetGeometry != registry.geometry
         let canonicalReservation = canonicalRevisionReservation(
             geometry: geometryChanges,
@@ -1899,7 +2211,12 @@ final class DocumentPaintRenderContext {
             guard let prepared = canonicalReservation.result() else {
                 preconditionFailure("Raster restore lost revision reservation")
             }
-            _ = publishCanonicalRevisionAdvance(prepared)
+            _ = publishCanonicalRevisionAdvance(
+                prepared,
+                baseIdentity: baseIdentity,
+                invalidation: geometryChanges
+                    ? .full : .exact(result.restoredCoordinates)
+            )
             activeRasterEndpoint = reference
         }
         return result

@@ -1815,6 +1815,31 @@ kernel void patternDocumentPaintStrokeMutation(
     );
 }
 
+kernel void patternCompositeTileAlphaReduction(
+    texture2d<float, access::read> source
+        [[texture(PatternTextureIndexDocumentPaintBase)]],
+    constant PatternDocumentPaintMutationUniforms& mutation
+        [[buffer(PatternBufferIndexDocumentPaintMutationUniforms)]],
+    device atomic_uint* reduction
+        [[buffer(PatternBufferIndexDocumentPaintMutationReduction)]],
+    uint2 texel [[thread_position_in_grid]]
+) {
+    if (any(texel >= uint2(source.get_width(), source.get_height()))
+        || any(texel >= mutation.logicalExtent)) {
+        return;
+    }
+    const float4 value = source.read(texel);
+    if (!patternDocumentPaintIsValidPremultiplied(value)) {
+        atomic_store_explicit(&reduction[1], 1u, memory_order_relaxed);
+        return;
+    }
+    atomic_fetch_max_explicit(
+        &reduction[0],
+        as_type<uint>(value.a),
+        memory_order_relaxed
+    );
+}
+
 kernel void patternDocumentPaintResizeMutation(
     texture2d<float, access::read> source
         [[texture(PatternTextureIndexDocumentPaintBase)]],

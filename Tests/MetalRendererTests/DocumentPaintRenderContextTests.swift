@@ -49,6 +49,8 @@ struct DocumentPaintRenderContextTests {
         )
 
         #expect(result.dirtyCoordinates == coordinates.sorted())
+        #expect(result.baseCanonicalIdentity == before)
+        #expect(result.compositeInvalidation == .exact(coordinates.sorted()))
         #expect(result.canonicalIdentity.documentGeneration
             == before.documentGeneration)
         #expect(result.canonicalIdentity.geometryRevision
@@ -82,6 +84,55 @@ struct DocumentPaintRenderContextTests {
         #expect(after.compositeRevision == before.compositeRevision + 1)
         let revision = try #require(result.revision)
         try await fixture.context.releaseRevisions([revision.id])
+    }
+
+    @Test
+    @MainActor
+    func metadataLayerChangeRebasesIdentityWithoutCompositeInvalidation()
+        async throws
+    {
+        guard let fixture = try makeFixture(size: 64) else { return }
+        let before = fixture.context.canonicalStateIdentity()
+        var target = fixture.context.layerStack
+        try target.rename(fixture.layerID, to: "Renamed")
+
+        let result = try fixture.context.applyLayerStack(target)
+        let after = fixture.context.canonicalStateIdentity()
+
+        #expect(result.baseCanonicalIdentity == before)
+        #expect(result.targetCanonicalIdentity == after)
+        #expect(result.compositeInvalidation == .metadataOnly)
+        #expect(after.layerStackRevision == before.layerStackRevision + 1)
+        #expect(after.compositeRevision == before.compositeRevision)
+        let revision = try #require(result.revision)
+        try await fixture.context.releaseRevisions([revision.id])
+    }
+
+    @Test
+    @MainActor
+    func encodedDocumentImportRequiresFullCompositeInvalidation() async throws {
+        guard let fixture = try makeFixture(size: 2) else { return }
+        let context = fixture.context
+        let geometry = context.canonicalStateIdentity().geometry
+
+        let result = try await context.importEncodedBGRA8(
+            candidateGeometry: geometry,
+            input: .singleRaster(.init(
+                width: 2,
+                height: 2,
+                bytesPerRow: 8,
+                bytes: Data([
+                    0, 0, 255, 255, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0,
+                ])
+            ))
+        )
+
+        #expect(result.didPublish)
+        #expect(result.compositeInvalidation == .full)
+        if let pair = result.historyPair {
+            try await context.releaseRevisions(pair.revisionIDs)
+        }
     }
 
     @Test
@@ -831,7 +882,7 @@ struct DocumentPaintRenderContextTests {
             }
         }
 
-        _ = try await context.importEncodedBGRA8(
+        let imported = try await context.importEncodedBGRA8(
             candidateGeometry: geometry,
             input: .radialPages(layout.residentPages.reversed().map { page in
                 .init(
@@ -845,6 +896,24 @@ struct DocumentPaintRenderContextTests {
                 )
             })
         )
+        let rawPlan = try context.prepareCompositeTileUpdatePlan(
+            baseIdentity: imported.baseCanonicalIdentity,
+            targetIdentity: imported.canonicalIdentity,
+            invalidation: imported.compositeInvalidation,
+            cachedCoordinates: []
+        )
+        #expect(!rawPlan.preparedTiles.isEmpty)
+        for tile in rawPlan.preparedTiles {
+            for layer in tile.layers {
+                #expect(layer.samplingPlan.addressing
+                    == SparseTileAddressing.finite(
+                        geometry.storagePixelSize
+                    ))
+                #expect(layer.samplingPlan.outputMapping
+                    == SparseTileSamplingOutputMapping.affine(.identity))
+            }
+        }
+        rawPlan.close()
         let collected = try await context.collectStableCommittedStorage(
             addressing: .radial(layout: layout),
             addressingRevision: 1,

@@ -142,6 +142,28 @@ final class SparseTileSamplingPreparedAbandonmentFailureInjector:
     }
 }
 
+final class SparseTileSamplingCompletionFailureInjector:
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private var remainingFailures: Int
+
+    init(failures: Int) {
+        precondition(failures >= 0)
+        remainingFailures = failures
+    }
+
+    fileprivate func failIfRequested() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard remainingFailures > 0 else { return }
+        remainingFailures -= 1
+        throw SparseTileSamplingPipelineError.injectedFailure(
+            "completion"
+        )
+    }
+}
+
 final class SparseTileSamplingPipelineBinding: @unchecked Sendable {
     let key: SparseTileSamplingPipelineKey
     let outputContract: SparseTileSamplingOutputContract
@@ -314,6 +336,7 @@ struct SparseTileSamplingGPUPlanLimits: Equatable, Sendable {
     let maximumInflightEncodes: Int
     let maximumCachedPlans: Int
     let maximumCachedBufferBytes: Int
+    let allowsCacheEviction: Bool
 
     init(
         maximumDescriptors: Int,
@@ -321,7 +344,8 @@ struct SparseTileSamplingGPUPlanLimits: Equatable, Sendable {
         maximumBufferBytes: Int,
         maximumInflightEncodes: Int = 3,
         maximumCachedPlans: Int = 64,
-        maximumCachedBufferBytes: Int = 256 * 1_024 * 1_024
+        maximumCachedBufferBytes: Int = 256 * 1_024 * 1_024,
+        allowsCacheEviction: Bool = true
     ) {
         self.maximumDescriptors = maximumDescriptors
         self.maximumPageEntries = maximumPageEntries
@@ -329,6 +353,7 @@ struct SparseTileSamplingGPUPlanLimits: Equatable, Sendable {
         self.maximumInflightEncodes = maximumInflightEncodes
         self.maximumCachedPlans = maximumCachedPlans
         self.maximumCachedBufferBytes = maximumCachedBufferBytes
+        self.allowsCacheEviction = allowsCacheEviction
     }
 
     static let production = SparseTileSamplingGPUPlanLimits(
@@ -572,6 +597,7 @@ struct SparseTileSamplingCompletionSnapshot: Equatable, Sendable {
     let planCompletionFailureCount: UInt64
     let pendingPlanCompletionCount: Int
     let pendingConsumerCompletionCount: Int
+    let pendingPlanMetalBufferBytes: Int
     let lastFailure: String?
 }
 
@@ -764,6 +790,9 @@ final class SparseTileSamplingCompletionMailbox: @unchecked Sendable {
             planCompletionFailureCount: planCompletionFailureCount,
             pendingPlanCompletionCount: pending.count,
             pendingConsumerCompletionCount: pendingConsumers.count,
+            pendingPlanMetalBufferBytes: pending.values.reduce(0) {
+                $0 + $1.plan.retainedPlanMetalBufferBytes
+            },
             lastFailure: lastFailure
         )
     }
@@ -870,7 +899,7 @@ final class SparseTileSamplingGPUPlanLease: @unchecked Sendable {
         case terminal
     }
 
-    private enum CompletionAuthority {
+    private enum CompletionAuthority: Equatable {
         case external
         case preparedAbandonment
         case terminalOwner
@@ -881,6 +910,8 @@ final class SparseTileSamplingGPUPlanLease: @unchecked Sendable {
     private let consumer: SparseTileSamplingPlanConsumerHandle
     private let preparedAbandonmentFailureInjector:
         SparseTileSamplingPreparedAbandonmentFailureInjector?
+    private let completionFailureInjector:
+        SparseTileSamplingCompletionFailureInjector?
     private let lock = NSLock()
     private var completionInProgress = false
     private var ownership = Ownership.available
@@ -889,12 +920,15 @@ final class SparseTileSamplingGPUPlanLease: @unchecked Sendable {
         content: SparseTileSamplingGPUPlanContent,
         consumer: SparseTileSamplingPlanConsumerHandle,
         preparedAbandonmentFailureInjector:
-            SparseTileSamplingPreparedAbandonmentFailureInjector?
+            SparseTileSamplingPreparedAbandonmentFailureInjector?,
+        completionFailureInjector:
+            SparseTileSamplingCompletionFailureInjector?
     ) {
         self.content = content
         self.consumer = consumer
         self.preparedAbandonmentFailureInjector =
             preparedAbandonmentFailureInjector
+        self.completionFailureInjector = completionFailureInjector
     }
 
     var backend: SparseTileSamplingBackend { content.pipeline.key.backend }
@@ -907,6 +941,10 @@ final class SparseTileSamplingGPUPlanLease: @unchecked Sendable {
     }
     var completionMailbox: SparseTileSamplingCompletionMailbox {
         content.completionMailbox
+    }
+
+    fileprivate var retainedPlanMetalBufferBytes: Int {
+        content.planMetalBufferBytes
     }
 
     func complete() throws {
@@ -993,6 +1031,9 @@ final class SparseTileSamplingGPUPlanLease: @unchecked Sendable {
         completionInProgress = true
         lock.unlock()
         do {
+            if authority == .terminalOwner || authority == .mailbox {
+                try completionFailureInjector?.failIfRequested()
+            }
             try consumer.complete()
             lock.lock()
             ownership = .terminal
@@ -1066,6 +1107,8 @@ actor SparseTileSamplingGPUPlanCache {
         @Sendable (SparseTileSamplingWorkspaceAllocation) -> Void
     private let preparedAbandonmentFailureInjector:
         SparseTileSamplingPreparedAbandonmentFailureInjector?
+    private let completionFailureInjector:
+        SparseTileSamplingCompletionFailureInjector?
     private var prepared: [SparseTileSamplingGPUPlanKey: CachedPlan] = [:]
     private var cachedPlanMetalBufferBytes = 0
     private var accessClock: UInt64 = 0
@@ -1085,7 +1128,9 @@ actor SparseTileSamplingGPUPlanCache {
             SparseTileSamplingWorkspaceAllocation
         ) -> Void = { _ in },
         preparedAbandonmentFailureInjector:
-            SparseTileSamplingPreparedAbandonmentFailureInjector? = nil
+            SparseTileSamplingPreparedAbandonmentFailureInjector? = nil,
+        completionFailureInjector:
+            SparseTileSamplingCompletionFailureInjector? = nil
     ) {
         self.device = device
         self.limits = limits
@@ -1093,6 +1138,7 @@ actor SparseTileSamplingGPUPlanCache {
         self.workspaceAllocationObserver = workspaceAllocationObserver
         self.preparedAbandonmentFailureInjector =
             preparedAbandonmentFailureInjector
+        self.completionFailureInjector = completionFailureInjector
     }
 
     func acquire(
@@ -1126,7 +1172,8 @@ actor SparseTileSamplingGPUPlanCache {
                 content: content,
                 consumer: consumer,
                 preparedAbandonmentFailureInjector:
-                    preparedAbandonmentFailureInjector
+                    preparedAbandonmentFailureInjector,
+                completionFailureInjector: completionFailureInjector
             )
         } catch {
             do {
@@ -1392,6 +1439,15 @@ actor SparseTileSamplingGPUPlanCache {
             planMetalBufferBytes: planBufferBytes,
             uploadRingBytes: uploadRingBytes
         )
+        guard limits.allowsCacheEviction || plannedEvictions.keys.isEmpty else {
+            throw SparseTileSamplingPipelineError.limitExceeded(
+                required: try checkedAdd(
+                    cachedPlanMetalBufferBytes,
+                    planBufferBytes
+                ),
+                maximum: limits.maximumCachedBufferBytes
+            )
+        }
         var allocationTally = BuildAllocationTally()
         let (descriptors, entries) = try makeDescriptorPayload(
             content: content,

@@ -10,6 +10,30 @@ import Testing
 struct GridRendererSparseCutoverTests {
     @Test
     @MainActor
+    func productionConstructionPreservesDocumentTransientAndCanonicalCaps()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let renderer = try makeSparseCutoverRenderer(
+            device: device,
+            library: try makeSparseCutoverLibrary(device: device)
+        )
+        let envelope = renderer.presentationMemoryEnvelopeForTesting()
+        #expect(envelope.documentStoreBytes == 512 * 1_024 * 1_024)
+        #expect(envelope.transientCacheBytes == 512 * 1_024 * 1_024)
+        #expect(envelope.canonicalResidentBytes == 128 * 1_024 * 1_024)
+        #expect(envelope.canonicalCopyOnWriteHeadroomBytes
+            >= 137 * 1_024 * 1_024)
+        #expect(try envelope.checkedPartitionByteCount()
+            == envelope.maximumPhysicalBytes)
+        let cache = try #require(
+            await renderer.canvasCompositeCacheSnapshotForTesting()
+        )
+        #expect(cache.maximumPhysicalBytes == envelope.canonicalCacheBytes)
+    }
+
+    @Test
+    @MainActor
     func durableLifecycleRetriesACKWithoutRendererPump()
         async throws
     {

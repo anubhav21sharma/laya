@@ -1266,6 +1266,13 @@ final class LayerSurfaceHistoryRevision: @unchecked Sendable, Equatable {
         }
     }
 
+    func layerStack(for endpoint: LayerSurfaceRevisionEndpoint) -> LayerStack {
+        switch endpoint {
+        case .before: before.layerStack
+        case .after: after.layerStack
+        }
+    }
+
     func borrow() throws -> Borrow {
         lock.lock()
         defer { lock.unlock() }
@@ -2420,6 +2427,202 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
                 layers: preparedLayers,
                 sourceCapture: capture,
                 planLimits: limits
+            )
+        }
+        throw DocumentPaintSurfaceStoreError.visibleCaptureContention(
+            maximumAttempts: Self.maximumVisibleCaptureAttempts
+        )
+    }
+
+    /// Freezes raw canonical storage pixels for a cache update. Unlike display
+    /// preparation this path always uses finite storage addressing and an
+    /// identity output mapping, including periodic and radial documents.
+    func prepareCompositeTileUpdatePlan(
+        baseIdentity: CanvasCanonicalStateIdentity,
+        targetIdentity: CanvasCanonicalStateIdentity,
+        invalidation: CanvasCompositeInvalidation,
+        cachedCoordinates: [PaintTileCoordinate],
+        identityClaim: CanvasCanonicalIdentityClaim,
+        limits: SparseTilePlanLimits
+    ) throws -> CanvasCompositeTileUpdatePlan {
+        for _ in 0..<Self.maximumVisibleCaptureAttempts {
+            let attempt = try withLock { () throws -> (
+                epoch: DocumentPaintSurfaceEpoch,
+                dirty: [PaintTileCoordinate],
+                layers: [(LayerDescriptor, DocumentPaintLayerState)],
+                hook: (@Sendable () -> Void)?
+            ) in
+                let epoch = currentEpoch
+                guard targetIdentity.geometry == epoch.geometry,
+                      identityClaim.validatesPreparation(
+                        baseIdentity: baseIdentity,
+                        targetIdentity: targetIdentity,
+                        invalidation: invalidation
+                      )
+                else {
+                    throw CanvasCompositeTileCacheError.staleIdentity(
+                        expected: targetIdentity,
+                        current: identityClaim.identity
+                    )
+                }
+                let visible = epoch.layerStack.layers.compactMap { layer
+                    -> (LayerDescriptor, DocumentPaintLayerState)? in
+                    guard layer.isVisible, layer.opacity > 0,
+                          let state = epoch.layerStates[layer.id]
+                    else { return nil }
+                    return (layer, state)
+                }
+                let requested: [PaintTileCoordinate]
+                switch invalidation {
+                case .none, .metadataOnly:
+                    requested = []
+                case .exact(let coordinates):
+                    requested = coordinates
+                case .full:
+                    let targetCoordinates = visible.flatMap {
+                        $0.1.references.map(\.coordinate)
+                    }
+                    // A geometry replacement discards the prior cache
+                    // namespace wholesale. Old coordinates outside the new
+                    // storage extent must not be validated or prepared in the
+                    // target geometry; the cache retires every old reference.
+                    requested = targetCoordinates
+                        + (baseIdentity.geometry == targetIdentity.geometry
+                            ? cachedCoordinates : [])
+                }
+                let dirty = CanvasCompositeInvalidation.sortedUnique(requested)
+                for coordinate in dirty {
+                    _ = try PaintTileDescriptor(
+                        coordinate: coordinate,
+                        logicalPixelSize: epoch.geometry.storagePixelSize
+                    )
+                }
+                #if DEBUG
+                let hook = testingVisibleSelectionCompleted
+                #else
+                let hook: (@Sendable () -> Void)? = nil
+                #endif
+                return (epoch, dirty, visible, hook)
+            }
+
+            let regions = try CanvasCompositeTileUpdatePlan.outputRegions(
+                dirtyCoordinates: attempt.dirty,
+                storagePixelSize: attempt.epoch.geometry.storagePixelSize
+            )
+            var preparedTiles: [PreparedLayerCompositeTile] = []
+            var capturedProviders: [TiledRasterExactReferenceProvider] = []
+            preparedTiles.reserveCapacity(attempt.dirty.count)
+            for (coordinate, outputRegion) in zip(attempt.dirty, regions) {
+                var preparedLayers: [PreparedLayerCompositeLayer] = []
+                for (layer, state) in attempt.layers {
+                    let binding = try makeBinding(
+                        for: layer.id,
+                        state: state,
+                        geometry: attempt.epoch.geometry,
+                        generation: attempt.epoch.generation
+                    )
+                    let source = try SparseTileAcceptedSourceAdapter.canonical(
+                        binding,
+                        addressing: .finite(
+                            attempt.epoch.geometry.storagePixelSize
+                        )
+                    )
+                    let key = SparseTileSamplingPlanKey(
+                        documentGeneration: attempt.epoch.generation,
+                        orderedLayers: [SparseTileLayerContentKey(
+                            layerID: layer.id,
+                            roles: [source.contentKey]
+                        )],
+                        addressingRevision: targetIdentity.compositeRevision,
+                        outputGeometryRevision: targetIdentity.geometryRevision,
+                        outputMapping: .affine(.identity)
+                    )
+                    let selection = try SparseTileOwnedSourceBatch.selecting(
+                        sources: [source],
+                        key: key,
+                        outputRegion: outputRegion
+                    )
+                    guard try selection.selectedReferenceCount() > 0 else {
+                        continue
+                    }
+                    let restricted = try selection.restrictedSources(
+                        referenceScope: .entitlement
+                    )
+                    let snapshots = try restricted.map {
+                        try SparseTileSourceSnapshot(
+                            contentKey: $0.contentKey,
+                            addressing: $0.addressing,
+                            layerID: $0.layerID,
+                            references: $0.references,
+                            changedCoordinates: $0.changedCoordinates,
+                            disposition: $0.disposition
+                        )
+                    }
+                    preparedLayers.append(PreparedLayerCompositeLayer(
+                        layerID: layer.id,
+                        opacity: layer.opacity,
+                        blendMode: layer.blendMode,
+                        samplingPlan: try SparseTileSamplingPlanBuilder.buildFull(
+                            key: key,
+                            sources: snapshots,
+                            outputRegion: outputRegion,
+                            limits: limits
+                        ),
+                        samplingParameters: SparseTileSamplingEncodeParameters(
+                            outputMapping: .affine(.identity),
+                            compositeMode: PatternCompositeWireDraw,
+                            liveVisible: false,
+                            strokeOpacity: 1,
+                            accumulationLimit: 1,
+                            eraserStrength: 1
+                        ),
+                        sourceSelection: selection
+                    ))
+                    capturedProviders.append(contentsOf: restricted.map {
+                        $0.provider
+                    })
+                }
+                preparedTiles.append(PreparedLayerCompositeTile(
+                    coordinate: coordinate,
+                    outputRegion: outputRegion,
+                    layers: preparedLayers
+                ))
+            }
+            attempt.hook?()
+
+            let capture: TiledRasterExactReferenceCapture? = try withLock {
+                guard currentEpoch === attempt.epoch else { return nil }
+                guard identityClaim.validatesPreparation(
+                    baseIdentity: baseIdentity,
+                    targetIdentity: targetIdentity,
+                    invalidation: invalidation
+                ) else {
+                    throw CanvasCompositeTileCacheError.staleIdentity(
+                        expected: targetIdentity,
+                        current: identityClaim.identity
+                    )
+                }
+                return try TiledRasterExactReferenceCapture(
+                    providers: capturedProviders
+                )
+            }
+            guard let capture else { continue }
+            let epochID = ObjectIdentifier(attempt.epoch)
+            return CanvasCompositeTileUpdatePlan(
+                baseIdentity: baseIdentity,
+                targetIdentity: targetIdentity,
+                invalidation: invalidation,
+                dirtyCoordinates: attempt.dirty,
+                preparedTiles: preparedTiles,
+                registryGeneration: attempt.epoch.generation,
+                identityClaim: identityClaim,
+                epochIsCurrent: { [weak self] in
+                    guard let self else { return false }
+                    return self.withLock {
+                        ObjectIdentifier(self.currentEpoch) == epochID
+                    }
+                },
+                sourceCapture: capture
             )
         }
         throw DocumentPaintSurfaceStoreError.visibleCaptureContention(

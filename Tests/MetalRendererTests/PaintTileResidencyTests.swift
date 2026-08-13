@@ -225,6 +225,43 @@ struct PaintTileResidencyTests {
     }
 
     @Test
+    func aggregateAdmissionWithZeroMaximumAndMaxAdditionalFailsClosed()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let store = PaintTileStore(
+            device: device,
+            byteBudget: bytes,
+            transferByteCapacity: bytes * 3
+        )
+        let before = store.snapshot()
+
+        #expect(throws: PaintTileStoreError.transferCapacityExceeded(
+            requiredBytes: bytes * 2,
+            capacityBytes: 0,
+            residentBytes: 0,
+            allocationBytes: bytes,
+            persistentZeroBytes: bytes,
+            stagingBytes: 0
+        )) {
+            _ = try store.reserveSortedUnique(
+                surfaceID: UUID(),
+                layerID: UUID(),
+                generation: 1,
+                pixelSize: PixelSize(width: 256, height: 256),
+                coordinates: [.init(x: 0, y: 0)],
+                pinReasons: [.active],
+                aggregateTransferAdmission:
+                    PaintTileAggregateTransferAdmission(
+                        additionalPhysicalBytes: .max,
+                        maximumPhysicalBytes: 0
+                    )
+            )
+        }
+        #expect(store.snapshot() == before)
+    }
+
+    @Test
     func replacementReportsBoundedPeakTextureAndStagingOwnership() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let store = PaintTileStore(

@@ -20,6 +20,7 @@ enum LayerBlendABI {
 final class LayerBlendPipelineBinding: @unchecked Sendable {
     private let blendState: any MTLComputePipelineState
     private let interchangePackState: any MTLComputePipelineState
+    private let alphaReductionState: any MTLComputePipelineState
     private let affineDisplayState: any MTLRenderPipelineState
     private let radialDisplayState: any MTLRenderPipelineState
     private let displayPixelFormat: MTLPixelFormat
@@ -28,6 +29,7 @@ final class LayerBlendPipelineBinding: @unchecked Sendable {
     fileprivate init(
         blendState: any MTLComputePipelineState,
         interchangePackState: any MTLComputePipelineState,
+        alphaReductionState: any MTLComputePipelineState,
         affineDisplayState: any MTLRenderPipelineState,
         radialDisplayState: any MTLRenderPipelineState,
         displayPixelFormat: MTLPixelFormat,
@@ -35,10 +37,72 @@ final class LayerBlendPipelineBinding: @unchecked Sendable {
     ) {
         self.blendState = blendState
         self.interchangePackState = interchangePackState
+        self.alphaReductionState = alphaReductionState
         self.affineDisplayState = affineDisplayState
         self.radialDisplayState = radialDisplayState
         self.displayPixelFormat = displayPixelFormat
         self.deviceRegistryID = deviceRegistryID
+    }
+
+    func encodeAlphaReduction(
+        source: any MTLTexture,
+        logicalExtent: SIMD2<UInt32>,
+        reductionBuffer: any MTLBuffer,
+        reductionOffset: Int,
+        commandBuffer: any MTLCommandBuffer
+    ) throws {
+        guard source.device.registryID == deviceRegistryID,
+              reductionBuffer.device.registryID == deviceRegistryID,
+              commandBuffer.commandQueue.device.registryID == deviceRegistryID,
+              source.pixelFormat == .rgba16Float,
+              source.textureType == .type2D,
+              source.usage.contains(.shaderRead),
+              logicalExtent.x <= UInt32(source.width),
+              logicalExtent.y <= UInt32(source.height),
+              reductionOffset >= 0,
+              reductionOffset + MemoryLayout<
+                  PatternDocumentPaintMutationReduction
+              >.stride <= reductionBuffer.length
+        else { throw LayerBlendPipelineError.invalidTexture }
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw LayerBlendPipelineError.commandEncoderUnavailable
+        }
+        encoder.label = "Canonical Tile Alpha Reduction"
+        encoder.setComputePipelineState(alphaReductionState)
+        encoder.setTexture(
+            source,
+            index: Int(PatternTextureIndexDocumentPaintBase)
+        )
+        var uniforms = PatternDocumentPaintMutationUniforms()
+        uniforms.logicalExtent = logicalExtent
+        encoder.setBytes(
+            &uniforms,
+            length: MemoryLayout<PatternDocumentPaintMutationUniforms>.stride,
+            index: Int(PatternBufferIndexDocumentPaintMutationUniforms)
+        )
+        encoder.setBuffer(
+            reductionBuffer,
+            offset: reductionOffset,
+            index: Int(PatternBufferIndexDocumentPaintMutationReduction)
+        )
+        let width = alphaReductionState.threadExecutionWidth
+        let height = max(
+            1,
+            alphaReductionState.maxTotalThreadsPerThreadgroup / width
+        )
+        encoder.dispatchThreads(
+            MTLSize(
+                width: Int(logicalExtent.x),
+                height: Int(logicalExtent.y),
+                depth: 1
+            ),
+            threadsPerThreadgroup: MTLSize(
+                width: width,
+                height: height,
+                depth: 1
+            )
+        )
+        encoder.endEncoding()
     }
 
     func encode(
@@ -276,6 +340,8 @@ enum LayerBlendPipeline {
             name: "patternLayerBlendKernel"
         ), let interchangePackFunction = library.makeFunction(
             name: "patternLayerInterchangePackKernel"
+        ), let alphaReductionFunction = library.makeFunction(
+            name: "patternCompositeTileAlphaReduction"
         ), let displayVertex = library.makeFunction(
             name: "patternSparseSamplingVertex"
         ), let affineDisplayFragment = library.makeFunction(
@@ -287,6 +353,7 @@ enum LayerBlendPipeline {
         }
         let blendState: any MTLComputePipelineState
         let interchangePackState: any MTLComputePipelineState
+        let alphaReductionState: any MTLComputePipelineState
         let affineDisplayState: any MTLRenderPipelineState
         let radialDisplayState: any MTLRenderPipelineState
         do {
@@ -295,6 +362,9 @@ enum LayerBlendPipeline {
             )
             interchangePackState = try device.makeComputePipelineState(
                 function: interchangePackFunction
+            )
+            alphaReductionState = try device.makeComputePipelineState(
+                function: alphaReductionFunction
             )
             func makeDisplayState(
                 _ fragment: any MTLFunction
@@ -320,6 +390,7 @@ enum LayerBlendPipeline {
         return LayerBlendPipelineBinding(
             blendState: blendState,
             interchangePackState: interchangePackState,
+            alphaReductionState: alphaReductionState,
             affineDisplayState: affineDisplayState,
             radialDisplayState: radialDisplayState,
             displayPixelFormat: DocumentColorPipeline.displayPixelFormat,
