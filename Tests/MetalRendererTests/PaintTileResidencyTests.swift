@@ -271,6 +271,73 @@ struct PaintTileResidencyTests {
     }
 
     @Test
+    func smallerLaterTransferCannotErasePhysicalPeakHighWater() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let store = PaintTileStore(
+            device: device,
+            byteBudget: bytes * 2,
+            transferByteCapacity: bytes * 9
+        )
+        let surfaceID = UUID()
+        let layerID = UUID()
+        let size = PixelSize(width: 1024, height: 256)
+        let original = try store.reserve(
+            surfaceID: surfaceID,
+            layerID: layerID,
+            generation: 1,
+            pixelSize: size,
+            coordinates: [.init(x: 0, y: 0), .init(x: 1, y: 0)],
+            pinReasons: [.dirty]
+        )
+        try store.markModified(
+            original,
+            surfaceID: surfaceID,
+            currentGeneration: 1
+        )
+        try store.release(
+            original,
+            surfaceID: surfaceID,
+            currentGeneration: 1
+        )
+        let replacement = try store.reserve(
+            surfaceID: surfaceID,
+            layerID: layerID,
+            generation: 1,
+            pixelSize: size,
+            coordinates: [.init(x: 2, y: 0), .init(x: 3, y: 0)],
+            pinReasons: [.active]
+        )
+        #expect(store.snapshot().lastTransferAccounting?.peakTrackedBytes
+            == bytes * 9)
+        try store.release(
+            replacement,
+            surfaceID: surfaceID,
+            currentGeneration: 1
+        )
+        try store.retire(surfaceID: surfaceID, generation: 1)
+
+        let smallerSurfaceID = UUID()
+        let smaller = try store.reserve(
+            surfaceID: smallerSurfaceID,
+            layerID: layerID,
+            generation: 2,
+            pixelSize: size,
+            coordinates: [.init(x: 0, y: 0)],
+            pinReasons: [.active]
+        )
+        let afterSmallerTransfer = store.snapshot()
+        #expect(afterSmallerTransfer.lastTransferAccounting?.peakTrackedBytes
+            == bytes * 2)
+        #expect(afterSmallerTransfer.transferPeakTrackedByteHighWater
+            == bytes * 9)
+        try store.release(
+            smaller,
+            surfaceID: smallerSurfaceID,
+            currentGeneration: 2
+        )
+    }
+
+    @Test
     func zeroSourceCapacityAndTextureAllocationFailuresAreAtomicAndRetryable() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let surfaceID = UUID()
@@ -427,6 +494,286 @@ struct PaintTileResidencyTests {
             backingByteCount: 0
         ))
         try surface.returnLease(lease)
+    }
+
+    @Test
+    func provisionalLiabilityRejectsEscapedPayloadTransfersAtGlobalCap()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let coverageBytes = try #require(
+            DepositionComponentCoverage.residentByteCount(
+                width: PaintTileDescriptor.side,
+                height: PaintTileDescriptor.side
+            )
+        )
+        let capacity = bytes * 5 + coverageBytes - 1
+        let store = PaintTileStore(
+            device: device,
+            byteBudget: bytes * 3,
+            transferByteCapacity: capacity
+        )
+        let surface = TiledRasterSurface(
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 256, height: 256)
+        )
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        let lease = try surface.reserveSortedUniqueTiles(
+            at: [coordinate],
+            pinReasons: [.inFlight]
+        )
+        try surface.markDirty(lease)
+        let provider = try surface.makeExactReferenceProvider()
+        let capture = try TiledRasterExactReferenceCapture(
+            providers: [provider]
+        )
+        let reference = try #require(provider.references.first)
+        let provisional = try surface.makeProvisionalBindings(
+            for: lease,
+            coordinates: [coordinate],
+            workspace: .init(maximumBindingCount: 1)
+        )
+        let beforeTransfers = store.snapshot()
+        #expect(beforeTransfers.provisionalByteCount
+            == bytes + coverageBytes)
+
+        #expect(throws: PaintTileStoreError.self) {
+            _ = try capture.payload(reference, from: provider)
+        }
+        #expect(throws: PaintTileStoreError.self) {
+            _ = try surface.payloadSnapshot()
+        }
+        #expect(store.snapshot() == beforeTransfers)
+
+        try surface.cancelProvisionalBindings(provisional)
+        #expect(try capture.payload(reference, from: provider)
+            != .knownClear)
+        let afterSuccess = store.snapshot()
+        #expect(afterSuccess.lastTransferAccounting?.peakTrackedBytes
+            == bytes * 4)
+        #expect(afterSuccess.transferPeakTrackedByteHighWater <= capacity)
+        capture.close()
+        try surface.returnLease(lease)
+    }
+
+    @Test
+    func backingCapacityRejectsProvisionalBeforeTextureAllocation() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let coverageBytes = try #require(
+            DepositionComponentCoverage.residentByteCount(
+                width: PaintTileDescriptor.side,
+                height: PaintTileDescriptor.side
+            )
+        )
+        let capacity = bytes * 4 + coverageBytes - 1
+        let store = PaintTileStore(
+            device: device,
+            byteBudget: bytes * 2,
+            transferByteCapacity: capacity
+        )
+        let first = TiledRasterSurface(
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 256, height: 256)
+        )
+        let firstCoordinate = PaintTileCoordinate(x: 0, y: 0)
+        let firstLease = try first.reserveSortedUniqueTiles(
+            at: [firstCoordinate],
+            pinReasons: [.inFlight]
+        )
+        try first.markDirty(firstLease)
+        try first.returnLease(firstLease)
+        _ = try first.applyMemoryPressure(targetResidentBytes: 0)
+        #expect(store.snapshot().backingByteCount == bytes)
+
+        let second = TiledRasterSurface(
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 256, height: 256)
+        )
+        let secondCoordinate = PaintTileCoordinate(x: 0, y: 0)
+        let secondLease = try second.reserveSortedUniqueTiles(
+            at: [secondCoordinate],
+            pinReasons: [.inFlight]
+        )
+        let before = store.snapshot()
+        let allocationAttempts =
+            store.testingProvisionalTextureAllocationAttemptCount
+
+        #expect(throws: PaintTileStoreError.self) {
+            _ = try second.makeProvisionalBindings(
+                for: secondLease,
+                coordinates: [secondCoordinate],
+                workspace: .init(maximumBindingCount: 1)
+            )
+        }
+        #expect(store.testingProvisionalTextureAllocationAttemptCount
+            == allocationAttempts)
+        #expect(store.snapshot() == before)
+        #expect(store.snapshot().transferPeakTrackedByteHighWater <= capacity)
+        try second.returnLease(secondLease)
+    }
+
+    @Test
+    func provisionalLiabilityRejectsEscapedBackingRehydrationAtGlobalCap()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let coverageBytes = try #require(
+            DepositionComponentCoverage.residentByteCount(
+                width: PaintTileDescriptor.side,
+                height: PaintTileDescriptor.side
+            )
+        )
+        let capacity = bytes * 6 + coverageBytes - 1
+        let store = PaintTileStore(
+            device: device,
+            byteBudget: bytes * 3,
+            transferByteCapacity: capacity
+        )
+        let escaped = TiledRasterSurface(
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 256, height: 256)
+        )
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        let escapedLease = try escaped.reserveSortedUniqueTiles(
+            at: [coordinate],
+            pinReasons: [.inFlight]
+        )
+        try escaped.markDirty(escapedLease)
+        let provider = try escaped.makeExactReferenceProvider()
+        let capture = try TiledRasterExactReferenceCapture(
+            providers: [provider]
+        )
+        try escaped.returnLease(escapedLease)
+        _ = try escaped.applyMemoryPressure(targetResidentBytes: 0)
+        #expect(store.snapshot().backingByteCount == bytes)
+
+        let active = TiledRasterSurface(
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 256, height: 256)
+        )
+        let activeLease = try active.reserveSortedUniqueTiles(
+            at: [coordinate],
+            pinReasons: [.inFlight]
+        )
+        let provisional = try active.makeProvisionalBindings(
+            for: activeLease,
+            coordinates: [coordinate],
+            workspace: .init(maximumBindingCount: 1)
+        )
+        let beforeRehydrate = store.snapshot()
+
+        #expect(throws: PaintTileStoreError.self) {
+            _ = try provider.leaseExactReferences(
+                provider.references,
+                using: capture,
+                pinReasons: [.visible]
+            )
+        }
+        #expect(store.snapshot() == beforeRehydrate)
+        #expect(store.snapshot().transferPeakTrackedByteHighWater <= capacity)
+
+        try active.cancelProvisionalBindings(provisional)
+        let rehydrated = try provider.leaseExactReferences(
+            provider.references,
+            using: capture,
+            pinReasons: [.visible]
+        )
+        try rehydrated.returnLease()
+        capture.close()
+        try active.returnLease(activeLease)
+    }
+
+    @Test
+    func committedClearWorkspaceKeepsSupersededCoverageInTransferLedger()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let coverageBytes = try #require(
+            DepositionComponentCoverage.residentByteCount(
+                width: PaintTileDescriptor.side,
+                height: PaintTileDescriptor.side
+            )
+        )
+        let expectedPeak = bytes * 6 + coverageBytes * 2
+        let store = PaintTileStore(
+            device: device,
+            byteBudget: bytes * 3,
+            transferByteCapacity: expectedPeak
+        )
+        let readbackSurface = TiledRasterSurface(
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 256, height: 256)
+        )
+        let clearSurface = TiledRasterSurface(
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 256, height: 256)
+        )
+        let readbackCoordinate = PaintTileCoordinate(x: 0, y: 0)
+        let clearCoordinate = PaintTileCoordinate(x: 0, y: 0)
+        let readbackLease = try readbackSurface.reserveSortedUniqueTiles(
+            at: [readbackCoordinate],
+            pinReasons: [.inFlight]
+        )
+        var clearLease = try clearSurface.reserveSortedUniqueTiles(
+            at: [clearCoordinate],
+            pinReasons: [.inFlight]
+        )
+        try readbackSurface.markDirty(readbackLease)
+        try clearSurface.markDirty(clearLease)
+        let initial = try clearSurface.makeProvisionalBindings(
+            for: clearLease,
+            coordinates: [clearCoordinate],
+            modifiedCoordinates: [clearCoordinate],
+            workspace: .init(maximumBindingCount: 1)
+        )
+        clearLease = try clearSurface.commitProvisionalBindings(
+            initial,
+            for: clearLease,
+            modifiedCoordinates: [clearCoordinate],
+            knownClearCoordinates: []
+        )
+        clearSurface.completeProvisionalBindings(initial)
+        let readbackProvider = try readbackSurface
+            .makeExactReferenceProvider()
+        let capture = try TiledRasterExactReferenceCapture(
+            providers: [readbackProvider]
+        )
+        let readbackReference = try #require(
+            readbackProvider.references.first
+        )
+
+        let clearing = try clearSurface.makeProvisionalBindings(
+            for: clearLease,
+            coordinates: [clearCoordinate],
+            modifiedCoordinates: [],
+            workspace: .init(maximumBindingCount: 1)
+        )
+        clearLease = try clearSurface.commitProvisionalBindings(
+            clearing,
+            for: clearLease,
+            modifiedCoordinates: [],
+            knownClearCoordinates: [clearCoordinate]
+        )
+        #expect(store.snapshot().provisionalByteCount
+            == bytes + coverageBytes * 2)
+
+        _ = try capture.payload(readbackReference, from: readbackProvider)
+        let duringCommittedWindow = store.snapshot()
+        #expect(duringCommittedWindow.lastTransferAccounting?.peakTrackedBytes
+            == expectedPeak)
+        #expect(duringCommittedWindow.transferPeakTrackedByteHighWater
+            == expectedPeak)
+        clearSurface.completeProvisionalBindings(clearing)
+        capture.close()
+        try readbackSurface.returnLease(readbackLease)
+        try clearSurface.returnLease(clearLease)
     }
 
     private func identity(

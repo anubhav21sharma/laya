@@ -40,7 +40,10 @@ struct DocumentPaintSurfaceStoreTests {
             device: device,
             byteBudget: tileBytes,
             snapshotPayloadLiabilityByteBudget: tileBytes * 3,
-            transferByteCapacity: tileBytes * 5,
+            // The third seed overlaps one resident texture, one existing
+            // backing, one candidate texture, the persistent zero source,
+            // and both the readback buffer and its captured Data payload.
+            transferByteCapacity: tileBytes * 6,
             geometry: geometry,
             layerIDs: [layer]
         )
@@ -61,6 +64,23 @@ struct DocumentPaintSurfaceStoreTests {
             generation: 1
         )
         #expect(references.count == 3)
+        let physical = registry.sharedTileStore.snapshot()
+        #expect(physical.residentByteCount == tileBytes)
+        #expect(physical.backingByteCount == tileBytes * 2)
+        #expect(physical.persistentZeroAllocationBytes == tileBytes)
+        #expect(physical.lastTransferAccounting?.residentTextureBytesBefore
+            == tileBytes)
+        #expect(physical.lastTransferAccounting?.allocatedTextureBytes
+            == tileBytes)
+        #expect(physical.lastTransferAccounting?.readbackStagingBytes
+            == tileBytes)
+        #expect(physical.lastTransferAccounting?.capturedPayloadBytes
+            == tileBytes)
+        #expect(physical.lastTransferAccounting?.peakTrackedBytes
+            == tileBytes * 6)
+        #expect(physical.lastTransferAccounting?.capacityBytes
+            == tileBytes * 6)
+        #expect(physical.transferPeakTrackedByteHighWater == tileBytes * 6)
 
         let token = try registry.sharedTileStore.retainSnapshotReferences(
             references

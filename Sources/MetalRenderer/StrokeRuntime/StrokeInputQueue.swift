@@ -108,6 +108,8 @@ struct StrokeInputQueueSnapshot: Equatable, Sendable {
 /// occupancy is charged by normalized sample, even when callers submit a
 /// batch in one immutable message, so batching cannot bypass the bound.
 struct StrokeInputQueue: Sendable {
+    var hasPendingCancellation: Bool { pendingCancellation != nil }
+
     var snapshot: StrokeInputQueueSnapshot {
         StrokeInputQueueSnapshot(
             authoritativePendingSampleCount: authoritativeSampleCount,
@@ -386,17 +388,31 @@ struct StrokeInputQueue: Sendable {
             return .authoritative
 
         case let .cancel(generation, reason):
-            authoritative.reset()
-            prediction.reset()
-            authoritativeSampleCount = 0
-            predictedSampleCount = 0
-            cancelledGeneration = generation
-            pendingCancellation = .cancel(
+            return enqueueCancellation(
                 generation: generation,
                 reason: reason
             )
-            return .authoritative
         }
+    }
+
+    /// Cancellation is the queue's reserved terminal control slot. It clears
+    /// bounded sample storage and therefore cannot fail admission, even when
+    /// authoritative input is at capacity.
+    @discardableResult
+    mutating func enqueueCancellation(
+        generation: UInt64,
+        reason: StrokeInputCancellationReason?
+    ) -> StrokeInputAdmission {
+        authoritative.reset()
+        prediction.reset()
+        authoritativeSampleCount = 0
+        predictedSampleCount = 0
+        cancelledGeneration = generation
+        pendingCancellation = .cancel(
+            generation: generation,
+            reason: reason
+        )
+        return .authoritative
     }
 
     mutating func dequeue() -> StrokeInputMessage? {
@@ -875,6 +891,10 @@ private final class StrokePreparedFrameAcknowledgementCore:
     private var transientCacheSettlementWasClaimed = false
     private let mailbox: StrokePreparationMailbox?
     private let wake: AsyncStream<Void>.Continuation?
+    /// The display/cache handoff, rather than its originating renderer, owns
+    /// the worker capable of settling this exact scheduler lease. Retryable
+    /// failures deliberately keep this lifeline; exact fulfillment releases it.
+    private var workerLifeline: StrokePreparationWorkerLifeline?
     #if DEBUG
     private var requestCount = 0
     private var testingReleaseFailures: [StrokePreparationFailure]
@@ -892,12 +912,14 @@ private final class StrokePreparedFrameAcknowledgementCore:
         mailbox: StrokePreparationMailbox,
         wake: AsyncStream<Void>.Continuation,
         generation: UInt64,
-        token: UInt64
+        token: UInt64,
+        workerLifeline: StrokePreparationWorkerLifeline
     ) {
         self.mailbox = mailbox
         self.wake = wake
         self.generation = generation
         self.token = token
+        self.workerLifeline = workerLifeline
         #if DEBUG
         testingReleaseFailures = []
         testingCompletionIsDeferred = false
@@ -911,6 +933,7 @@ private final class StrokePreparedFrameAcknowledgementCore:
     ) {
         mailbox = nil
         wake = nil
+        workerLifeline = nil
         generation = 0
         token = 0
         self.testingReleaseFailures = testingReleaseFailures
@@ -1031,15 +1054,19 @@ private final class StrokePreparedFrameAcknowledgementCore:
         }
     }
 
-    fileprivate func complete() {
+    @discardableResult
+    fileprivate func complete() -> StrokePreparationWorkerLifeline? {
         lock.lock()
         guard case let .pending(continuation) = state else {
             lock.unlock()
             preconditionFailure("ACK completion without pending request")
         }
         state = .fulfilled
+        let releasedWorkerLifeline = workerLifeline
+        workerLifeline = nil
         lock.unlock()
         continuation?.resume()
+        return releasedWorkerLifeline
     }
 
     fileprivate func fail(_ failure: StrokePreparationFailure) {
@@ -1281,6 +1308,9 @@ final class StrokePreparationMailbox: Sendable {
         var asyncProgressRegistration:
             StrokePreparationAsyncProgressRegistration?
         var workerTaskPriority: TaskPriority?
+        var terminalWorkerLifeline: StrokePreparationWorkerLifeline?
+            = nil
+        var resultConsumerIsRetained = true
         let maximumPreparedRecordCount: Int
         let maximumPreparedLogicalDabCount: Int
         let maximumPreparedPayloadBytes: Int
@@ -1304,6 +1334,22 @@ final class StrokePreparationMailbox: Sendable {
 
     var currentProgressRevision: UInt64 {
         state.withLock { $0.progressRevision }
+    }
+
+    /// Wakes completion drains for renderer-owned lifecycle progress that is
+    /// causally attached to this mailbox but does not originate in the worker.
+    /// Cache retirement is one such terminal event: the worker workspace may
+    /// already be empty while the cache still owns the exact prepared frame.
+    func recordExternalProgress() {
+        let progressObservers = state.withLock { state in
+            state.progressRevision &+= 1
+            return (
+                state.progressWaiter,
+                state.asyncProgressRegistration
+            )
+        }
+        progressObservers.0?.recordProgress()
+        progressObservers.1?.recordProgress()
     }
 
     init(budget: DepositionFrameBudget) {
@@ -1350,12 +1396,91 @@ final class StrokePreparationMailbox: Sendable {
         generation: UInt64,
         reason: StrokeInputCancellationReason?,
         frameDisposition: StrokePreparationCancellationFrameDisposition
-    ) throws -> StrokeInputAdmission {
-        try submit(
-            .cancel(generation: generation, reason: reason),
-            traceLineage: [],
-            cancellationFrameDisposition: frameDisposition
+    ) -> StrokeInputAdmission {
+        submitCancellationRetainingWorker(
+            generation: generation,
+            reason: reason,
+            frameDisposition: frameDisposition,
+            workerLifeline: nil
         )
+    }
+
+    @discardableResult
+    fileprivate func submitCancellationRetainingWorker(
+        generation: UInt64,
+        reason: StrokeInputCancellationReason?,
+        frameDisposition: StrokePreparationCancellationFrameDisposition,
+        workerLifeline: StrokePreparationWorkerLifeline?
+    ) -> StrokeInputAdmission {
+        state.withLock { state in
+            let admission = state.input.enqueueCancellation(
+                generation: generation,
+                reason: reason
+            )
+            if let workerLifeline {
+                state.terminalWorkerLifeline = workerLifeline
+            }
+            state.discardedGeneration = generation
+            if let awaiting = state.awaitingFrame,
+               (state.results.count > 0
+                || frameDisposition == .abandonedBeforeSubmission),
+               state.pendingAcknowledgement == nil,
+               state.acknowledgementInFlight?.identity != awaiting
+            {
+                state.pendingAcknowledgement = .init(
+                    identity: awaiting,
+                    endpoint: nil
+                )
+            }
+            state.results.reset()
+            return admission
+        }
+    }
+
+    /// Re-enqueues one exact terminal cancellation only after the scheduler
+    /// reports that physical cleanup is still retryable. While Main remains,
+    /// the published failure occupies the single result slot until Main
+    /// observes it. Owner release instead removes or suppresses that exact
+    /// failure so the already-queued terminal retry can run autonomously.
+    fileprivate func retryTerminalCancellation(
+        _ message: StrokeInputMessage
+    ) {
+        guard case let .cancel(generation, reason) = message else {
+            preconditionFailure("Only cancellation may retry terminal cleanup")
+        }
+        state.withLock { state in
+            precondition(state.discardedGeneration == generation)
+            _ = state.input.enqueueCancellation(
+                generation: generation,
+                reason: reason
+            )
+            state.progressRevision &+= 1
+        }
+    }
+
+    /// Marks the renderer-facing result consumer as gone. A retryable
+    /// cancellation-cleanup failure must remain visible while that consumer
+    /// exists, but after its owner disappears the failure cannot occupy the
+    /// one result slot and prevent the already-queued terminal retry.
+    func releaseResultConsumer() {
+        let progressObservers: (
+            StrokePreparationProgressWaiter?,
+            StrokePreparationAsyncProgressRegistration?
+        )? = state.withLock { state in
+            precondition(state.resultConsumerIsRetained)
+            state.resultConsumerIsRetained = false
+            guard case let .failed(generation, _)? = state.results.first,
+                  generation == state.discardedGeneration
+            else { return nil }
+            _ = state.results.removeFirst()
+            state.progressRevision &+= 1
+            return (
+                state.progressWaiter,
+                state.asyncProgressRegistration
+            )
+        }
+        progressObservers?.0?.recordProgress()
+        progressObservers?.1?.recordProgress()
     }
 
     private func submit(
@@ -1507,6 +1632,16 @@ final class StrokePreparationMailbox: Sendable {
         generation: UInt64,
         token: UInt64
     ) {
+        _ = completePreparedFrameAcknowledgementRetainingWorker(
+            generation: generation,
+            token: token
+        )
+    }
+
+    fileprivate func completePreparedFrameAcknowledgementRetainingWorker(
+        generation: UInt64,
+        token: UInt64
+    ) -> StrokePreparationWorkerLifeline? {
         let progressObservers = state.withLock { state in
             let identity = PreparedFrameIdentity(
                 generation: generation,
@@ -1528,7 +1663,7 @@ final class StrokePreparationMailbox: Sendable {
         }
         progressObservers.0?.recordProgress()
         progressObservers.1?.recordProgress()
-        progressObservers.2?.complete()
+        return progressObservers.2?.complete()
     }
 
     func failPreparedFrameAcknowledgement(
@@ -1560,6 +1695,33 @@ final class StrokePreparationMailbox: Sendable {
                 if case .cancelled = result {
                     state.discardedGeneration = nil
                     state.terminalCancellationPublicationCount &+= 1
+                    precondition(
+                        state.results.count < state.results.capacity,
+                        "Bounded stroke result mailbox overflow"
+                    )
+                    state.results.append(result)
+                    state.resultHighWater = max(
+                        state.resultHighWater,
+                        state.results.count
+                    )
+                    state.progressRevision &+= 1
+                    return (
+                        state.progressWaiter,
+                        state.asyncProgressRegistration
+                    )
+                }
+                if case .failed = result {
+                    guard state.resultConsumerIsRetained else {
+                        state.progressRevision &+= 1
+                        return (
+                            state.progressWaiter,
+                            state.asyncProgressRegistration
+                        )
+                    }
+                    precondition(
+                        state.results.count < state.results.capacity,
+                        "Bounded stroke result mailbox overflow"
+                    )
                     state.results.append(result)
                     state.resultHighWater = max(
                         state.resultHighWater,
@@ -1627,10 +1789,17 @@ final class StrokePreparationMailbox: Sendable {
         progressObservers.1?.recordProgress()
     }
 
-    func completeWorkerOperation() {
+    func completeWorkerOperation(
+        completedTerminalCancellation: Bool = false
+    ) {
         let progressObservers = state.withLock { state in
             precondition(state.workerIsProcessing)
             state.workerIsProcessing = false
+            if completedTerminalCancellation,
+               !state.input.hasPendingCancellation
+            {
+                state.terminalWorkerLifeline = nil
+            }
             state.progressRevision &+= 1
             return (
                 state.progressWaiter,
@@ -1790,9 +1959,44 @@ final class StrokePreparationResultOwnershipProbe: @unchecked Sendable {
 }
 #endif
 
-/// One long-lived drain task services a stroke mailbox. Input methods remain
-/// synchronous and bounded; all preparation crosses to the coordinator actor.
-final class StrokePreparationBridge: Sendable {
+/// Strong, affine ownership transferred from one prepared display ACK to the
+/// next. The core releases it only after the scheduler has terminally settled
+/// that exact frame; a retryable release failure keeps the same lifeline.
+private final class StrokePreparationWorkerLifeline: @unchecked Sendable {
+    let driver: StrokePreparationWorkerDriver
+
+    init(driver: StrokePreparationWorkerDriver) {
+        self.driver = driver
+    }
+}
+
+/// Lets the driver-free worker closure acquire a bounded turn borrow without
+/// capturing its owner. The reference is weak, so an idle driver still tears
+/// down as soon as its Bridge and exact ACK lifelines disappear.
+private final class StrokePreparationWorkerLifelineSource:
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private weak var driver: StrokePreparationWorkerDriver?
+
+    func install(_ driver: StrokePreparationWorkerDriver) {
+        lock.lock()
+        defer { lock.unlock() }
+        precondition(self.driver == nil)
+        self.driver = driver
+    }
+
+    func acquire() -> StrokePreparationWorkerLifeline? {
+        lock.lock()
+        defer { lock.unlock() }
+        return driver.map(StrokePreparationWorkerLifeline.init(driver:))
+    }
+}
+
+/// Owns the mailbox, scheduler, wake channel, and one drain task independently
+/// of the renderer-facing Bridge. Its task captures only those components and
+/// the weak lifeline source, never the driver itself.
+private final class StrokePreparationWorkerDriver: @unchecked Sendable {
     let mailbox: StrokePreparationMailbox
 
     private let scheduler: StrokeFrameScheduler
@@ -1806,17 +2010,27 @@ final class StrokePreparationBridge: Sendable {
     init(
         budget: DepositionFrameBudget,
         targetFramesPerSecond: Int,
-        traceRecorder: InteractiveBrushTraceRecorder? = nil
+        traceRecorder: InteractiveBrushTraceRecorder?,
+        schedulerAcknowledgementFailureInjection:
+            (@Sendable () -> StrokePreparationFailure?)? = nil,
+        schedulerCancellationCleanupFailureInjection:
+            (@Sendable () -> StrokeTileSurfaceError?)? = nil,
+        testingWorkerResultPublicationGate:
+            (@Sendable () async -> Void)? = nil
     ) {
         let mailbox = StrokePreparationMailbox(budget: budget)
         let scheduler = StrokeFrameScheduler(
             budget: budget,
             targetFramesPerSecond: targetFramesPerSecond,
-            traceRecorder: traceRecorder
+            traceRecorder: traceRecorder,
+            cancellationCleanupFailureInjection:
+                schedulerCancellationCleanupFailureInjection
         )
         let pair = AsyncStream<Void>.makeStream(
             bufferingPolicy: .bufferingNewest(1)
         )
+        let wake = pair.continuation
+        let lifelineSource = StrokePreparationWorkerLifelineSource()
         #if DEBUG
         let resultOwnershipProbe =
             OSAllocatedUnfairLock<StrokePreparationResultOwnershipProbe?>(
@@ -1826,7 +2040,7 @@ final class StrokePreparationBridge: Sendable {
         #endif
         self.mailbox = mailbox
         self.scheduler = scheduler
-        wake = pair.continuation
+        self.wake = wake
         workerTask = Task.detached(priority: .userInitiated) {
             mailbox.recordWorkerTaskPriority(Task.currentPriority)
             for await _ in pair.stream {
@@ -1839,14 +2053,24 @@ final class StrokePreparationBridge: Sendable {
                         resultOwnershipProbe.withLock { $0 }?
                             .observeWorkerAcknowledgement()
                         #endif
-                        let result = await scheduler
-                            .acknowledgePreparedFrame(
+                        let result: StrokePreparationResult?
+                        if let failure =
+                            schedulerAcknowledgementFailureInjection?()
+                        {
+                            result = .failed(
                                 generation: acknowledgement.generation,
-                                frameToken: acknowledgement.token,
-                                resumeAuthoritativeContinuation:
-                                    acknowledgement
-                                        .resumeAuthoritativeContinuation
+                                failure: failure
                             )
+                        } else {
+                            result = await scheduler
+                                .acknowledgePreparedFrame(
+                                    generation: acknowledgement.generation,
+                                    frameToken: acknowledgement.token,
+                                    resumeAuthoritativeContinuation:
+                                        acknowledgement
+                                            .resumeAuthoritativeContinuation
+                                )
+                        }
                         let releaseStillOutstanding = await scheduler
                             .ownsPreparedFrame(
                                 generation: acknowledgement.generation,
@@ -1863,40 +2087,80 @@ final class StrokePreparationBridge: Sendable {
                             mailbox.completeWorkerOperation()
                             continue
                         }
-                        mailbox.completePreparedFrameAcknowledgement(
-                            generation: acknowledgement.generation,
-                            token: acknowledgement.token
-                        )
+                        let handoffLifeline = mailbox
+                            .completePreparedFrameAcknowledgementRetainingWorker(
+                                generation: acknowledgement.generation,
+                                token: acknowledgement.token
+                            )
                         if let result {
                             Self.publishForDisplay(
                                 result,
                                 mailbox: mailbox,
-                                wake: pair.continuation
+                                wake: wake,
+                                lifelineSource: lifelineSource,
+                                preferredLifeline: handoffLifeline
                             )
                         }
                         mailbox.completeWorkerOperation()
+                        withExtendedLifetime(handoffLifeline) {}
                         continue
                     }
                     guard let input = mailbox.takeInputEnvelope() else {
                         break
                     }
-                    if let result = await scheduler.process(input) {
+                    guard let processingLifeline = lifelineSource.acquire()
+                    else {
+                        mailbox.completeWorkerOperation()
+                        return
+                    }
+                    let result = await scheduler.process(input)
+                    let completesTerminalCancellation: Bool
+                    if case .cancelled? = result {
+                        completesTerminalCancellation = true
+                    } else {
+                        completesTerminalCancellation = false
+                    }
+                    if case .cancel = input.message,
+                       case .failed? = result
+                    {
+                        mailbox.retryTerminalCancellation(input.message)
+                    }
+                    if let result {
+                        if let testingWorkerResultPublicationGate {
+                            await testingWorkerResultPublicationGate()
+                            if Task.isCancelled {
+                                mailbox.completeWorkerOperation(
+                                    completedTerminalCancellation:
+                                        completesTerminalCancellation
+                                )
+                                return
+                            }
+                        }
                         Self.publishForDisplay(
                             result,
                             mailbox: mailbox,
-                            wake: pair.continuation
+                            wake: wake,
+                            lifelineSource: lifelineSource,
+                            preferredLifeline: processingLifeline
                         )
                     }
-                    mailbox.completeWorkerOperation()
+                    mailbox.completeWorkerOperation(
+                        completedTerminalCancellation:
+                            completesTerminalCancellation
+                    )
+                    withExtendedLifetime(processingLifeline) {}
                 }
             }
         }
+        lifelineSource.install(self)
     }
 
     private static func publishForDisplay(
         _ result: StrokePreparationResult,
         mailbox: StrokePreparationMailbox,
-        wake: AsyncStream<Void>.Continuation
+        wake: AsyncStream<Void>.Continuation,
+        lifelineSource: StrokePreparationWorkerLifelineSource,
+        preferredLifeline: StrokePreparationWorkerLifeline?
     ) {
         guard case let .prepared(batch) = result,
               let lease = batch.surfaceLease,
@@ -1908,11 +2172,17 @@ final class StrokePreparationBridge: Sendable {
         precondition(
             lease.generation == batch.generation && lease.token == token
         )
+        guard let workerLifeline = preferredLifeline
+                ?? lifelineSource.acquire()
+        else {
+            preconditionFailure("prepared ACK published without worker owner")
+        }
         let core = StrokePreparedFrameAcknowledgementCore(
             mailbox: mailbox,
             wake: wake,
             generation: batch.generation,
-            token: token
+            token: token,
+            workerLifeline: workerLifeline
         )
         let acknowledgement = StrokePreparedFrameAcknowledgement(core: core)
         let displayFrame = StrokePreparedDisplayFrame(
@@ -1948,14 +2218,21 @@ final class StrokePreparationBridge: Sendable {
         generation: UInt64,
         reason: StrokeInputCancellationReason?,
         frameDisposition: StrokePreparationCancellationFrameDisposition
-    ) throws -> StrokeInputAdmission {
-        let admission = try mailbox.submitCancellation(
+    ) -> StrokeInputAdmission {
+        let workerLifeline = StrokePreparationWorkerLifeline(driver: self)
+        let admission = mailbox.submitCancellationRetainingWorker(
             generation: generation,
             reason: reason,
-            frameDisposition: frameDisposition
+            frameDisposition: frameDisposition,
+            workerLifeline: workerLifeline
         )
         wake.yield()
         return admission
+    }
+
+    func releaseResultConsumer() {
+        mailbox.releaseResultConsumer()
+        wake.yield()
     }
 
     func drainResults(
@@ -1981,6 +2258,8 @@ final class StrokePreparationBridge: Sendable {
     }
 
     #if DEBUG
+    var workerTaskForTesting: Task<Void, Never> { workerTask }
+
     func setResultOwnershipProbeForTesting(
         _ probe: StrokePreparationResultOwnershipProbe?
     ) {
@@ -2024,6 +2303,152 @@ final class StrokePreparationBridge: Sendable {
     #endif
 }
 
+/// Renderer-facing façade. The independently retained driver, not this Bridge,
+/// is the lifetime boundary for mailbox-backed prepared acknowledgements.
+final class StrokePreparationBridge: Sendable {
+    private let driver: StrokePreparationWorkerDriver
+
+    var mailbox: StrokePreparationMailbox { driver.mailbox }
+
+    deinit {
+        driver.releaseResultConsumer()
+    }
+
+    init(
+        budget: DepositionFrameBudget,
+        targetFramesPerSecond: Int,
+        traceRecorder: InteractiveBrushTraceRecorder? = nil
+    ) {
+        driver = StrokePreparationWorkerDriver(
+            budget: budget,
+            targetFramesPerSecond: targetFramesPerSecond,
+            traceRecorder: traceRecorder
+        )
+    }
+
+    #if DEBUG
+    init(
+        budget: DepositionFrameBudget,
+        targetFramesPerSecond: Int,
+        traceRecorder: InteractiveBrushTraceRecorder? = nil,
+        testingSchedulerAcknowledgementFailures:
+            [StrokePreparationFailure],
+        testingSchedulerCancellationCleanupFailures:
+            [StrokeTileSurfaceError] = [],
+        testingWorkerResultPublicationGate:
+            (@Sendable () async -> Void)? = nil
+    ) {
+        let failures = OSAllocatedUnfairLock(
+            initialState: testingSchedulerAcknowledgementFailures
+        )
+        let cancellationFailures = OSAllocatedUnfairLock(
+            initialState: testingSchedulerCancellationCleanupFailures
+        )
+        driver = StrokePreparationWorkerDriver(
+            budget: budget,
+            targetFramesPerSecond: targetFramesPerSecond,
+            traceRecorder: traceRecorder,
+            schedulerAcknowledgementFailureInjection: {
+                failures.withLock { failures in
+                    guard !failures.isEmpty else { return nil }
+                    return failures.removeFirst()
+                }
+            },
+            schedulerCancellationCleanupFailureInjection: {
+                cancellationFailures.withLock { failures in
+                    guard !failures.isEmpty else { return nil }
+                    return failures.removeFirst()
+                }
+            },
+            testingWorkerResultPublicationGate:
+                testingWorkerResultPublicationGate
+        )
+    }
+
+    var workerDriverForTesting: AnyObject { driver }
+    var workerTaskForTesting: Task<Void, Never> {
+        driver.workerTaskForTesting
+    }
+    #endif
+
+    @discardableResult
+    func submit(
+        _ message: StrokeInputMessage,
+        traceLineage: [InteractiveBrushInputTrace] = []
+    ) throws -> StrokeInputAdmission {
+        try driver.submit(message, traceLineage: traceLineage)
+    }
+
+    @discardableResult
+    func submitCancellation(
+        generation: UInt64,
+        reason: StrokeInputCancellationReason?,
+        frameDisposition: StrokePreparationCancellationFrameDisposition
+    ) -> StrokeInputAdmission {
+        driver.submitCancellation(
+            generation: generation,
+            reason: reason,
+            frameDisposition: frameDisposition
+        )
+    }
+
+    func drainResults(
+        into destination: inout [StrokePreparationResult]
+    ) {
+        driver.drainResults(into: &destination)
+    }
+
+    func acknowledgePreparedFrame(
+        generation: UInt64,
+        token: UInt64
+    ) throws {
+        try driver.acknowledgePreparedFrame(
+            generation: generation,
+            token: token
+        )
+    }
+
+    #if DEBUG
+    func setResultOwnershipProbeForTesting(
+        _ probe: StrokePreparationResultOwnershipProbe?
+    ) {
+        driver.setResultOwnershipProbeForTesting(probe)
+    }
+
+    func beginResultOwnershipWindowForTesting() {
+        driver.beginResultOwnershipWindowForTesting()
+    }
+
+    func markResultOwnershipReleasedForTesting() {
+        driver.markResultOwnershipReleasedForTesting()
+    }
+
+    func cancelResultOwnershipWindowForTesting() {
+        driver.cancelResultOwnershipWindowForTesting()
+    }
+    #endif
+
+    package func stageCContinuationMetricsForAllocationHarness() async
+        -> StrokeStageCContinuationMetrics
+    {
+        await driver.stageCContinuationMetricsForAllocationHarness()
+    }
+
+    #if DEBUG
+    func schedulerSnapshotForTesting() async
+        -> StrokeFrameSchedulerSnapshot
+    {
+        await driver.schedulerSnapshotForTesting()
+    }
+
+    func transientSnapshotForTesting() async
+        -> StrokeTransientPreparationSnapshot
+    {
+        await driver.transientSnapshotForTesting()
+    }
+    #endif
+}
+
 private struct StrokeResultRing: Sendable {
     let capacity: Int
     var storageCapacity: Int { storage.capacity }
@@ -2031,6 +2456,11 @@ private struct StrokeResultRing: Sendable {
 
     private var storage: ContiguousArray<StrokePreparationResult?>
     private var head = 0
+
+    var first: StrokePreparationResult? {
+        guard count > 0 else { return nil }
+        return storage[head]
+    }
 
     init(capacity: Int) {
         precondition(capacity > 0)

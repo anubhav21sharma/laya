@@ -24,7 +24,7 @@ struct InteractiveStrokePresentationCacheTests {
         let adoption = Task {
             try await rig.cache.adopt(update, parameters: rig.parameters)
         }
-        await rig.gate.waitUntilSubmitted()
+        try #require(await rig.gate.waitUntilSubmitted())
 
         #expect(update.acknowledgement.status == .available)
         #expect(try await rig.cache.current(generation: rig.generation) == nil)
@@ -145,7 +145,7 @@ struct InteractiveStrokePresentationCacheTests {
         let replacement = Task {
             try await rig.cache.adopt(second, parameters: rig.parameters)
         }
-        await rig.gate.waitUntilSubmitted(count: 2)
+        try #require(await rig.gate.waitUntilSubmitted(count: 2))
 
         let whileUpdating = try #require(
             try await rig.cache.current(generation: rig.generation)
@@ -265,7 +265,7 @@ struct InteractiveStrokePresentationCacheTests {
                 parameters: rig.parameters
             )
         }
-        await rig.gate.waitUntilSubmitted()
+        try #require(await rig.gate.waitUntilSubmitted())
         var inFlight = await rig.cache.snapshot()
         #expect(inFlight.totalPhysicalResidentBytes
             <= inFlight.residentByteBudget)
@@ -286,7 +286,7 @@ struct InteractiveStrokePresentationCacheTests {
                 parameters: rig.parameters
             )
         }
-        await rig.gate.waitUntilSubmitted(count: 2)
+        try #require(await rig.gate.waitUntilSubmitted(count: 2))
         inFlight = await rig.cache.snapshot()
         #expect(inFlight.totalPhysicalResidentBytes
             == replacementPhysicalPeak)
@@ -469,12 +469,12 @@ struct InteractiveStrokePresentationCacheTests {
 
         renderer = nil
         #expect(releasedRenderer.value == nil)
-        await rig.gate.waitUntilSubmitted()
+        try #require(await rig.gate.waitUntilSubmitted())
         #expect(update.acknowledgement.status == .available)
         await rig.gate.open()
         await adoption.value
         await InteractiveStrokeCacheLifecycleCoordinator.shared
-            .advancePendingLifecycles()
+            .waitForLifecycle(update.presentationEpoch.identity)
 
         #expect(update.acknowledgement.status == .fulfilled)
         #expect(update.acknowledgement.testingRequestCount == 1)
@@ -558,6 +558,7 @@ struct InteractiveStrokePresentationCacheTests {
             initiallyOpen: true,
             blocksRetirementRetry: true
         )
+        defer { Task { await gate.releaseAll() } }
         var cache: InteractiveStrokePresentationCache? =
             InteractiveStrokePresentationCache(
                 device: device,
@@ -579,7 +580,7 @@ struct InteractiveStrokePresentationCacheTests {
             )
         cache = nil
 
-        await gate.waitUntilRetirementRetryBlocked()
+        try #require(await gate.waitUntilRetirementRetryBlocked())
         #expect(weakCache.value != nil)
         #expect(update.acknowledgement.status == .fulfilled)
         await gate.releaseRetirementRetry()
@@ -636,6 +637,7 @@ struct InteractiveStrokePresentationCacheTests {
             initiallyOpen: true,
             blocksLifecycleRetry: true
         )
+        defer { Task { await gate.releaseAll() } }
         var cache: InteractiveStrokePresentationCache? =
             InteractiveStrokePresentationCache(
                 device: device,
@@ -656,12 +658,12 @@ struct InteractiveStrokePresentationCacheTests {
             )
         cache = nil
 
-        await gate.waitUntilLifecycleRetryScheduled(count: 1)
+        try #require(await gate.waitUntilLifecycleRetryScheduled(count: 1))
         #expect(weakCache.value != nil)
         #expect(update.acknowledgement.testingRequestCount == 1)
         await gate.releaseOneLifecycleRetry()
-        await gate.waitUntilAcknowledgementFailure(count: 2)
-        await gate.waitUntilLifecycleRetryScheduled(count: 2)
+        try #require(await gate.waitUntilAcknowledgementFailure(count: 2))
+        try #require(await gate.waitUntilLifecycleRetryScheduled(count: 2))
         #expect(update.acknowledgement.testingRequestCount == 2)
         #expect(update.acknowledgement.status
             == .failed(.schedulerReleaseFailed(failure)))
@@ -680,7 +682,174 @@ struct InteractiveStrokePresentationCacheTests {
 
     @Test
     @MainActor
-    func cancellingOwnerGoneLifecycleCancelsItsOnlyScheduledRetry()
+    func liveOwnerLossStillRetriesExactACKThroughDurableHandoff()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let queue = device.makeCommandQueue()
+        else { return }
+        let layerID = UUID()
+        let context = try DocumentPaintRenderContext(
+            device: device,
+            commandQueue: queue,
+            library: makeShaderLibrary(device: device),
+            geometry: try DocumentPaintGeometry(
+                documentPixelSize: PixelSize(width: 256, height: 256),
+                storagePixelSize: PixelSize(width: 256, height: 256),
+                radialLayout: nil
+            ),
+            initialLayerStack: try .single(id: layerID),
+            byteBudget: PaintTileDescriptor.residentByteCount * 8,
+            transferByteCapacity: PaintTileDescriptor.residentByteCount * 16,
+            maximumRevisionBytes: PaintTileDescriptor.residentByteCount * 8
+        )
+        let capability = try context.beginStrokeSurface()
+        let failure = StrokePreparationFailure.unexpected(
+            "live renderer ACK failure"
+        )
+        let update = try context.makeTransientCacheUpdate(
+            frame: .testing(
+                capability: capability,
+                acknowledgementIsAvailable: true,
+                acknowledgementReleaseFailures: [failure, failure]
+            ),
+            sequence: 1
+        )
+        let gate = InteractiveStrokePresentationCacheGate(
+            initiallyOpen: true,
+            blocksLifecycleRetry: true
+        )
+        defer { Task { await gate.releaseAll() } }
+        var cache: InteractiveStrokePresentationCache? =
+            InteractiveStrokePresentationCache(
+                device: device,
+                commandQueue: queue,
+                byteBudget: PaintTileDescriptor.residentByteCount * 8,
+                maximumTileCount: 4,
+                completionGate: gate
+            )
+        let weakCache = WeakInteractiveStrokePresentationCache(cache)
+        var liveOwner: InteractiveStrokeLifecycleOwnerProbe? = .init()
+        let terminal = InteractiveStrokeCacheLifecycleTerminalProbe()
+        var operation: Task<Void, Never>? =
+            InteractiveStrokeCacheAdoptionOperation.start(
+                cache: cache!,
+                update: update,
+                parameters: .init(blendMode: .normal, opacity: 1),
+                terminal: { [weak liveOwner] _ in liveOwner != nil },
+                lifecycleTerminal: { terminal.record($0) }
+            )
+        try #require(await gate.waitUntilLifecycleRetryScheduled(count: 1))
+        try #require(await gate.lifecycleRetryScheduleCountSnapshot == 1)
+        try #require(await gate.lifecycleRetryWaiterCount == 1)
+        #expect(weakCache.value != nil)
+        liveOwner = nil
+        cache = nil
+        await gate.releaseOneLifecycleRetry()
+        try #require(await gate.waitUntilAcknowledgementFailure(count: 2))
+        try #require(await gate.waitUntilLifecycleRetryScheduled(count: 2))
+        #expect(await gate.lifecycleRetryWaiterCount == 1)
+        await gate.releaseOneLifecycleRetry()
+        await InteractiveStrokeCacheLifecycleCoordinator.shared
+            .waitForAcknowledgement(update.presentationEpoch.identity)
+        await InteractiveStrokeCacheLifecycleCoordinator.shared
+            .cancelRetainedLifecycle(update.presentationEpoch.identity)
+        let diagnostic = await terminal.waitUntilRecorded()
+        await operation?.value
+        operation = nil
+
+        #expect(update.acknowledgement.status == .fulfilled)
+        #expect(update.acknowledgement.testingRequestCount == 3)
+        #expect(diagnostic.pendingPreparedAcknowledgementCount == 0)
+        #expect(weakCache.value == nil)
+    }
+
+    @Test
+    @MainActor
+    func cancelDuringActiveACKRetryRetainsCreditAndTerminatesOnce()
+        async throws
+    {
+        guard let rig = try makeRig() else { return }
+        let failure = StrokePreparationFailure.unexpected(
+            "cancel during active ACK retry"
+        )
+        let frame = StrokePreparedDisplayFrame.testing(
+            capability: rig.capability,
+            acknowledgementIsAvailable: true,
+            acknowledgementReleaseFailures: [failure, failure]
+        )
+        let update = try rig.context.makeTransientCacheUpdate(
+            frame: frame,
+            sequence: 1
+        )
+        let gate = InteractiveStrokePresentationCacheGate(
+            initiallyOpen: true,
+            blocksLifecycleRetry: true,
+            blocksAcknowledgementFailureAt: 2
+        )
+        defer { Task { await gate.releaseAll() } }
+        let cache = InteractiveStrokePresentationCache(
+            device: rig.queue.device,
+            commandQueue: rig.queue,
+            byteBudget: PaintTileDescriptor.residentByteCount * 8,
+            maximumTileCount: 4,
+            completionGate: gate,
+            failureInjection: .init(retirementFailureCount: 1)
+        )
+        let terminal = InteractiveStrokeCacheLifecycleTerminalProbe()
+        let failures = InteractiveStrokeLifecycleFailureProbe()
+        let operation = InteractiveStrokeCacheAdoptionOperation.start(
+            cache: cache,
+            update: update,
+            parameters: rig.parameters,
+            terminal: { _ in true },
+            lifecycleTerminal: { terminal.record($0) }
+        )
+        try #require(await gate.waitUntilLifecycleRetryScheduled(count: 1))
+        await gate.releaseOneLifecycleRetry()
+        try #require(await gate.waitUntilBlockedAcknowledgementFailure())
+
+        InteractiveStrokeCacheLifecycleCoordinator.shared
+            .requestCancellation(
+                cache: cache,
+                strokeEpoch: update.presentationEpoch,
+                failureTerminal: { failures.record($0) }
+            )
+        if terminal.snapshot != nil {
+            Issue.record("cancellation terminalized an active ACK obligation")
+            await gate.releaseBlockedAcknowledgementFailure()
+            return
+        }
+        #expect((await cache.snapshot())
+            .pendingPreparedAcknowledgementCount == 1)
+        #expect(update.acknowledgement.testingRequestCount == 2)
+
+        await gate.releaseBlockedAcknowledgementFailure()
+        try #require(await gate.waitUntilLifecycleRetryScheduled(count: 2))
+        await gate.releaseOneLifecycleRetry()
+        try #require(await gate.waitUntilLifecycleRetryScheduled(count: 3))
+        #expect(failures.count == 1)
+        #expect(failures.descriptions == [String(describing:
+            InteractiveStrokePresentationCacheError
+                .injectedRetirementFailure(
+                    update.presentationEpoch.identity
+                )
+        )])
+        await gate.releaseOneLifecycleRetry()
+        let diagnostic = await terminal.waitUntilRecorded()
+        await operation.value
+
+        #expect(terminal.recordCount == 1)
+        #expect(update.acknowledgement.status == .fulfilled)
+        #expect(update.acknowledgement.testingRequestCount == 3)
+        #expect(diagnostic.pendingPreparedAcknowledgementCount == 0)
+        #expect(diagnostic.activeStrokeEpochCount == 0)
+        #expect(diagnostic.activeUpdateOwnerCount == 0)
+    }
+
+    @Test
+    @MainActor
+    func cancellingOwnerGoneLifecycleUsesItsOnlyScheduledRetry()
         async throws
     {
         guard let device = MTLCreateSystemDefaultDevice(),
@@ -714,13 +883,15 @@ struct InteractiveStrokePresentationCacheTests {
             initiallyOpen: true,
             blocksLifecycleRetry: true
         )
+        defer { Task { await gate.releaseAll() } }
         var cache: InteractiveStrokePresentationCache? =
             InteractiveStrokePresentationCache(
                 device: device,
                 commandQueue: queue,
                 byteBudget: PaintTileDescriptor.residentByteCount * 8,
                 maximumTileCount: 4,
-                completionGate: gate
+                completionGate: gate,
+                failureInjection: .init(retirementFailureCount: 1)
             )
         let weakCache = WeakInteractiveStrokePresentationCache(cache)
         let terminal = InteractiveStrokeCacheLifecycleTerminalProbe()
@@ -734,9 +905,7 @@ struct InteractiveStrokePresentationCacheTests {
             )
         cache = nil
 
-        await gate.waitUntilLifecycleRetryScheduled(count: 1)
-        await operation?.value
-        operation = nil
+        try #require(await gate.waitUntilLifecycleRetryScheduled(count: 1))
         #expect(await gate.lifecycleRetryScheduleCountSnapshot == 1)
         #expect(await gate.lifecycleRetryWaiterCount == 1)
         #expect(weakCache.value != nil)
@@ -744,8 +913,12 @@ struct InteractiveStrokePresentationCacheTests {
 
         await InteractiveStrokeCacheLifecycleCoordinator.shared
             .cancelRetainedLifecycle(update.presentationEpoch.identity)
+        #expect(await gate.lifecycleRetryWaiterCount == 1)
+        #expect(await gate.lifecycleRetryWaiterHighWaterSnapshot == 1)
+        await gate.releaseOneLifecycleRetry()
+        await operation?.value
+        operation = nil
         let diagnostic = await terminal.waitUntilRecorded()
-        await gate.waitUntilLifecycleRetryCancellation(count: 1)
 
         #expect(diagnostic.activeStrokeEpochCount == 0)
         #expect(diagnostic.activeUpdateOwnerCount == 0)
@@ -753,12 +926,13 @@ struct InteractiveStrokePresentationCacheTests {
         #expect(diagnostic.provisionalBytes == 0)
         #expect(diagnostic.pendingPreparedAcknowledgementCount == 0)
         #expect(await gate.lifecycleRetryWaiterCount == 0)
+        #expect(await gate.lifecycleRetryWaiterHighWaterSnapshot == 1)
         #expect(weakCache.value == nil)
     }
 
     @Test
     @MainActor
-    func terminalRetirementAbandonmentReplacesPublishedPhysicalStore()
+    func repeatedRetirementFailuresPreservePhysicalStateUntilRetrySucceeds()
         async throws
     {
         guard let rig = try makeRig(
@@ -788,7 +962,16 @@ struct InteractiveStrokePresentationCacheTests {
                 )
             }
         }
-        await rig.cache.terminallyAbandonFailedRetirement(
+        let retained = await rig.cache.snapshot()
+        #expect(retained.residentBytes == published.residentBytes)
+        #expect(retained.totalPhysicalResidentBytes
+            == published.totalPhysicalResidentBytes)
+        #expect(retained.componentCoverageBytes
+            == published.componentCoverageBytes)
+        #expect(retained.activeStrokeEpochCount == 1)
+        #expect(!retained.isIdle)
+
+        try await rig.cache.retire(
             strokeEpoch: rig.capability.presentationEpoch
         )
 
@@ -803,6 +986,850 @@ struct InteractiveStrokePresentationCacheTests {
         #expect(terminal.retirementWaiterCount == 0)
         #expect(terminal.pendingPreparedAcknowledgementCount == 0)
         #expect(terminal.retirementState == .idle)
+    }
+
+    @Test
+    @MainActor
+    func terminalRetirementKeepsEscapedProviderAndLeaseInGlobalBudget()
+        async throws
+    {
+        let firstAdoptionPeak = PaintTileDescriptor.residentByteCount * 4
+        guard let rig = try makeRig(
+            maximumTileCount: 1,
+            cacheByteBudget: firstAdoptionPeak,
+            cacheFailureInjection: .init(retirementFailureCount: 1)
+        ) else { return }
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        let update = try makeUpdate(
+            rig: rig,
+            role: .authoritative,
+            coordinates: [coordinate],
+            sequence: 1
+        )
+        _ = try await rig.cache.adopt(update, parameters: rig.parameters)
+        var provider: TiledRasterExactReferenceProvider? = try #require(
+            try await rig.cache.current(generation: rig.generation)?
+                .authoritative
+        )
+        var capture: TiledRasterExactReferenceCapture? = try
+            TiledRasterExactReferenceCapture(providers: [provider!])
+        var escapedLease: TiledRasterExactReferenceLease? = try provider!
+            .leaseExactReferences(
+                provider!.references,
+                using: capture!,
+                pinReasons: [.visible]
+            )
+        await #expect(throws: (any Error).self) {
+            try await rig.cache.retire(
+                strokeEpoch: rig.capability.presentationEpoch
+            )
+        }
+        await #expect(throws: (any Error).self) {
+            try await rig.cache.retire(
+                strokeEpoch: rig.capability.presentationEpoch
+            )
+        }
+
+        var retained = await rig.cache.snapshot()
+        #expect(retained.totalPhysicalResidentBytes > 0)
+        #expect(retained.activeExternalLeaseCount == 1)
+        #expect(!retained.isIdle)
+
+        let nextContext = try DocumentPaintRenderContext(
+            device: rig.queue.device,
+            commandQueue: rig.queue,
+            library: makeShaderLibrary(device: rig.queue.device),
+            geometry: try DocumentPaintGeometry(
+                documentPixelSize: PixelSize(width: 512, height: 256),
+                storagePixelSize: PixelSize(width: 512, height: 256),
+                radialLayout: nil
+            ),
+            initialLayerStack: try .single(id: update.layerID),
+            byteBudget: PaintTileDescriptor.residentByteCount * 16,
+            transferByteCapacity: PaintTileDescriptor.residentByteCount * 32,
+            maximumRevisionBytes: PaintTileDescriptor.residentByteCount * 16,
+            generation: rig.generation
+        )
+        let nextCapability = try nextContext.beginStrokeSurface()
+        let nextFrame = StrokePreparedDisplayFrame.testing(
+            capability: nextCapability,
+            changedCoordinates: [.init(x: 1, y: 0)],
+            acknowledgementIsAvailable: true
+        )
+        let next = try nextContext.makeTransientCacheUpdate(
+            frame: nextFrame,
+            sequence: 2
+        )
+        await #expect(
+            throws: InteractiveStrokePresentationCacheError.self
+        ) {
+            _ = try await rig.cache.adopt(next, parameters: rig.parameters)
+        }
+        retained = await rig.cache.snapshot()
+        #expect(retained.totalPhysicalResidentBytes
+            <= retained.residentByteBudget)
+
+        try escapedLease?.returnLease()
+        escapedLease = nil
+        try await rig.cache.retire(
+            strokeEpoch: rig.capability.presentationEpoch
+        )
+        capture?.close()
+        capture = nil
+        provider = nil
+        let reclaimed = await rig.cache.snapshot()
+        #expect(reclaimed.totalPhysicalResidentBytes == 0)
+        #expect(reclaimed.activeExternalLeaseCount == 0)
+        #expect(reclaimed.isIdle)
+    }
+
+    @Test
+    @MainActor
+    func retiredBackingBytesRemainPhysicalAndBlockOverBudgetAdoption()
+        async throws
+    {
+        let firstAdoptionPeak = PaintTileDescriptor.residentByteCount * 4
+        guard let rig = try makeRig(
+            maximumTileCount: 1,
+            cacheByteBudget: firstAdoptionPeak
+        ) else { return }
+        let first = try makeUpdate(
+            rig: rig,
+            role: .authoritative,
+            coordinates: [.init(x: 0, y: 0)],
+            sequence: 1
+        )
+        _ = try await rig.cache.adopt(first, parameters: rig.parameters)
+        var provider: TiledRasterExactReferenceProvider? = try #require(
+            try await rig.cache.current(generation: rig.generation)?
+                .authoritative
+        )
+        var capture: TiledRasterExactReferenceCapture? = try
+            TiledRasterExactReferenceCapture(providers: [provider!])
+        try await rig.cache.retire(
+            strokeEpoch: rig.capability.presentationEpoch
+        )
+        _ = try provider?.applyMemoryPressure(targetResidentBytes: 0)
+
+        var retained = await rig.cache.snapshot()
+        #expect(retained.backingBytes == PaintTileDescriptor.residentByteCount)
+        #expect(retained.totalPhysicalResidentBytes
+            == retained.backingBytes
+                + PaintTileDescriptor.residentByteCount)
+        #expect(!retained.isIdle)
+
+        let nextContext = try DocumentPaintRenderContext(
+            device: rig.queue.device,
+            commandQueue: rig.queue,
+            library: makeShaderLibrary(device: rig.queue.device),
+            geometry: try DocumentPaintGeometry(
+                documentPixelSize: PixelSize(width: 512, height: 256),
+                storagePixelSize: PixelSize(width: 512, height: 256),
+                radialLayout: nil
+            ),
+            initialLayerStack: try .single(id: first.layerID),
+            byteBudget: PaintTileDescriptor.residentByteCount * 16,
+            transferByteCapacity: PaintTileDescriptor.residentByteCount * 32,
+            maximumRevisionBytes: PaintTileDescriptor.residentByteCount * 16,
+            generation: rig.generation
+        )
+        let nextCapability = try nextContext.beginStrokeSurface()
+        let nextReservation = try nextCapability.reserveStrokeTiles(
+            role: .authoritative,
+            coordinates: [.init(x: 1, y: 0)],
+            pinReasons: [.visible, .inFlight],
+            workspace: PaintTileStrokeLeaseWorkspace(maximumBindingCount: 1),
+            failureInjection: nil
+        )
+        try nextCapability.testingMarkDirty(nextReservation)
+        try nextCapability.releaseFrameReservations(
+            authoritative: nextReservation,
+            prediction: nil
+        )
+        func update(sequence: UInt64) throws
+            -> DocumentPaintTransientCacheUpdate
+        {
+            try nextContext.makeTransientCacheUpdate(
+                frame: .testing(
+                    capability: nextCapability,
+                    changedCoordinates: [.init(x: 1, y: 0)],
+                    acknowledgementIsAvailable: true
+                ),
+                sequence: sequence
+            )
+        }
+        let blocked = try update(sequence: 2)
+        await #expect(
+            throws: InteractiveStrokePresentationCacheError
+                .physicalCapacityExceeded(
+                    requested: PaintTileDescriptor.residentByteCount * 4
+                        + PaintTileDescriptor.residentByteCount / 2,
+                    current: PaintTileDescriptor.residentByteCount * 2,
+                    highWater: firstAdoptionPeak,
+                    maximum: firstAdoptionPeak
+                )
+        ) {
+            _ = try await rig.cache.adopt(
+                blocked,
+                parameters: rig.parameters
+            )
+        }
+
+        capture?.close()
+        capture = nil
+        provider = nil
+        retained = await rig.cache.snapshot()
+        #expect(retained.backingBytes == 0)
+        let admitted = try update(sequence: 3)
+        _ = try await rig.cache.adopt(admitted, parameters: rig.parameters)
+        let final = await rig.cache.snapshot()
+        #expect(final.totalPhysicalResidentBytes <= final.residentByteBudget)
+        #expect(final.totalPhysicalResidentByteHighWater
+            <= final.residentByteBudget)
+    }
+
+    @Test
+    @MainActor
+    func cancelDuringRetirementWaitsPastTwoTurnsForExactLease()
+        async throws
+    {
+        guard let rig = try makeRig() else { return }
+        let update = try makeUpdate(
+            rig: rig,
+            role: .authoritative,
+            coordinates: [.init(x: 0, y: 0)],
+            sequence: 1
+        )
+        _ = try await rig.cache.adopt(update, parameters: rig.parameters)
+        let gate = InteractiveStrokePresentationCacheGate(
+            initiallyOpen: true,
+            blocksRetirementRetry: true,
+            blocksLifecycleRetry: true
+        )
+        defer { Task { await gate.releaseAll() } }
+        let cache = InteractiveStrokePresentationCache(
+            device: rig.queue.device,
+            commandQueue: rig.queue,
+            byteBudget: PaintTileDescriptor.residentByteCount * 8,
+            maximumTileCount: 4,
+            completionGate: gate
+        )
+        let copied = try rig.context.makeTransientCacheUpdate(
+            frame: .testing(
+                capability: rig.capability,
+                changedCoordinates: [.init(x: 0, y: 0)],
+                acknowledgementIsAvailable: true
+            ),
+            sequence: 2
+        )
+        _ = try await cache.adopt(copied, parameters: rig.parameters)
+        let cachedProvider = try #require(
+            try await cache.current(generation: rig.generation)?
+                .authoritative
+        )
+        let cachedCapture = try TiledRasterExactReferenceCapture(
+            providers: [cachedProvider]
+        )
+        let cachedLease = try cachedProvider.leaseExactReferences(
+            cachedProvider.references,
+            using: cachedCapture,
+            pinReasons: [.visible]
+        )
+        let terminal = InteractiveStrokeCacheLifecycleTerminalProbe()
+        let failures = InteractiveStrokeLifecycleFailureProbe()
+        InteractiveStrokeCacheLifecycleCoordinator.shared.requestRetirement(
+            cache: cache,
+            strokeEpoch: copied.presentationEpoch,
+            lifecycleTerminal: { terminal.record($0) },
+            failureTerminal: { failures.record($0) }
+        )
+        try #require(await gate.waitUntilRetirementRetryBlocked())
+
+        await InteractiveStrokeCacheLifecycleCoordinator.shared
+            .cancelRetainedLifecycle(copied.presentationEpoch.identity)
+        #expect(terminal.snapshot == nil)
+        await gate.releaseRetirementRetry()
+        try #require(await gate.waitUntilLifecycleRetryScheduled(count: 1))
+        #expect(await gate.lifecycleRetryWaiterCount == 1)
+        await gate.releaseOneLifecycleRetry()
+        try #require(await gate.waitUntilLifecycleRetryScheduled(count: 2))
+        #expect(await gate.lifecycleRetryWaiterCount == 1)
+        await gate.releaseOneLifecycleRetry()
+        try #require(await gate.waitUntilLifecycleRetryScheduled(count: 3))
+        #expect(await gate.lifecycleRetryWaiterCount == 1)
+        #expect(terminal.snapshot == nil)
+        #expect(failures.count == 1)
+
+        try cachedLease.returnLease()
+        await gate.releaseOneLifecycleRetry()
+        try #require(await gate.waitUntilLifecycleRetryScheduled(count: 4))
+        guard terminal.snapshot == nil else {
+            cachedCapture.close()
+            Issue.record(
+                "lifecycle terminalized while an exact capture retained bytes"
+            )
+            return
+        }
+        let providerRetained = await cache.snapshot()
+        #expect(providerRetained.activeStrokeEpochCount == 0)
+        #expect(providerRetained.activeExternalLeaseCount == 0)
+        #expect(providerRetained.totalPhysicalResidentBytes > 0)
+        #expect(!providerRetained.isIdle)
+        #expect(await gate.lifecycleRetryWaiterCount == 1)
+
+        cachedCapture.close()
+        await gate.releaseOneLifecycleRetry()
+        let diagnostic = await terminal.waitUntilRecorded()
+
+        #expect(terminal.recordCount == 1)
+        #expect(diagnostic.retirementFailureCount == 3)
+        #expect(diagnostic.activeStrokeEpochCount == 0)
+        #expect(diagnostic.activeExternalLeaseCount == 0)
+        #expect(diagnostic.pendingPreparedAcknowledgementCount == 0)
+        #expect(diagnostic.totalPhysicalResidentBytes == 0)
+        #expect(diagnostic.isIdle)
+    }
+
+    @Test
+    @MainActor
+    func intentUpgradeNeverOverlapsLifecycleRetryWaiters() async throws {
+        guard let rig = try makeRig() else { return }
+        let gate = InteractiveStrokePresentationCacheGate(
+            initiallyOpen: true,
+            blocksLifecycleRetry: true
+        )
+        defer { Task { await gate.releaseAll() } }
+        let cache = InteractiveStrokePresentationCache(
+            device: rig.queue.device,
+            commandQueue: rig.queue,
+            byteBudget: PaintTileDescriptor.residentByteCount * 8,
+            maximumTileCount: 4,
+            completionGate: gate
+        )
+        let update = try makeUpdate(
+            rig: rig,
+            role: .authoritative,
+            coordinates: [.init(x: 0, y: 0)],
+            sequence: 1
+        )
+        _ = try await cache.adopt(update, parameters: rig.parameters)
+        let provider = try #require(
+            try await cache.current(generation: rig.generation)?
+                .authoritative
+        )
+        let capture = try TiledRasterExactReferenceCapture(
+            providers: [provider]
+        )
+        let lease = try provider.leaseExactReferences(
+            provider.references,
+            using: capture,
+            pinReasons: [.visible]
+        )
+        let terminal = InteractiveStrokeCacheLifecycleTerminalProbe()
+        InteractiveStrokeCacheLifecycleCoordinator.shared.requestRetirement(
+            cache: cache,
+            strokeEpoch: update.presentationEpoch,
+            lifecycleTerminal: { terminal.record($0) }
+        )
+        try #require(await gate.waitUntilLifecycleRetryScheduled(count: 1))
+        #expect(await gate.lifecycleRetryWaiterCount == 1)
+
+        await InteractiveStrokeCacheLifecycleCoordinator.shared
+            .cancelRetainedLifecycle(update.presentationEpoch.identity)
+        #expect(await gate.lifecycleRetryWaiterCount == 1)
+        #expect(await gate.lifecycleRetryWaiterHighWaterSnapshot == 1)
+        await gate.releaseOneLifecycleRetry()
+        try #require(await gate.waitUntilLifecycleRetryScheduled(count: 2))
+        #expect(await gate.lifecycleRetryWaiterCount == 1)
+        #expect(await gate.lifecycleRetryWaiterHighWaterSnapshot == 1)
+
+        try lease.returnLease()
+        capture.close()
+        await gate.releaseOneLifecycleRetry()
+        let final = await terminal.waitUntilRecorded()
+        #expect(final.isIdle)
+        #expect(final.totalPhysicalResidentBytes == 0)
+        #expect(await gate.lifecycleRetryWaiterHighWaterSnapshot == 1)
+    }
+
+    @Test
+    @MainActor
+    func nilReporterDoesNotConsumeLaterRetirementFailureReport()
+        async throws
+    {
+        guard let rig = try makeRig() else { return }
+        let gate = InteractiveStrokePresentationCacheGate(
+            initiallyOpen: true,
+            blocksLifecycleRetry: true
+        )
+        defer { Task { await gate.releaseAll() } }
+        let cache = InteractiveStrokePresentationCache(
+            device: rig.queue.device,
+            commandQueue: rig.queue,
+            byteBudget: PaintTileDescriptor.residentByteCount * 8,
+            maximumTileCount: 4,
+            completionGate: gate,
+            failureInjection: .init(retirementFailureCount: 2)
+        )
+        let update = try makeUpdate(
+            rig: rig,
+            role: .authoritative,
+            coordinates: [.init(x: 0, y: 0)],
+            sequence: 1
+        )
+        _ = try await cache.adopt(update, parameters: rig.parameters)
+        InteractiveStrokeCacheLifecycleCoordinator.shared.requestRetirement(
+            cache: cache,
+            strokeEpoch: update.presentationEpoch
+        )
+        try #require(await gate.waitUntilLifecycleRetryScheduled(count: 1))
+
+        let failures = InteractiveStrokeLifecycleFailureProbe()
+        let terminal = InteractiveStrokeCacheLifecycleTerminalProbe()
+        InteractiveStrokeCacheLifecycleCoordinator.shared.requestCancellation(
+            cache: cache,
+            strokeEpoch: update.presentationEpoch,
+            lifecycleTerminal: { terminal.record($0) },
+            failureTerminal: { failures.record($0) }
+        )
+        await gate.releaseOneLifecycleRetry()
+        try #require(await gate.waitUntilLifecycleRetryScheduled(count: 2))
+        #expect(failures.count == 1)
+        #expect(await gate.lifecycleRetryWaiterHighWaterSnapshot == 1)
+
+        await gate.releaseOneLifecycleRetry()
+        let final = await terminal.waitUntilRecorded()
+        #expect(failures.count == 1)
+        #expect(final.retirementFailureCount == 2)
+        #expect(final.isIdle)
+    }
+
+    @Test
+    @MainActor
+    func multiPageEpochVersionsACKWaitersAndBoundsTerminalOwnership()
+        async throws
+    {
+        guard let rig = try makeRig(blocksLifecycleRetry: true) else {
+            return
+        }
+        defer { Task { await rig.gate.releaseAll() } }
+        let first = try makeUpdate(
+            rig: rig,
+            role: .authoritative,
+            coordinates: [.init(x: 0, y: 0)],
+            sequence: 1
+        )
+        let terminal = InteractiveStrokeCacheLifecycleTerminalProbe()
+        var firstOperation: Task<Void, Never>? =
+            InteractiveStrokeCacheAdoptionOperation.start(
+                cache: rig.cache,
+                update: first,
+                parameters: rig.parameters,
+                terminal: { _ in true },
+                lifecycleTerminal: { terminal.record($0) }
+            )
+        await firstOperation?.value
+        firstOperation = nil
+        await InteractiveStrokeCacheLifecycleCoordinator.shared
+            .waitForAcknowledgement(first.presentationEpoch.identity)
+        #expect(first.acknowledgement.status == .fulfilled)
+        #expect(terminal.recordCount == 0)
+
+        let failure = StrokePreparationFailure.unexpected(
+            "second page ACK failure"
+        )
+        let second = try makeUpdate(
+            rig: rig,
+            role: .authoritative,
+            coordinates: [.init(x: 1, y: 0)],
+            sequence: 2,
+            acknowledgementReleaseFailures: [failure]
+        )
+        var secondOperation: Task<Void, Never>? =
+            InteractiveStrokeCacheAdoptionOperation.start(
+                cache: rig.cache,
+                update: second,
+                parameters: rig.parameters,
+                terminal: { _ in true },
+                lifecycleTerminal: { terminal.record($0) }
+            )
+        let acknowledgementWaitProbe =
+            InteractiveStrokeCacheLifecycleTerminalProbe()
+        let acknowledgementWait = Task { @MainActor in
+            await InteractiveStrokeCacheLifecycleCoordinator.shared
+                .waitForAcknowledgement(second.presentationEpoch.identity)
+            acknowledgementWaitProbe.record(await rig.cache.snapshot())
+        }
+        try #require(
+            await rig.gate.waitUntilLifecycleRetryScheduled(count: 1)
+        )
+        #expect(second.acknowledgement.testingRequestCount == 1)
+        #expect(second.acknowledgement.status
+            == .failed(.schedulerReleaseFailed(failure)))
+        #expect(terminal.recordCount == 0)
+        #expect(acknowledgementWaitProbe.recordCount == 0)
+        await rig.gate.releaseOneLifecycleRetry()
+        await secondOperation?.value
+        secondOperation = nil
+        await acknowledgementWait.value
+
+        #expect(second.acknowledgement.status == .fulfilled)
+        #expect(second.acknowledgement.testingRequestCount == 2)
+        #expect(terminal.recordCount == 0)
+        #expect(acknowledgementWaitProbe.recordCount == 1)
+        InteractiveStrokeCacheLifecycleCoordinator.shared.requestCancellation(
+            cache: rig.cache,
+            strokeEpoch: second.presentationEpoch,
+            lifecycleTerminal: { terminal.record($0) }
+        )
+        let final = await terminal.waitUntilRecorded()
+        #expect(terminal.recordCount == 1)
+        #expect(final.isIdle)
+        #expect(!InteractiveStrokeCacheLifecycleCoordinator.shared
+            .retainsLifecycle(second.presentationEpoch.identity))
+    }
+
+    @Test
+    @MainActor
+    func concurrentHandoffsPreserveStaleOwnerLossRetirementIntent()
+        async throws
+    {
+        guard let rig = try makeRig(
+            gateCompletion: true,
+            blocksLifecycleRetry: true
+        ) else { return }
+        defer { Task { await rig.gate.releaseAll() } }
+        let failure = StrokePreparationFailure.unexpected(
+            "first concurrent page delayed ACK"
+        )
+        let first = try makeUpdate(
+            rig: rig,
+            role: .authoritative,
+            coordinates: [.init(x: 0, y: 0)],
+            sequence: 1,
+            acknowledgementReleaseFailures: [failure]
+        )
+        let second = try makeUpdate(
+            rig: rig,
+            role: .authoritative,
+            coordinates: [.init(x: 1, y: 0)],
+            sequence: 2
+        )
+        let terminal = InteractiveStrokeCacheLifecycleTerminalProbe()
+        let firstOperation = InteractiveStrokeCacheAdoptionOperation.start(
+            cache: rig.cache,
+            update: first,
+            parameters: rig.parameters,
+            terminal: { _ in false },
+            lifecycleTerminal: { terminal.record($0) }
+        )
+        try #require(await rig.gate.waitUntilSubmitted())
+        let secondOperation = InteractiveStrokeCacheAdoptionOperation.start(
+            cache: rig.cache,
+            update: second,
+            parameters: rig.parameters,
+            terminal: { _ in true },
+            lifecycleTerminal: { terminal.record($0) }
+        )
+
+        await rig.gate.open()
+        try #require(
+            await rig.gate.waitUntilLifecycleRetryScheduled(count: 1)
+        )
+        #expect(first.acknowledgement.testingRequestCount == 1)
+        #expect(second.acknowledgement.testingRequestCount == 0)
+        #expect(terminal.recordCount == 0)
+        await rig.gate.releaseOneLifecycleRetry()
+        await firstOperation.value
+        await secondOperation.value
+        let final = await terminal.waitUntilRecorded()
+
+        #expect(first.acknowledgement.status == .fulfilled)
+        #expect(second.acknowledgement.status == .fulfilled)
+        #expect(first.acknowledgement.testingRequestCount == 2)
+        #expect(second.acknowledgement.testingRequestCount == 1)
+        #expect(terminal.recordCount == 1)
+        #expect(final.isIdle)
+        #expect(!InteractiveStrokeCacheLifecycleCoordinator.shared
+            .retainsLifecycle(first.presentationEpoch.identity))
+        #expect((await rig.cache.snapshot()).isIdle)
+    }
+
+    @Test
+    @MainActor
+    func handoffQueuedDuringRetirementWaitSettlesBeforeTerminal()
+        async throws
+    {
+        guard let rig = try makeRig(
+            blocksLifecycleRetry: true,
+            cacheFailureInjection: .init(retirementFailureCount: 1)
+        ) else { return }
+        defer { Task { await rig.gate.releaseAll() } }
+        let first = try makeUpdate(
+            rig: rig,
+            role: .authoritative,
+            coordinates: [.init(x: 0, y: 0)],
+            sequence: 1
+        )
+        let firstOperation = InteractiveStrokeCacheAdoptionOperation.start(
+            cache: rig.cache,
+            update: first,
+            parameters: rig.parameters,
+            terminal: { _ in true }
+        )
+        await firstOperation.value
+
+        let retirement = InteractiveStrokeCacheLifecycleTerminalProbe()
+        InteractiveStrokeCacheLifecycleCoordinator.shared.requestRetirement(
+            cache: rig.cache,
+            strokeEpoch: first.presentationEpoch,
+            lifecycleTerminal: { retirement.record($0) }
+        )
+        try #require(
+            await rig.gate.waitUntilLifecycleRetryScheduled(count: 1)
+        )
+
+        let late = try makeUpdate(
+            rig: rig,
+            role: .authoritative,
+            coordinates: [.init(x: 1, y: 0)],
+            sequence: 2
+        )
+        let lateLifecycle = InteractiveStrokeCacheLifecycleTerminalProbe()
+        let lateOperation = InteractiveStrokeCacheAdoptionOperation.start(
+            cache: rig.cache,
+            update: late,
+            parameters: rig.parameters,
+            terminal: { _ in true },
+            lifecycleTerminal: { lateLifecycle.record($0) }
+        )
+        #expect(late.acknowledgement.testingRequestCount == 0)
+        #expect(retirement.recordCount == 0)
+        #expect(lateLifecycle.recordCount == 0)
+        #expect(await rig.gate.lifecycleRetryWaiterHighWaterSnapshot == 1)
+
+        await rig.gate.releaseOneLifecycleRetry()
+        await lateOperation.value
+        let final = await retirement.waitUntilRecorded()
+
+        #expect(late.acknowledgement.status == .fulfilled)
+        #expect(late.acknowledgement.testingRequestCount == 1)
+        #expect(retirement.recordCount == 1)
+        #expect(lateLifecycle.recordCount == 0)
+        #expect(final.isIdle)
+        #expect(!InteractiveStrokeCacheLifecycleCoordinator.shared
+            .retainsLifecycle(first.presentationEpoch.identity))
+    }
+
+    @Test
+    @MainActor
+    func laterPageWaitsForExactEarlierACKRetryBeforeAdoption()
+        async throws
+    {
+        guard let rig = try makeRig(
+            blocksLifecycleRetry: true
+        ) else { return }
+        defer { Task { await rig.gate.releaseAll() } }
+        let failure = StrokePreparationFailure.unexpected(
+            "first page delayed ACK retry"
+        )
+        let first = try makeUpdate(
+            rig: rig,
+            role: .authoritative,
+            coordinates: [.init(x: 0, y: 0)],
+            sequence: 1,
+            acknowledgementReleaseFailures: [failure]
+        )
+        let firstOperation = InteractiveStrokeCacheAdoptionOperation.start(
+            cache: rig.cache,
+            update: first,
+            parameters: rig.parameters,
+            terminal: { _ in true }
+        )
+        try #require(
+            await rig.gate.waitUntilLifecycleRetryScheduled(count: 1)
+        )
+
+        let second = try makeUpdate(
+            rig: rig,
+            role: .authoritative,
+            coordinates: [.init(x: 1, y: 0)],
+            sequence: 2
+        )
+        let secondOperation = InteractiveStrokeCacheAdoptionOperation.start(
+            cache: rig.cache,
+            update: second,
+            parameters: rig.parameters,
+            terminal: { _ in true }
+        )
+        #expect(first.acknowledgement.testingRequestCount == 1)
+        #expect(second.acknowledgement.testingRequestCount == 0)
+
+        await rig.gate.releaseOneLifecycleRetry()
+        await firstOperation.value
+        await secondOperation.value
+        await InteractiveStrokeCacheLifecycleCoordinator.shared
+            .waitForAcknowledgement(second.presentationEpoch.identity)
+
+        #expect(first.acknowledgement.status == .fulfilled)
+        #expect(first.acknowledgement.testingRequestCount == 2)
+        #expect(second.acknowledgement.status == .fulfilled)
+        #expect(second.acknowledgement.testingRequestCount == 1)
+        InteractiveStrokeCacheLifecycleCoordinator.shared.requestCancellation(
+            cache: rig.cache,
+            strokeEpoch: second.presentationEpoch
+        )
+        await InteractiveStrokeCacheLifecycleCoordinator.shared
+            .waitForLifecycle(second.presentationEpoch.identity)
+        #expect((await rig.cache.snapshot()).isIdle)
+    }
+
+    @Test
+    @MainActor
+    func distinctEpochWaitsForCacheWideACKAndRetirementOwnership()
+        async throws
+    {
+        guard let rig = try makeRig(blocksLifecycleRetry: true) else {
+            return
+        }
+        defer { Task { await rig.gate.releaseAll() } }
+        let firstFailure = StrokePreparationFailure.unexpected(
+            "first epoch delayed ACK"
+        )
+        let first = try makeUpdate(
+            rig: rig,
+            role: .authoritative,
+            coordinates: [.init(x: 0, y: 0)],
+            sequence: 1,
+            acknowledgementReleaseFailures: [firstFailure]
+        )
+        let firstLifecycle = InteractiveStrokeCacheLifecycleTerminalProbe()
+        let firstOperation = InteractiveStrokeCacheAdoptionOperation.start(
+            cache: rig.cache,
+            update: first,
+            parameters: rig.parameters,
+            terminal: { _ in false },
+            lifecycleTerminal: { firstLifecycle.record($0) }
+        )
+        try #require(
+            await rig.gate.waitUntilLifecycleRetryScheduled(count: 1)
+        )
+
+        let secondContext = try DocumentPaintRenderContext(
+            device: rig.queue.device,
+            commandQueue: rig.queue,
+            library: makeShaderLibrary(device: rig.queue.device),
+            geometry: try DocumentPaintGeometry(
+                documentPixelSize: PixelSize(width: 512, height: 256),
+                storagePixelSize: PixelSize(width: 512, height: 256),
+                radialLayout: nil
+            ),
+            initialLayerStack: try .single(id: first.layerID),
+            byteBudget: PaintTileDescriptor.residentByteCount * 16,
+            transferByteCapacity: PaintTileDescriptor.residentByteCount * 32,
+            maximumRevisionBytes: PaintTileDescriptor.residentByteCount * 16,
+            generation: rig.generation
+        )
+        let secondCapability = try secondContext.beginStrokeSurface()
+        let secondFrame = StrokePreparedDisplayFrame.testing(
+            capability: secondCapability,
+            changedCoordinates: [.init(x: 1, y: 0)],
+            acknowledgementIsAvailable: true
+        )
+        let second = try secondContext.makeTransientCacheUpdate(
+            frame: secondFrame,
+            sequence: 1
+        )
+        let secondLifecycle = InteractiveStrokeCacheLifecycleTerminalProbe()
+        let secondOperation = InteractiveStrokeCacheAdoptionOperation.start(
+            cache: rig.cache,
+            update: second,
+            parameters: rig.parameters,
+            terminal: { _ in false },
+            lifecycleTerminal: { secondLifecycle.record($0) }
+        )
+
+        #expect(first.acknowledgement.testingRequestCount == 1)
+        #expect(second.acknowledgement.testingRequestCount == 0)
+        #expect(firstLifecycle.recordCount == 0)
+        #expect(secondLifecycle.recordCount == 0)
+
+        await rig.gate.releaseOneLifecycleRetry()
+        try #require(await firstLifecycle.waitUntilRecordCount(1))
+        try #require(await secondLifecycle.waitUntilRecordCount(1))
+        await firstOperation.value
+        await secondOperation.value
+
+        #expect(first.acknowledgement.status == .fulfilled)
+        #expect(first.acknowledgement.testingRequestCount == 2)
+        #expect(second.acknowledgement.status == .fulfilled)
+        #expect(second.acknowledgement.testingRequestCount == 1)
+        #expect(firstLifecycle.recordCount == 1)
+        #expect(secondLifecycle.recordCount == 1)
+        #expect(!InteractiveStrokeCacheLifecycleCoordinator.shared
+            .retainsLifecycle(first.presentationEpoch.identity))
+        #expect(!InteractiveStrokeCacheLifecycleCoordinator.shared
+            .retainsLifecycle(second.presentationEpoch.identity))
+        #expect((await rig.cache.snapshot()).isIdle)
+    }
+
+    @Test
+    @MainActor
+    func firstAdoptionCannotResurrectCompletedEpochCancellation()
+        async throws
+    {
+        guard let rig = try makeRig(blocksLifecycleRetry: true) else {
+            return
+        }
+        defer { Task { await rig.gate.releaseAll() } }
+        let acknowledgementFailure = StrokePreparationFailure.unexpected(
+            "late retired adoption ACK"
+        )
+        let update = try makeUpdate(
+            rig: rig,
+            role: .authoritative,
+            coordinates: [.init(x: 0, y: 0)],
+            sequence: 1,
+            acknowledgementReleaseFailures: [acknowledgementFailure]
+        )
+        let cancelled = InteractiveStrokeCacheLifecycleTerminalProbe()
+        InteractiveStrokeCacheLifecycleCoordinator.shared.requestCancellation(
+            cache: rig.cache,
+            strokeEpoch: update.presentationEpoch,
+            lifecycleTerminal: { cancelled.record($0) }
+        )
+        _ = await cancelled.waitUntilRecorded()
+        #expect(!InteractiveStrokeCacheLifecycleCoordinator.shared
+            .retainsLifecycle(update.presentationEpoch.identity))
+
+        let late = InteractiveStrokeCacheLifecycleTerminalProbe()
+        let operation = InteractiveStrokeCacheAdoptionOperation.start(
+            cache: rig.cache,
+            update: update,
+            parameters: rig.parameters,
+            terminal: { _ in true },
+            lifecycleTerminal: { late.record($0) }
+        )
+        try #require(
+            await rig.gate.waitUntilLifecycleRetryScheduled(count: 1)
+        )
+        #expect(update.acknowledgement.testingRequestCount == 1)
+        #expect(update.acknowledgement.status == .failed(
+            .schedulerReleaseFailed(acknowledgementFailure)
+        ))
+        #expect(late.recordCount == 0)
+        #expect(InteractiveStrokeCacheLifecycleCoordinator.shared
+            .retainsLifecycle(update.presentationEpoch.identity))
+        await rig.gate.releaseOneLifecycleRetry()
+        await operation.value
+        _ = await late.waitUntilRecorded()
+
+        #expect(update.acknowledgement.status == .fulfilled)
+        #expect(update.acknowledgement.testingRequestCount == 2)
+        #expect(!InteractiveStrokeCacheLifecycleCoordinator.shared
+            .retainsLifecycle(update.presentationEpoch.identity))
+        #expect((await rig.cache.snapshot()).isIdle)
+        #expect(late.recordCount == 1)
     }
 
     @Test
@@ -830,7 +1857,7 @@ struct InteractiveStrokePresentationCacheTests {
         let task = Task {
             try await rig.cache.adopt(cancelled, parameters: rig.parameters)
         }
-        await rig.gate.waitUntilSubmitted(count: 2)
+        try #require(await rig.gate.waitUntilSubmitted(count: 2))
         task.cancel()
         await rig.gate.open()
 
@@ -942,7 +1969,7 @@ struct InteractiveStrokePresentationCacheTests {
         let firstAdoption = Task {
             try await rig.cache.adopt(first, parameters: rig.parameters)
         }
-        await rig.gate.waitUntilSubmitted()
+        try #require(await rig.gate.waitUntilSubmitted())
         let second = try makeUpdate(
             rig: rig,
             role: .authoritative,
@@ -984,7 +2011,7 @@ struct InteractiveStrokePresentationCacheTests {
         let owner = Task {
             try await rig.cache.adopt(update, parameters: rig.parameters)
         }
-        await rig.gate.waitUntilSubmitted()
+        try #require(await rig.gate.waitUntilSubmitted())
         let inFlight = await rig.cache.snapshot()
         #expect(inFlight.provisionalBytes > 0)
         #expect(inFlight.retirementWaiterCount == 0)
@@ -1021,7 +2048,7 @@ struct InteractiveStrokePresentationCacheTests {
         let owner = Task {
             try await rig.cache.adopt(first, parameters: rig.parameters)
         }
-        await rig.gate.waitUntilSubmitted()
+        try #require(await rig.gate.waitUntilSubmitted())
 
         #expect(throws: DocumentPaintRenderContextError.foreignTransientDisplayFrame) {
             _ = try rig.context.makeTransientCacheUpdate(
@@ -1054,7 +2081,7 @@ struct InteractiveStrokePresentationCacheTests {
         let ownerAdoption = Task {
             try await rig.cache.adopt(owner, parameters: rig.parameters)
         }
-        await rig.gate.waitUntilSubmitted()
+        try #require(await rig.gate.waitUntilSubmitted())
         let equalRevision = try makeUpdate(
             rig: rig,
             role: .authoritative,
@@ -1116,7 +2143,7 @@ struct InteractiveStrokePresentationCacheTests {
 
     @Test
     @MainActor
-    func splicedStrokeEpochIsRejectedBeforeCacheStateOrEncoding()
+    func descriptorCapabilityRejectsJointlySplicedEpochBeforeACKClaim()
         async throws
     {
         guard let rig = try makeRig() else { return }
@@ -1126,9 +2153,10 @@ struct InteractiveStrokePresentationCacheTests {
             coordinates: [.init(x: 0, y: 0)],
             sequence: 1
         )
+        let forgedIdentity = UUID()
         let spliced = DocumentPaintTransientCacheUpdate(
             generation: authentic.generation,
-            strokeEpoch: UUID(),
+            strokeEpoch: forgedIdentity,
             sequence: authentic.sequence,
             layerID: authentic.layerID,
             canonicalIdentity: authentic.canonicalIdentity,
@@ -1142,7 +2170,9 @@ struct InteractiveStrokePresentationCacheTests {
             traceIdentities: authentic.traceIdentities,
             acknowledgementSettlement:
                 authentic.acknowledgementSettlement,
-            presentationEpoch: authentic.presentationEpoch
+            presentationEpoch: DocumentPaintStrokePresentationEpoch(
+                identity: forgedIdentity
+            )
         )
 
         await #expect(
@@ -1154,8 +2184,8 @@ struct InteractiveStrokePresentationCacheTests {
             )
         }
 
-        #expect(authentic.acknowledgement.status == .fulfilled)
-        #expect(authentic.acknowledgement.testingRequestCount == 1)
+        #expect(authentic.acknowledgement.status == .available)
+        #expect(authentic.acknowledgement.testingRequestCount == 0)
         let diagnostic = await rig.cache.snapshot()
         #expect(diagnostic.activeStrokeEpochCount == 0)
         #expect(diagnostic.activeUpdateOwnerCount == 0)
@@ -1163,6 +2193,246 @@ struct InteractiveStrokePresentationCacheTests {
         #expect(diagnostic.submittedUpdateCount == 0)
         #expect(diagnostic.provisionalBytes == 0)
         #expect(diagnostic.publishedRevision == nil)
+
+        _ = try await rig.cache.adopt(
+            authentic,
+            parameters: rig.parameters
+        )
+        #expect(authentic.acknowledgement.status == .fulfilled)
+        #expect(authentic.acknowledgement.testingRequestCount == 1)
+    }
+
+    @Test
+    @MainActor
+    func sameUUIDEpochTwinCannotCancelOrRetireAuthenticatedState()
+        async throws
+    {
+        guard let rig = try makeRig() else { return }
+        let first = try makeUpdate(
+            rig: rig,
+            role: .authoritative,
+            coordinates: [.init(x: 0, y: 0)],
+            sequence: 1
+        )
+        _ = try await rig.cache.adopt(first, parameters: rig.parameters)
+        let before = await rig.cache.snapshot()
+        let twin = DocumentPaintStrokePresentationEpoch(
+            identity: rig.capability.presentationEpoch.identity
+        )
+
+        await #expect(
+            throws: InteractiveStrokePresentationCacheError.foreignUpdate
+        ) {
+            try await rig.cache.cancel(strokeEpoch: twin)
+        }
+        await #expect(
+            throws: InteractiveStrokePresentationCacheError.foreignUpdate
+        ) {
+            try await rig.cache.retire(strokeEpoch: twin)
+        }
+        let afterTwin = await rig.cache.snapshot()
+        #expect(afterTwin.publishedRevision == before.publishedRevision)
+        #expect(afterTwin.activeStrokeEpochCount == 1)
+        #expect(afterTwin.retirementFailureCount == 0)
+        #expect(!rig.capability.presentationEpoch.isRetired)
+
+        let authenticContinuation = try makeUpdate(
+            rig: rig,
+            role: .authoritative,
+            coordinates: [.init(x: 1, y: 0)],
+            sequence: 2
+        )
+        _ = try await rig.cache.adopt(
+            authenticContinuation,
+            parameters: rig.parameters
+        )
+        #expect(authenticContinuation.acknowledgement.status == .fulfilled)
+
+        try await rig.cache.cancel(
+            strokeEpoch: rig.capability.presentationEpoch
+        )
+        let terminal = await rig.cache.snapshot()
+        #expect(terminal.activeStrokeEpochCount == 0)
+        #expect(terminal.totalPhysicalResidentBytes == 0)
+        #expect(terminal.isIdle)
+    }
+
+    @Test
+    @MainActor
+    func adoptionOperationRejectsSameUUIDTwinWithoutForeignLifecycle()
+        async throws
+    {
+        guard let rig = try makeRig() else { return }
+        let first = try makeUpdate(
+            rig: rig,
+            role: .authoritative,
+            coordinates: [.init(x: 0, y: 0)],
+            sequence: 1
+        )
+        let firstOperation = InteractiveStrokeCacheAdoptionOperation.start(
+            cache: rig.cache,
+            update: first,
+            parameters: rig.parameters,
+            terminal: { _ in true }
+        )
+        await firstOperation.value
+        let published = (await rig.cache.snapshot()).publishedRevision
+
+        let authentic = try makeUpdate(
+            rig: rig,
+            role: .authoritative,
+            coordinates: [.init(x: 1, y: 0)],
+            sequence: 2
+        )
+        let twin = DocumentPaintStrokePresentationEpoch(
+            identity: authentic.presentationEpoch.identity
+        )
+        let spliced = DocumentPaintTransientCacheUpdate(
+            generation: authentic.generation,
+            strokeEpoch: authentic.strokeEpoch,
+            sequence: authentic.sequence,
+            layerID: authentic.layerID,
+            canonicalIdentity: authentic.canonicalIdentity,
+            changedRole: authentic.changedRole,
+            changedCoordinates: authentic.changedCoordinates,
+            clearedAuthoritativeSurface:
+                authentic.clearedAuthoritativeSurface,
+            clearedPredictionSurface: authentic.clearedPredictionSurface,
+            descriptor: authentic.descriptor,
+            acknowledgement: authentic.acknowledgement,
+            traceIdentities: authentic.traceIdentities,
+            acknowledgementSettlement:
+                authentic.acknowledgementSettlement,
+            presentationEpoch: twin
+        )
+        let failures = InteractiveStrokeLifecycleFailureProbe()
+        let invalidOperation =
+            InteractiveStrokeCacheAdoptionOperation.start(
+                cache: rig.cache,
+                update: spliced,
+                parameters: rig.parameters,
+                terminal: { error in
+                    if let error { failures.record(error) }
+                    return true
+                }
+            )
+        await invalidOperation.value
+
+        #expect(failures.count == 1)
+        #expect(authentic.acknowledgement.status == .fulfilled)
+        #expect(authentic.acknowledgement.testingRequestCount == 1)
+        let after = await rig.cache.snapshot()
+        #expect(after.publishedRevision == published)
+        #expect(after.activeStrokeEpochCount == 1)
+        #expect(InteractiveStrokeCacheLifecycleCoordinator.shared
+            .retainsLifecycle(authentic.presentationEpoch.identity))
+
+        InteractiveStrokeCacheLifecycleCoordinator.shared.requestCancellation(
+            cache: rig.cache,
+            strokeEpoch: authentic.presentationEpoch
+        )
+        await InteractiveStrokeCacheLifecycleCoordinator.shared
+            .waitForLifecycle(authentic.presentationEpoch.identity)
+        #expect((await rig.cache.snapshot()).isIdle)
+    }
+
+    @Test
+    @MainActor
+    func emptyCancellationFailureIsNonIdleUntilExactRetryCompletes()
+        async throws
+    {
+        guard let rig = try makeRig(
+            cacheFailureInjection: .init(retirementFailureCount: 1)
+        ) else { return }
+
+        await #expect(
+            throws: InteractiveStrokePresentationCacheError
+                .injectedRetirementFailure(
+                    rig.capability.presentationEpoch.identity
+                )
+        ) {
+            try await rig.cache.cancel(
+                strokeEpoch: rig.capability.presentationEpoch
+            )
+        }
+        var failed = await rig.cache.snapshot()
+        #expect(failed.retirementState == .failed(
+            strokeEpoch: rig.capability.presentationEpoch.identity
+        ))
+        #expect(!failed.isIdle)
+
+        try await rig.cache.cancel(
+            strokeEpoch: rig.capability.presentationEpoch
+        )
+        failed = await rig.cache.snapshot()
+        #expect(failed.retirementState == .idle)
+        #expect(failed.isIdle)
+    }
+
+    @Test
+    @MainActor
+    func sameUUIDTwinCannotClaimRetiringEscapedPhysicalState()
+        async throws
+    {
+        guard let rig = try makeRig() else { return }
+        let update = try makeUpdate(
+            rig: rig,
+            role: .authoritative,
+            coordinates: [.init(x: 0, y: 0)],
+            sequence: 1
+        )
+        _ = try await rig.cache.adopt(update, parameters: rig.parameters)
+        var provider: TiledRasterExactReferenceProvider? = try #require(
+            try await rig.cache.current(generation: rig.generation)?
+                .authoritative
+        )
+        var capture: TiledRasterExactReferenceCapture? = try
+            TiledRasterExactReferenceCapture(providers: [provider!])
+
+        try await rig.cache.retire(
+            strokeEpoch: rig.capability.presentationEpoch
+        )
+        let retained = await rig.cache.snapshot()
+        #expect(retained.activeStrokeEpochCount == 0)
+        #expect(retained.totalPhysicalResidentBytes > 0)
+        #expect(!retained.isIdle)
+        await rig.cache.installFailureInjectionForTesting(
+            .init(retirementFailureCount: 1)
+        )
+        let twin = DocumentPaintStrokePresentationEpoch(
+            identity: rig.capability.presentationEpoch.identity
+        )
+        await #expect(
+            throws: InteractiveStrokePresentationCacheError.foreignUpdate
+        ) {
+            try await rig.cache.cancel(strokeEpoch: twin)
+        }
+        await #expect(
+            throws: InteractiveStrokePresentationCacheError.foreignUpdate
+        ) {
+            try await rig.cache.retire(strokeEpoch: twin)
+        }
+        #expect((await rig.cache.snapshot()).retirementFailureCount == 0)
+
+        capture?.close()
+        capture = nil
+        provider = nil
+        await #expect(
+            throws: InteractiveStrokePresentationCacheError
+                .injectedRetirementFailure(
+                    rig.capability.presentationEpoch.identity
+                )
+        ) {
+            try await rig.cache.retire(
+                strokeEpoch: rig.capability.presentationEpoch
+            )
+        }
+        try await rig.cache.retire(
+            strokeEpoch: rig.capability.presentationEpoch
+        )
+        let terminal = await rig.cache.snapshot()
+        #expect(terminal.totalPhysicalResidentBytes == 0)
+        #expect(terminal.isIdle)
     }
 
     @Test
@@ -1232,7 +2502,7 @@ struct InteractiveStrokePresentationCacheTests {
         let adoption = Task {
             try await rig.cache.adopt(owner, parameters: rig.parameters)
         }
-        await rig.gate.waitUntilSubmitted()
+        try #require(await rig.gate.waitUntilSubmitted())
         let late = try makeUpdate(
             rig: rig,
             role: .authoritative,
@@ -1244,7 +2514,7 @@ struct InteractiveStrokePresentationCacheTests {
                 strokeEpoch: rig.capability.presentationEpoch
             )
         }
-        await rig.gate.waitUntilRetirementWaiting()
+        try #require(await rig.gate.waitUntilRetirementWaiting())
 
         await #expect(throws: CancellationError.self) {
             _ = try await rig.cache.adopt(late, parameters: rig.parameters)
@@ -1313,7 +2583,7 @@ struct InteractiveStrokePresentationCacheTests {
         let adoption = Task {
             try await rig.cache.adopt(update, parameters: rig.parameters)
         }
-        await rig.gate.waitUntilSubmitted()
+        try #require(await rig.gate.waitUntilSubmitted())
         let retirement = Task {
             switch terminal {
             case .success, .failure:
@@ -1326,7 +2596,7 @@ struct InteractiveStrokePresentationCacheTests {
                 )
             }
         }
-        await rig.gate.waitUntilRetirementWaiting()
+        try #require(await rig.gate.waitUntilRetirementWaiting())
 
         var diagnostic = await rig.cache.snapshot()
         #expect(diagnostic.retirementWaiterCount == 1)
@@ -1372,6 +2642,7 @@ struct InteractiveStrokePresentationCacheTests {
     @MainActor
     private func makeRig(
         gateCompletion: Bool = false,
+        blocksLifecycleRetry: Bool = false,
         maximumTileCount: Int = 8,
         cacheByteBudget: Int = PaintTileDescriptor.residentByteCount * 16,
         cacheFailureInjection:
@@ -1400,7 +2671,8 @@ struct InteractiveStrokePresentationCacheTests {
         )
         let capability = try context.beginStrokeSurface()
         let gate = InteractiveStrokePresentationCacheGate(
-            initiallyOpen: !gateCompletion
+            initiallyOpen: !gateCompletion,
+            blocksLifecycleRetry: blocksLifecycleRetry
         )
         let cache = InteractiveStrokePresentationCache(
             device: device,
@@ -1601,22 +2873,49 @@ private final class InteractiveStrokeCacheLifecycleTerminalProbe:
 {
     private let lock = NSLock()
     private var storage: InteractiveStrokePresentationCacheSnapshot?
+    private var storedRecordCount = 0
     private var waiters: [CheckedContinuation<
         InteractiveStrokePresentationCacheSnapshot,
         Never
     >] = []
+    private var boundedWaiters:
+        [(Int, UUID, InteractiveStrokeGateBoundedWaiter)] = []
 
     var snapshot: InteractiveStrokePresentationCacheSnapshot? {
         lock.withLock { storage }
     }
 
+    var recordCount: Int { lock.withLock { storedRecordCount } }
+
     func record(_ snapshot: InteractiveStrokePresentationCacheSnapshot) {
         let ready = lock.withLock {
+            storedRecordCount += 1
             storage = snapshot
+            let bounded = boundedWaiters.filter {
+                $0.0 <= storedRecordCount
+            }
+            boundedWaiters.removeAll { $0.0 <= storedRecordCount }
             defer { waiters.removeAll() }
-            return waiters
+            return (waiters, bounded)
         }
-        for waiter in ready { waiter.resume(returning: snapshot) }
+        for waiter in ready.0 { waiter.resume(returning: snapshot) }
+        for (_, _, waiter) in ready.1 { waiter.signal() }
+    }
+
+    func waitUntilRecordCount(_ count: Int) async -> Bool {
+        let waiterID = UUID()
+        let waiter = InteractiveStrokeGateBoundedWaiter()
+        let alreadyRecorded = lock.withLock {
+            guard storedRecordCount < count else { return true }
+            boundedWaiters.append((count, waiterID, waiter))
+            return false
+        }
+        guard !alreadyRecorded else { return true }
+        let didSignal = await waiter.wait()
+        return lock.withLock {
+            boundedWaiters.removeAll { $0.1 == waiterID }
+            return didSignal && storedRecordCount >= count
+        }
     }
 
     func waitUntilRecorded() async
@@ -1634,6 +2933,24 @@ private final class InteractiveStrokeCacheLifecycleTerminalProbe:
     }
 }
 
+private final class InteractiveStrokeLifecycleOwnerProbe:
+    @unchecked Sendable
+{}
+
+private final class InteractiveStrokeLifecycleFailureProbe:
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private var storage: [String] = []
+
+    var count: Int { lock.withLock { storage.count } }
+    var descriptions: [String] { lock.withLock { storage } }
+
+    func record(_ error: any Error) {
+        lock.withLock { storage.append(String(describing: error)) }
+    }
+}
+
 @MainActor
 private final class WeakGridRenderer {
     weak var value: GridRenderer?
@@ -1641,82 +2958,178 @@ private final class WeakGridRenderer {
     init(_ value: GridRenderer?) { self.value = value }
 }
 
+/// A one-shot test signal with a monotonic timeout. Timeout and task
+/// cancellation both resolve the suspended continuation, so a failed causal
+/// expectation cannot strand the serialized cache suite.
+private final class InteractiveStrokeGateBoundedWaiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+    private var pendingResult: Bool?
+    private var isFinished = false
+
+    func wait(timeout: Duration = .seconds(5)) async -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask { await self.waitForSignal() }
+            group.addTask {
+                do {
+                    try await ContinuousClock().sleep(for: timeout)
+                } catch {}
+                return false
+            }
+            let result = await group.next() ?? false
+            if !result { resolve(false) }
+            group.cancelAll()
+            return result
+        }
+    }
+
+    func signal() { resolve(true) }
+
+    private func waitForSignal() async -> Bool {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if let pendingResult {
+                self.pendingResult = nil
+                isFinished = true
+                lock.unlock()
+                continuation.resume(returning: pendingResult)
+            } else if isFinished {
+                lock.unlock()
+                continuation.resume(returning: false)
+            } else {
+                self.continuation = continuation
+                lock.unlock()
+            }
+        }
+    }
+
+    private func resolve(_ result: Bool) {
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        guard let continuation else {
+            pendingResult = result
+            lock.unlock()
+            return
+        }
+        self.continuation = nil
+        isFinished = true
+        lock.unlock()
+        continuation.resume(returning: result)
+    }
+}
+
 private actor InteractiveStrokePresentationCacheGate:
     InteractiveStrokePresentationCacheCompletionGating
 {
     private var isOpen: Bool
     private var submissionCount = 0
-    private var openWaiters: [CheckedContinuation<Void, Never>] = []
+    private var openWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var submissionWaiters:
-        [(Int, CheckedContinuation<Void, Never>)] = []
+        [(Int, UUID, InteractiveStrokeGateBoundedWaiter)] = []
     private var retirementWaitCount = 0
-    private var retirementWaiters: [CheckedContinuation<Void, Never>] = []
+    private var retirementWaiters:
+        [UUID: InteractiveStrokeGateBoundedWaiter] = [:]
     private var blocksRetirementRetry: Bool
     private var retirementRetryDidBlock = false
     private var retirementRetryBlockWaiters:
-        [CheckedContinuation<Void, Never>] = []
+        [UUID: InteractiveStrokeGateBoundedWaiter] = [:]
     private var retirementRetryReleaseWaiters:
-        [CheckedContinuation<Void, Never>] = []
+        [UUID: CheckedContinuation<Void, Never>] = [:]
     private var acknowledgementFailureCount = 0
     private var acknowledgementFailureWaiters:
-        [(Int, CheckedContinuation<Void, Never>)] = []
+        [(Int, UUID, InteractiveStrokeGateBoundedWaiter)] = []
+    private let blocksAcknowledgementFailureAt: Int?
+    private var blockedAcknowledgementFailure = false
+    private var blockedAcknowledgementFailureWaiters:
+        [UUID: InteractiveStrokeGateBoundedWaiter] = [:]
+    private var acknowledgementFailureReleaseWaiters:
+        [UUID: CheckedContinuation<Void, Never>] = [:]
     private let blocksLifecycleRetry: Bool
     private var lifecycleRetryScheduleCount = 0
     private var lifecycleRetryScheduleWaiters:
-        [(Int, CheckedContinuation<Void, Never>)] = []
+        [(Int, UUID, InteractiveStrokeGateBoundedWaiter)] = []
     private var lifecycleRetryWaiters:
         [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var lifecycleRetryWaiterHighWater = 0
     private var lifecycleRetryCancellationCount = 0
     private var lifecycleRetryCancellationWaiters:
-        [(Int, CheckedContinuation<Void, Never>)] = []
+        [(Int, UUID, InteractiveStrokeGateBoundedWaiter)] = []
 
     var lifecycleRetryScheduleCountSnapshot: Int {
         lifecycleRetryScheduleCount
     }
 
     var lifecycleRetryWaiterCount: Int { lifecycleRetryWaiters.count }
+    var lifecycleRetryWaiterHighWaterSnapshot: Int {
+        lifecycleRetryWaiterHighWater
+    }
 
     init(
         initiallyOpen: Bool,
         blocksRetirementRetry: Bool = false,
-        blocksLifecycleRetry: Bool = false
+        blocksLifecycleRetry: Bool = false,
+        blocksAcknowledgementFailureAt: Int? = nil
     ) {
         isOpen = initiallyOpen
         self.blocksRetirementRetry = blocksRetirementRetry
         self.blocksLifecycleRetry = blocksLifecycleRetry
+        self.blocksAcknowledgementFailureAt = blocksAcknowledgementFailureAt
     }
 
     func cacheCommandDidSubmit() {
         submissionCount += 1
         let ready = submissionWaiters.filter { $0.0 <= submissionCount }
         submissionWaiters.removeAll { $0.0 <= submissionCount }
-        for (_, waiter) in ready { waiter.resume() }
+        for (_, _, waiter) in ready { waiter.signal() }
     }
 
     func waitAfterGPUCompletion() async {
         guard !isOpen else { return }
-        await withCheckedContinuation { openWaiters.append($0) }
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume()
+                } else {
+                    openWaiters[waiterID] = continuation
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelOpenWaiter(waiterID) }
+        }
     }
 
     func cacheRetirementDidWait() {
         retirementWaitCount += 1
-        let waiters = retirementWaiters
+        let waiters = Array(retirementWaiters.values)
         retirementWaiters.removeAll()
-        for waiter in waiters { waiter.resume() }
+        for waiter in waiters { waiter.signal() }
     }
 
     func cacheRetirementDidFail() async {
         guard blocksRetirementRetry else { return }
         retirementRetryDidBlock = true
-        let blockWaiters = retirementRetryBlockWaiters
+        let blockWaiters = Array(retirementRetryBlockWaiters.values)
         retirementRetryBlockWaiters.removeAll()
-        for waiter in blockWaiters { waiter.resume() }
-        await withCheckedContinuation {
-            retirementRetryReleaseWaiters.append($0)
+        for waiter in blockWaiters { waiter.signal() }
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled || !blocksRetirementRetry {
+                    continuation.resume()
+                } else {
+                    retirementRetryReleaseWaiters[waiterID] = continuation
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelRetirementRetryWaiter(waiterID) }
         }
     }
 
-    func cacheAcknowledgementDidFail() {
+    func cacheAcknowledgementDidFail() async {
         acknowledgementFailureCount += 1
         let ready = acknowledgementFailureWaiters.filter {
             $0.0 <= acknowledgementFailureCount
@@ -1724,14 +3137,55 @@ private actor InteractiveStrokePresentationCacheGate:
         acknowledgementFailureWaiters.removeAll {
             $0.0 <= acknowledgementFailureCount
         }
-        for (_, waiter) in ready { waiter.resume() }
+        for (_, _, waiter) in ready { waiter.signal() }
+        guard acknowledgementFailureCount
+                == blocksAcknowledgementFailureAt
+        else { return }
+        blockedAcknowledgementFailure = true
+        let blocked = Array(blockedAcknowledgementFailureWaiters.values)
+        blockedAcknowledgementFailureWaiters.removeAll()
+        for waiter in blocked { waiter.signal() }
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume()
+                } else {
+                    acknowledgementFailureReleaseWaiters[waiterID] =
+                        continuation
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelAcknowledgementFailureWaiter(waiterID) }
+        }
     }
 
-    func waitUntilAcknowledgementFailure(count: Int) async {
-        guard acknowledgementFailureCount < count else { return }
-        await withCheckedContinuation {
-            acknowledgementFailureWaiters.append((count, $0))
-        }
+    @discardableResult
+    func waitUntilAcknowledgementFailure(count: Int) async -> Bool {
+        guard acknowledgementFailureCount < count else { return true }
+        let waiterID = UUID()
+        let waiter = InteractiveStrokeGateBoundedWaiter()
+        acknowledgementFailureWaiters.append((count, waiterID, waiter))
+        let didSignal = await waiter.wait()
+        acknowledgementFailureWaiters.removeAll { $0.1 == waiterID }
+        return didSignal && acknowledgementFailureCount >= count
+    }
+
+    @discardableResult
+    func waitUntilBlockedAcknowledgementFailure() async -> Bool {
+        guard !blockedAcknowledgementFailure else { return true }
+        let waiterID = UUID()
+        let waiter = InteractiveStrokeGateBoundedWaiter()
+        blockedAcknowledgementFailureWaiters[waiterID] = waiter
+        let didSignal = await waiter.wait()
+        blockedAcknowledgementFailureWaiters.removeValue(forKey: waiterID)
+        return didSignal && blockedAcknowledgementFailure
+    }
+
+    func releaseBlockedAcknowledgementFailure() {
+        let waiters = Array(acknowledgementFailureReleaseWaiters.values)
+        acknowledgementFailureReleaseWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
     }
 
     func waitForLifecycleRetry(attempt: Int) async throws {
@@ -1742,7 +3196,7 @@ private actor InteractiveStrokePresentationCacheGate:
         lifecycleRetryScheduleWaiters.removeAll {
             $0.0 <= lifecycleRetryScheduleCount
         }
-        for (_, waiter) in ready { waiter.resume() }
+        for (_, _, waiter) in ready { waiter.signal() }
         guard blocksLifecycleRetry else { return }
         let waiterID = UUID()
         await withTaskCancellationHandler {
@@ -1751,6 +3205,10 @@ private actor InteractiveStrokePresentationCacheGate:
                     continuation.resume()
                 } else {
                     lifecycleRetryWaiters[waiterID] = continuation
+                    lifecycleRetryWaiterHighWater = max(
+                        lifecycleRetryWaiterHighWater,
+                        lifecycleRetryWaiters.count
+                    )
                 }
             }
         } onCancel: {
@@ -1758,11 +3216,15 @@ private actor InteractiveStrokePresentationCacheGate:
         }
     }
 
-    func waitUntilLifecycleRetryScheduled(count: Int) async {
-        guard lifecycleRetryScheduleCount < count else { return }
-        await withCheckedContinuation {
-            lifecycleRetryScheduleWaiters.append((count, $0))
-        }
+    @discardableResult
+    func waitUntilLifecycleRetryScheduled(count: Int) async -> Bool {
+        guard lifecycleRetryScheduleCount < count else { return true }
+        let waiterID = UUID()
+        let waiter = InteractiveStrokeGateBoundedWaiter()
+        lifecycleRetryScheduleWaiters.append((count, waiterID, waiter))
+        let didSignal = await waiter.wait()
+        lifecycleRetryScheduleWaiters.removeAll { $0.1 == waiterID }
+        return didSignal && lifecycleRetryScheduleCount >= count
     }
 
     func releaseOneLifecycleRetry() {
@@ -1783,50 +3245,90 @@ private actor InteractiveStrokePresentationCacheGate:
             $0.0 <= lifecycleRetryCancellationCount
         }
         waiter.resume()
-        for (_, cancellationWaiter) in ready {
-            cancellationWaiter.resume()
+        for (_, _, cancellationWaiter) in ready {
+            cancellationWaiter.signal()
         }
     }
 
-    func waitUntilLifecycleRetryCancellation(count: Int) async {
-        guard lifecycleRetryCancellationCount < count else { return }
-        await withCheckedContinuation {
-            lifecycleRetryCancellationWaiters.append((count, $0))
-        }
+    @discardableResult
+    func waitUntilLifecycleRetryCancellation(count: Int) async -> Bool {
+        guard lifecycleRetryCancellationCount < count else { return true }
+        let waiterID = UUID()
+        let waiter = InteractiveStrokeGateBoundedWaiter()
+        lifecycleRetryCancellationWaiters.append((count, waiterID, waiter))
+        let didSignal = await waiter.wait()
+        lifecycleRetryCancellationWaiters.removeAll { $0.1 == waiterID }
+        return didSignal && lifecycleRetryCancellationCount >= count
     }
 
-    func waitUntilRetirementRetryBlocked() async {
-        guard !retirementRetryDidBlock else { return }
-        await withCheckedContinuation {
-            retirementRetryBlockWaiters.append($0)
-        }
+    @discardableResult
+    func waitUntilRetirementRetryBlocked() async -> Bool {
+        guard !retirementRetryDidBlock else { return true }
+        let waiterID = UUID()
+        let waiter = InteractiveStrokeGateBoundedWaiter()
+        retirementRetryBlockWaiters[waiterID] = waiter
+        let didSignal = await waiter.wait()
+        retirementRetryBlockWaiters.removeValue(forKey: waiterID)
+        return didSignal && retirementRetryDidBlock
     }
 
     func releaseRetirementRetry() {
         blocksRetirementRetry = false
-        let waiters = retirementRetryReleaseWaiters
+        let waiters = Array(retirementRetryReleaseWaiters.values)
         retirementRetryReleaseWaiters.removeAll()
         for waiter in waiters { waiter.resume() }
     }
 
-    func waitUntilRetirementWaiting() async {
-        guard retirementWaitCount == 0 else { return }
-        await withCheckedContinuation { retirementWaiters.append($0) }
+    @discardableResult
+    func waitUntilRetirementWaiting() async -> Bool {
+        guard retirementWaitCount == 0 else { return true }
+        let waiterID = UUID()
+        let waiter = InteractiveStrokeGateBoundedWaiter()
+        retirementWaiters[waiterID] = waiter
+        let didSignal = await waiter.wait()
+        retirementWaiters.removeValue(forKey: waiterID)
+        return didSignal && retirementWaitCount > 0
     }
 
-    func waitUntilSubmitted(count: Int = 1) async {
-        guard submissionCount < count else { return }
-        await withCheckedContinuation {
-            submissionWaiters.append((count, $0))
-        }
+    @discardableResult
+    func waitUntilSubmitted(count: Int = 1) async -> Bool {
+        guard submissionCount < count else { return true }
+        let waiterID = UUID()
+        let waiter = InteractiveStrokeGateBoundedWaiter()
+        submissionWaiters.append((count, waiterID, waiter))
+        let didSignal = await waiter.wait()
+        submissionWaiters.removeAll { $0.1 == waiterID }
+        return didSignal && submissionCount >= count
     }
 
     func open() {
         isOpen = true
-        let waiters = openWaiters
+        let waiters = Array(openWaiters.values)
         openWaiters.removeAll()
         for waiter in waiters { waiter.resume() }
     }
 
     func close() { isOpen = false }
+
+    func releaseAll() {
+        open()
+        releaseRetirementRetry()
+        releaseBlockedAcknowledgementFailure()
+        let retryWaiters = Array(lifecycleRetryWaiters.values)
+        lifecycleRetryWaiters.removeAll()
+        for waiter in retryWaiters { waiter.resume() }
+    }
+
+    private func cancelOpenWaiter(_ waiterID: UUID) {
+        openWaiters.removeValue(forKey: waiterID)?.resume()
+    }
+
+    private func cancelRetirementRetryWaiter(_ waiterID: UUID) {
+        retirementRetryReleaseWaiters.removeValue(forKey: waiterID)?.resume()
+    }
+
+    private func cancelAcknowledgementFailureWaiter(_ waiterID: UUID) {
+        acknowledgementFailureReleaseWaiters
+            .removeValue(forKey: waiterID)?.resume()
+    }
 }

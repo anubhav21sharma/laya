@@ -2206,6 +2206,39 @@ struct DocumentPaintRenderContextTests {
 
     @Test
     @MainActor
+    func compositeValidationFailureBeforeCacheExportLeavesACKClaimable()
+        async throws
+    {
+        guard let fixture = try makeFixture(size: 256) else { return }
+        let capability = try fixture.context.beginStrokeSurface()
+        let frame = StrokePreparedDisplayFrame.testing(
+            capability: capability,
+            acknowledgementIsAvailable: true
+        )
+
+        #expect(
+            throws: DocumentPaintRenderContextError
+                .foreignTransientDisplayFrame
+        ) {
+            _ = try fixture.context.interactiveStrokeCompositeParameters(
+                layerID: UUID()
+            )
+        }
+        #expect(frame.acknowledgement.status == .available)
+        #expect(frame.acknowledgement.testingRequestCount == 0)
+
+        let update = try fixture.context.makeTransientCacheUpdate(
+            frame: frame,
+            sequence: 1
+        )
+        try await update.acknowledgement.fulfill()
+        #expect(frame.acknowledgement.status == .fulfilled)
+        #expect(frame.acknowledgement.testingRequestCount == 1)
+        try fixture.context.cancelStrokeSurface(capability)
+    }
+
+    @Test
+    @MainActor
     func controllerRetainsTransientObligationAcrossPlanSupersessionFailure()
         async throws
     {

@@ -811,6 +811,8 @@ actor StrokeFrameScheduler {
     private let preparationClock: @Sendable () -> UInt64
     private let traceRecorder: InteractiveBrushTraceRecorder?
     private let stageCFailureInjection: StrokeStageCFailureInjection?
+    private let cancellationCleanupFailureInjection:
+        (@Sendable () -> StrokeTileSurfaceError?)?
     private var scheduler: FrameScheduler
     private var activeGeneration: UInt64?
     private var cancelledGeneration: UInt64?
@@ -904,7 +906,9 @@ actor StrokeFrameScheduler {
             DispatchTime.now().uptimeNanoseconds
         },
         stageCFailureInjection: StrokeStageCFailureInjection? = nil,
-        traceRecorder: InteractiveBrushTraceRecorder? = nil
+        traceRecorder: InteractiveBrushTraceRecorder? = nil,
+        cancellationCleanupFailureInjection:
+            (@Sendable () -> StrokeTileSurfaceError?)? = nil
     ) {
         precondition(targetFramesPerSecond > 0)
         self.budget = budget
@@ -919,6 +923,8 @@ actor StrokeFrameScheduler {
         self.preparationClock = preparationClock
         self.stageCFailureInjection = stageCFailureInjection
         self.traceRecorder = traceRecorder
+        self.cancellationCleanupFailureInjection =
+            cancellationCleanupFailureInjection
         targetFrameDurationNanoseconds = UInt64(
             1_000_000_000 / targetFramesPerSecond
         )
@@ -2733,8 +2739,20 @@ actor StrokeFrameScheduler {
 
     @discardableResult
     func cancel(generation: UInt64) -> StrokeTileSurfaceError? {
-        guard activeGeneration == generation else { return nil }
-        return cancelPreparedStroke(generation: generation)
+        if activeGeneration == generation {
+            return cancelPreparedStroke(generation: generation)
+        }
+        guard cancelledGeneration == generation,
+              let privateSurfaceEncoder
+        else { return nil }
+        let cleanupFailure = cancellationCleanupFailureInjection?()
+            ?? privateSurfaceEncoder.resetAfterCancellation(
+                frameDisposition: .unpublished
+            )
+        guard cleanupFailure == nil else { return cleanupFailure }
+        self.privateSurfaceEncoder = nil
+        outstandingSurfaceLease = nil
+        return nil
     }
 
     /// Generates one authoritative input message against actor-owned tentative
@@ -4511,10 +4529,16 @@ actor StrokeFrameScheduler {
         preparationTilingStrategy = nil
         preparationViewport = nil
         let preserveMainOwnedSurfaceLease = outstandingSurfaceLease != nil
-        let cleanupFailure = privateSurfaceEncoder?.resetAfterCancellation(
-            frameDisposition: preserveMainOwnedSurfaceLease
-                ? .mainOwnsLease : .unpublished
-        )
+        let cleanupFailure: StrokeTileSurfaceError?
+        if let privateSurfaceEncoder {
+            cleanupFailure = cancellationCleanupFailureInjection?()
+                ?? privateSurfaceEncoder.resetAfterCancellation(
+                    frameDisposition: preserveMainOwnedSurfaceLease
+                        ? .mainOwnsLease : .unpublished
+                )
+        } else {
+            cleanupFailure = nil
+        }
         if !preserveMainOwnedSurfaceLease, cleanupFailure == nil {
             privateSurfaceEncoder = nil
             outstandingSurfaceLease = nil

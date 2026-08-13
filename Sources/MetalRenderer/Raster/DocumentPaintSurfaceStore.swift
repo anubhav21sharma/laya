@@ -1132,6 +1132,18 @@ struct DocumentPaintTransientVisibleSourceDescriptor: @unchecked Sendable {
     let authoritativeProvider: TiledRasterExactReferenceProvider
     let predictionProvider: TiledRasterExactReferenceProvider
 
+    var authenticatedStrokeEpoch: UUID { capability.capabilityToken }
+    var authenticatedPresentationEpoch: DocumentPaintStrokePresentationEpoch {
+        capability.presentationEpoch
+    }
+
+    func authenticates(
+        presentationEpoch: DocumentPaintStrokePresentationEpoch
+    ) -> Bool {
+        capability.presentationEpoch === presentationEpoch
+            && presentationEpoch.identity == capability.capabilityToken
+    }
+
     init(
         capability: DocumentPaintStrokeSurfaceCapability,
         changedRole: StrokePrivateSurfaceLayer,

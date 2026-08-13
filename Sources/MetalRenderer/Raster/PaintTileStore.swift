@@ -684,6 +684,7 @@ public struct PaintTileStoreSnapshot: Equatable, Sendable {
     public let entries: [PaintTileStoreEntrySnapshot]
     public let leastRecentlyUsedOrder: [PaintTileIdentity]
     public let lastTransferAccounting: PaintTileTransferAccounting?
+    public let transferPeakTrackedByteHighWater: Int
 }
 
 public enum PaintTilePressureResult: Equatable, Sendable {
@@ -727,6 +728,7 @@ public final class PaintTileStore: @unchecked Sendable {
         let token: UInt64
         let byteCount: Int
         var reservedCoverageByteCount: Int
+        var committedRetainedCoverageByteCount: Int
         let surfaceID: UUID
         let generation: UInt64
     }
@@ -919,6 +921,7 @@ public final class PaintTileStore: @unchecked Sendable {
     private var nextLeaseID: UInt64 = 0
     private var stateRevision: UInt64 = 0
     private var lastTransferAccounting: PaintTileTransferAccounting?
+    private var transferPeakTrackedByteHighWater = 0
     private var persistentZeroSource: (any MTLBuffer)?
     private var persistentZeroAllocationCount = 0
     private var provisionalReservations:
@@ -928,6 +931,9 @@ public final class PaintTileStore: @unchecked Sendable {
         )
     private var provisionalByteCount = 0
     private var provisionalCoverageByteCount = 0
+    /// Coverage textures displaced by a committed provisional swap remain
+    /// strongly owned by its rollback workspace until completion.
+    private var committedProvisionalRetainedCoverageByteCount = 0
     private var componentCoverageByteCount = 0
     private var nextProvisionalReservationID: UInt64 = 0
     private var nextRetirementID: UInt64 = 0
@@ -951,6 +957,10 @@ public final class PaintTileStore: @unchecked Sendable {
     #if DEBUG
     var testingSnapshotPayloadLiabilityByteBudget: Int {
         snapshotRetentionLimits.maximumPayloadDebtBytes
+    }
+    private var provisionalTextureAllocationAttemptCount = 0
+    var testingProvisionalTextureAllocationAttemptCount: Int {
+        withLock { provisionalTextureAllocationAttemptCount }
     }
     #endif
 
@@ -1056,6 +1066,17 @@ public final class PaintTileStore: @unchecked Sendable {
 
     public var backingByteCount: Int {
         withLock { Self.backingByteCount(in: records) }
+    }
+
+    func releasePersistentZeroSourceIfUnowned() {
+        withLock {
+            guard records.isEmpty, leases.isEmpty,
+                  provisionalReservations.allSatisfy({ $0 == nil }),
+                  snapshotRetentions.isEmpty
+            else { return }
+            persistentZeroSource = nil
+            persistentZeroAllocationCount = 0
+        }
     }
 
     /// Color and component-local coverage textures share one runtime
@@ -1228,10 +1249,15 @@ public final class PaintTileStore: @unchecked Sendable {
             if let installed = record.backing {
                 backing = installed
             } else {
+                let accounting = try transferAccounting(
+                    captureIdentities: [record.identity],
+                    allocationBackings: []
+                )
                 backing = try transfer(
                     evicted: [record.identity],
                     allocations: []
                 ).captured[record.identity]
+                recordTransferAccounting(accounting)
             }
             switch backing {
             case .knownClear:
@@ -1759,7 +1785,7 @@ public final class PaintTileStore: @unchecked Sendable {
             nextLeaseID = leaseRawID
             stateRevision = nextRevision
             installPersistentZeroSource(from: transferResult)
-            lastTransferAccounting = accounting
+            recordTransferAccounting(accounting)
             return PaintTileLease(
                 id: leaseID,
                 surfaceID: leaseSurfaceID,
@@ -1979,7 +2005,7 @@ public final class PaintTileStore: @unchecked Sendable {
                     provisionalReservations.reduce(into: 0) {
                         if $1 != nil { $0 += 1 }
                     },
-                provisionalByteCount: provisionalByteCount,
+                provisionalByteCount: provisionalPhysicalByteCount,
                 preparedRetirementCount: preparedRetirements.count,
                 pendingRetirementCount: pendingRetirementKeys.count,
                 tileIndexEntryCount: tileKeyByID.count,
@@ -1991,7 +2017,9 @@ public final class PaintTileStore: @unchecked Sendable {
                     snapshotRetainedPayloadLiabilityByteCount,
                 entries: entrySnapshots,
                 leastRecentlyUsedOrder: residency.leastRecentlyUsedOrder,
-                lastTransferAccounting: lastTransferAccounting
+                lastTransferAccounting: lastTransferAccounting,
+                transferPeakTrackedByteHighWater:
+                    transferPeakTrackedByteHighWater
             )
         }
     }
@@ -2040,6 +2068,7 @@ public final class PaintTileStore: @unchecked Sendable {
                 evicted: identities,
                 allocations: []
             ).captured
+            recordTransferAccounting(accounting)
             let entries = try matching.map { _, record in
                 let backing = record.backing ?? captured[record.identity]
                 let payload: PaintTilePayload
@@ -2373,7 +2402,7 @@ public final class PaintTileStore: @unchecked Sendable {
             nextLeaseID = leaseRawID
             stateRevision = nextStateRevision
             installPersistentZeroSource(from: transferResult)
-            lastTransferAccounting = accounting
+            recordTransferAccounting(accounting)
             return PaintTileLease(
                 id: leaseID,
                 surfaceID: surfaceID,
@@ -2680,6 +2709,8 @@ public final class PaintTileStore: @unchecked Sendable {
                     provisionalByteCount -= record.byteCount
                     provisionalCoverageByteCount -=
                         record.reservedCoverageByteCount
+                    committedProvisionalRetainedCoverageByteCount -=
+                        record.committedRetainedCoverageByteCount
                 }
                 workspace.clear()
             }
@@ -2723,21 +2754,26 @@ public final class PaintTileStore: @unchecked Sendable {
                 )
             let persistentZeroBytes = persistentZeroSource == nil
                 ? 0 : PaintTileDescriptor.residentByteCount
+            let backingBytes = Self.backingByteCount(in: records)
             let (residentAndPersistent, persistentOverflow) =
                 trackedResidentBytes
                 .addingReportingOverflow(persistentZeroBytes)
             let (residentAndProvisional, provisionalOverflow) = residentAndPersistent
-                .addingReportingOverflow(provisionalByteCount)
-            let (requiredBytes, requiredOverflow) = residentAndProvisional
+                .addingReportingOverflow(provisionalPhysicalByteCount)
+            let (residentProvisionalAndBacking, backingOverflow) =
+                residentAndProvisional.addingReportingOverflow(backingBytes)
+            let (requiredBytes, requiredOverflow) =
+                residentProvisionalAndBacking
                 .addingReportingOverflow(allocationBytes)
             guard !bindingOverflow, !allocationOverflow,
                   !residentCoverageOverflow, !persistentOverflow,
-                  !provisionalOverflow, !requiredOverflow,
+                  !provisionalOverflow, !backingOverflow, !requiredOverflow,
                   requiredBytes <= transferByteCapacity
             else {
                 throw PaintTileStoreError.transferCapacityExceeded(
                     requiredBytes: allocationOverflow || persistentOverflow
-                        || provisionalOverflow || requiredOverflow
+                        || provisionalOverflow || backingOverflow
+                        || requiredOverflow
                         ? .max : requiredBytes,
                     capacityBytes: transferByteCapacity,
                     residentBytes: residentCoverageOverflow
@@ -2746,7 +2782,7 @@ public final class PaintTileStore: @unchecked Sendable {
                         ? .max : allocationBytes,
                     persistentZeroBytes: persistentZeroBytes,
                     stagingBytes: provisionalOverflow
-                        ? .max : provisionalByteCount
+                        ? .max : provisionalPhysicalByteCount
                 )
             }
             guard let freeSlot = provisionalReservations.firstIndex(where: {
@@ -2778,6 +2814,7 @@ public final class PaintTileStore: @unchecked Sendable {
                 token: token,
                 byteCount: allocationBytes,
                 reservedCoverageByteCount: 0,
+                committedRetainedCoverageByteCount: 0,
                 surfaceID: surfaceID,
                 generation: currentGeneration
             )
@@ -2829,6 +2866,9 @@ public final class PaintTileStore: @unchecked Sendable {
                     }
                     reservedCoverageBytes = nextReservedCoverageBytes
                 }
+                #if DEBUG
+                provisionalTextureAllocationAttemptCount += 1
+                #endif
                 guard let candidate = device.makeTexture(
                     descriptor: provisionalTextureDescriptor
                 ), let candidateComponentCoverage = device.makeTexture(
@@ -2883,9 +2923,7 @@ public final class PaintTileStore: @unchecked Sendable {
             }
             let accounting = try transferAccounting(
                 captureIdentities: evicted,
-                allocationBackings: [],
-                additionalAllocatedTextureBytes:
-                    provisionalByteCount
+                allocationBackings: []
             )
             let transferResult = try transfer(
                 evicted: evicted,
@@ -2907,7 +2945,7 @@ public final class PaintTileStore: @unchecked Sendable {
                 records = stagedRecords
                 residency = stagedResidency
                 stateRevision = nextStateRevision
-                lastTransferAccounting = accounting
+                recordTransferAccounting(accounting)
             }
             provisionalReservations[freeSlot]?
                 .reservedCoverageByteCount = reservedCoverageBytes
@@ -3050,6 +3088,13 @@ public final class PaintTileStore: @unchecked Sendable {
                     pinnedBytes: aggregatePinnedByteCount()
                 )
             }
+            let retainedCoverageBytes = max(0, -coverageByteDelta)
+            let (nextRetainedCoverageBytes, retainedCoverageOverflow) =
+                committedProvisionalRetainedCoverageByteCount
+                    .addingReportingOverflow(retainedCoverageBytes)
+            guard !retainedCoverageOverflow else {
+                throw PaintTileResidencyError.residentByteCountOverflow
+            }
             let nextRevision = try advancedStateRevision()
             for candidateIndex in 0..<provisional.count {
                 let candidate = provisional[candidateIndex]
@@ -3104,6 +3149,10 @@ public final class PaintTileStore: @unchecked Sendable {
                 provisionalRecord.reservedCoverageByteCount
             provisionalReservations[provisional.slotIndex]?
                 .reservedCoverageByteCount = 0
+            provisionalReservations[provisional.slotIndex]?
+                .committedRetainedCoverageByteCount = retainedCoverageBytes
+            committedProvisionalRetainedCoverageByteCount =
+                nextRetainedCoverageBytes
             componentCoverageByteCount = nextCoverageByteCount
             residentByteHighWater = max(
                 residentByteHighWater,
@@ -3264,6 +3313,16 @@ public final class PaintTileStore: @unchecked Sendable {
                     candidate.sourceIsStrokeActive
             }
             componentCoverageByteCount = restoredCoverageByteCount
+            if let retained = provisionalReservations[
+                provisional.slotIndex
+            ]?.committedRetainedCoverageByteCount {
+                precondition(
+                    committedProvisionalRetainedCoverageByteCount >= retained
+                )
+                committedProvisionalRetainedCoverageByteCount -= retained
+                provisionalReservations[provisional.slotIndex]?
+                    .committedRetainedCoverageByteCount = 0
+            }
             stateRevision = nextRevision
             provisional.markRolledBack()
         }
@@ -3306,6 +3365,9 @@ public final class PaintTileStore: @unchecked Sendable {
         let reservedCoverageBytes = provisionalReservations[
             provisional.slotIndex
         ]?.reservedCoverageByteCount ?? 0
+        let retainedCoverageBytes = provisionalReservations[
+            provisional.slotIndex
+        ]?.committedRetainedCoverageByteCount ?? 0
         provisionalReservations[provisional.slotIndex] = nil
         precondition(provisionalByteCount >= provisional.reservedBytes)
         provisionalByteCount -= provisional.reservedBytes
@@ -3313,6 +3375,11 @@ public final class PaintTileStore: @unchecked Sendable {
             provisionalCoverageByteCount >= reservedCoverageBytes
         )
         provisionalCoverageByteCount -= reservedCoverageBytes
+        precondition(
+            committedProvisionalRetainedCoverageByteCount
+                >= retainedCoverageBytes
+        )
+        committedProvisionalRetainedCoverageByteCount -= retainedCoverageBytes
     }
 
     private static func containsSorted(
@@ -3607,7 +3674,7 @@ public final class PaintTileStore: @unchecked Sendable {
                 residentByteHighWater,
                 actualRemainingBytes
             )
-            if let accounting { lastTransferAccounting = accounting }
+            if let accounting { recordTransferAccounting(accounting) }
             let backingBytes = Self.backingByteCount(in: stagedRecords)
             if remainingBytes > targetResidentBytes {
                 return .unsatisfied(
@@ -4086,10 +4153,20 @@ public final class PaintTileStore: @unchecked Sendable {
         return record.storage.componentCoverageTexture != nil
     }
 
+    /// Every candidate color/coverage pair remains physically owned until its
+    /// provisional workspace is cleared. A committed known-clear swap also
+    /// retains the displaced coverage texture for exact rollback.
+    private var provisionalPhysicalByteCount: Int {
+        let (result, overflow) = provisionalByteCount.addingReportingOverflow(
+            committedProvisionalRetainedCoverageByteCount
+        )
+        precondition(!overflow, "provisional physical-byte accounting overflow")
+        return result
+    }
+
     private func transferAccounting(
         captureIdentities: [PaintTileIdentity],
         allocationBackings: [PaintTileBackingSnapshot],
-        additionalAllocatedTextureBytes: Int = 0,
         additionalStagingBytes: Int = 0
     ) throws -> PaintTileTransferAccounting {
         let captureCount = captureIdentities.reduce(into: 0) {
@@ -4105,7 +4182,7 @@ public final class PaintTileStore: @unchecked Sendable {
                 allocationBackings.count,
                 PaintTileDescriptor.residentByteCount
             ),
-            additionalAllocatedTextureBytes,
+            provisionalPhysicalByteCount,
         ])
         let uploadCount = allocationBackings.reduce(into: 0) {
             if case .rgba16Float = $1 { $0 += 1 }
@@ -4139,8 +4216,10 @@ public final class PaintTileStore: @unchecked Sendable {
             additionalStagingBytes,
         ])
         let residentBytes = aggregateResidentByteCount()
+        let backingBytes = Self.backingByteCount(in: records)
         let peakBytes = try checkedSum([
             residentBytes,
+            backingBytes,
             allocatedBytes,
             existingPersistentZeroBytes,
             persistentZeroAllocationBytes,
@@ -4327,6 +4406,16 @@ public final class PaintTileStore: @unchecked Sendable {
         else { return }
         persistentZeroSource = source
         persistentZeroAllocationCount = 1
+    }
+
+    private func recordTransferAccounting(
+        _ accounting: PaintTileTransferAccounting
+    ) {
+        lastTransferAccounting = accounting
+        transferPeakTrackedByteHighWater = max(
+            transferPeakTrackedByteHighWater,
+            accounting.peakTrackedBytes
+        )
     }
 
     private func advancedStateRevision() throws -> UInt64 {

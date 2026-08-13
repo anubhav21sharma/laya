@@ -108,6 +108,7 @@ struct InteractiveStrokePresentationCacheSnapshot: Equatable, Sendable {
     let provisionalBytes: Int
     let componentCoverageBytes: Int
     let backingBytes: Int
+    let activeExternalLeaseCount: Int
     let publishedRevision: InteractiveStrokePresentationRevision?
     let submittedUpdateCount: UInt64
     let completedUpdateCount: UInt64
@@ -140,7 +141,7 @@ actor InteractiveStrokePresentationCache {
 
     private final class GenerationState: @unchecked Sendable {
         let generation: UInt64
-        let strokeEpoch: UUID
+        let strokeEpoch: DocumentPaintStrokePresentationEpoch
         let layerID: UUID
         let pixelSize: PixelSize
         let authoritative: TiledRasterSurface
@@ -149,7 +150,7 @@ actor InteractiveStrokePresentationCache {
         init(
             store: PaintTileStore,
             generation: UInt64,
-            strokeEpoch: UUID,
+            strokeEpoch: DocumentPaintStrokePresentationEpoch,
             layerID: UUID,
             pixelSize: PixelSize
         ) {
@@ -305,10 +306,10 @@ actor InteractiveStrokePresentationCache {
 
     private let device: any MTLDevice
     private let commandQueue: any MTLCommandQueue
-    private var store: PaintTileStore
+    private let store: PaintTileStore
     private let byteBudget: Int
     private let maximumTileCount: Int
-    private let completionGate:
+    private var completionGate:
         (any InteractiveStrokePresentationCacheCompletionGating)?
     private var failureInjection:
         InteractiveStrokePresentationCacheFailureInjection?
@@ -317,7 +318,10 @@ actor InteractiveStrokePresentationCache {
     private var published: InteractiveStrokePresentationSnapshot?
     private var updatingOwnerID: UUID?
     private var updatingRevision: InteractiveStrokePresentationRevision?
-    private var cancelledEpochs: Set<UUID> = []
+    private var cancelledEpochs:
+        [UUID: DocumentPaintStrokePresentationEpoch] = [:]
+    private var retiringEpochs:
+        [UUID: DocumentPaintStrokePresentationEpoch] = [:]
     private var updateSlotHighWater = 0
     private var submittedUpdateCount: UInt64 = 0
     private var completedUpdateCount: UInt64 = 0
@@ -348,7 +352,11 @@ actor InteractiveStrokePresentationCache {
         precondition(byteBudget > 0 && maximumTileCount > 0)
         self.device = device
         self.commandQueue = commandQueue
-        store = PaintTileStore(device: device, byteBudget: byteBudget)
+        store = PaintTileStore(
+            device: device,
+            byteBudget: byteBudget,
+            transferByteCapacity: byteBudget
+        )
         self.byteBudget = byteBudget
         self.maximumTileCount = maximumTileCount
         self.completionGate = completionGate
@@ -360,6 +368,10 @@ actor InteractiveStrokePresentationCache {
         _ update: DocumentPaintTransientCacheUpdate,
         parameters: InteractiveStrokeCompositeParameters
     ) async throws -> InteractiveStrokePresentationRevision {
+        guard update.descriptor.authenticates(
+            presentationEpoch: update.presentationEpoch
+        ), update.strokeEpoch == update.descriptor.authenticatedStrokeEpoch
+        else { throw InteractiveStrokePresentationCacheError.foreignUpdate }
         guard pendingPreparedAcknowledgement == nil else {
             throw InteractiveStrokePresentationCacheError.foreignUpdate
         }
@@ -371,7 +383,7 @@ actor InteractiveStrokePresentationCache {
         }
         let revision = InteractiveStrokePresentationRevision(
             generation: update.generation,
-            strokeEpoch: update.strokeEpoch,
+            strokeEpoch: update.descriptor.authenticatedStrokeEpoch,
             sequence: update.sequence
         )
         defer { finishUpdateSlotIfOwned(ownerID) }
@@ -430,6 +442,8 @@ actor InteractiveStrokePresentationCache {
     func retire(
         strokeEpoch: DocumentPaintStrokePresentationEpoch
     ) async throws {
+        try authenticateTerminalEpoch(strokeEpoch)
+        retiringEpochs[strokeEpoch.identity] = strokeEpoch
         strokeEpoch.retire()
         if updatingRevision?.strokeEpoch == strokeEpoch.identity {
             await withCheckedContinuation { continuation in
@@ -437,38 +451,70 @@ actor InteractiveStrokePresentationCache {
                 Task { await completionGate?.cacheRetirementDidWait() }
             }
         }
-        try retireCompletedEpochRecordingFailure(strokeEpoch.identity)
+        try retireCompletedEpochRecordingFailure(strokeEpoch)
     }
 
-    private func retireCompletedEpoch(_ strokeEpoch: UUID) throws {
-        precondition(updatingRevision?.strokeEpoch != strokeEpoch)
+    private func authenticateTerminalEpoch(
+        _ strokeEpoch: DocumentPaintStrokePresentationEpoch
+    ) throws {
+        if let state = generationState,
+           state.strokeEpoch.identity == strokeEpoch.identity,
+           state.strokeEpoch !== strokeEpoch
+        {
+            throw InteractiveStrokePresentationCacheError.foreignUpdate
+        }
+        if let cancelled = cancelledEpochs[strokeEpoch.identity],
+           cancelled !== strokeEpoch
+        {
+            throw InteractiveStrokePresentationCacheError.foreignUpdate
+        }
+        if let retiring = retiringEpochs[strokeEpoch.identity],
+           retiring !== strokeEpoch
+        {
+            throw InteractiveStrokePresentationCacheError.foreignUpdate
+        }
+    }
+
+    private func retireCompletedEpoch(
+        _ strokeEpoch: DocumentPaintStrokePresentationEpoch
+    ) throws {
+        let identity = strokeEpoch.identity
+        precondition(updatingRevision?.strokeEpoch != identity)
+        try authenticateTerminalEpoch(strokeEpoch)
         if failureInjection?.consumeRetirementFailure() == true {
             throw InteractiveStrokePresentationCacheError
-                .injectedRetirementFailure(strokeEpoch)
+                .injectedRetirementFailure(identity)
         }
         guard let state = generationState,
-              state.strokeEpoch == strokeEpoch
+              state.strokeEpoch === strokeEpoch
         else {
-            cancelledEpochs.remove(strokeEpoch)
+            if cancelledEpochs[identity] === strokeEpoch {
+                cancelledEpochs.removeValue(forKey: identity)
+            }
             return
         }
-        try state.authoritative.advanceGeneration()
-        try state.prediction.advanceGeneration()
+        try store.retireAtomically(
+            authoritativeSurfaceID: state.authoritative.surfaceID,
+            predictionSurfaceID: state.prediction.surfaceID,
+            generation: state.generation
+        )
         generationState = nil
-        if published?.revision.strokeEpoch == strokeEpoch { published = nil }
-        cancelledEpochs.remove(strokeEpoch)
+        if published?.revision.strokeEpoch == identity { published = nil }
+        cancelledEpochs.removeValue(forKey: identity)
     }
 
     private func retireCompletedEpochRecordingFailure(
-        _ strokeEpoch: UUID
+        _ strokeEpoch: DocumentPaintStrokePresentationEpoch
     ) throws {
+        let identity = strokeEpoch.identity
         do {
             try retireCompletedEpoch(strokeEpoch)
-            if retirementFailure?.strokeEpoch == strokeEpoch {
+            if retirementFailure?.strokeEpoch == identity {
                 retirementFailure = nil
             }
+            reapTerminalEpochIfReclaimed(strokeEpoch)
         } catch {
-            retirementFailure = (strokeEpoch, String(describing: error))
+            retirementFailure = (identity, String(describing: error))
             retirementFailureCount &+= 1
             throw error
         }
@@ -477,20 +523,25 @@ actor InteractiveStrokePresentationCache {
     func cancel(
         strokeEpoch: DocumentPaintStrokePresentationEpoch
     ) async throws {
+        try authenticateTerminalEpoch(strokeEpoch)
+        retiringEpochs[strokeEpoch.identity] = strokeEpoch
         strokeEpoch.retire()
-        cancelledEpochs.insert(strokeEpoch.identity)
+        cancelledEpochs[strokeEpoch.identity] = strokeEpoch
         if updatingRevision?.strokeEpoch == strokeEpoch.identity {
             await withCheckedContinuation { continuation in
                 retirementWaiters.append((strokeEpoch.identity, continuation))
                 Task { await completionGate?.cacheRetirementDidWait() }
             }
         }
-        try retireCompletedEpochRecordingFailure(strokeEpoch.identity)
+        try retireCompletedEpochRecordingFailure(strokeEpoch)
     }
 
     func snapshot() -> InteractiveStrokePresentationCacheSnapshot {
+        store.releasePersistentZeroSourceIfUnowned()
         let storeSnapshot = store.snapshot()
+        reapTerminalEpochsIfReclaimed(storeSnapshot)
         let totalPhysicalBytes = physicalResidentBytes(storeSnapshot)
+        observePhysicalHighWater(storeSnapshot)
         let activeSlots = (published == nil ? 0 : 1)
             + (updatingRevision == nil ? 0 : 1)
         let retirementState: InteractiveStrokePresentationCacheRetirementState
@@ -516,6 +567,7 @@ actor InteractiveStrokePresentationCache {
             provisionalBytes: storeSnapshot.provisionalByteCount,
             componentCoverageBytes: storeSnapshot.componentCoverageByteCount,
             backingBytes: storeSnapshot.backingByteCount,
+            activeExternalLeaseCount: storeSnapshot.activeLeaseCount,
             publishedRevision: published?.revision,
             submittedUpdateCount: submittedUpdateCount,
             completedUpdateCount: completedUpdateCount,
@@ -536,7 +588,44 @@ actor InteractiveStrokePresentationCache {
                 && updatingOwnerID == nil
                 && retirementWaiters.isEmpty
                 && pendingPreparedAcknowledgement == nil
+                && cancelledEpochs.isEmpty
+                && retiringEpochs.isEmpty
+                && retirementFailure == nil
+                && storeSnapshot.activeLeaseCount == 0
+                && totalPhysicalBytes == 0
         )
+    }
+
+    private func reapTerminalEpochIfReclaimed(
+        _ strokeEpoch: DocumentPaintStrokePresentationEpoch
+    ) {
+        store.releasePersistentZeroSourceIfUnowned()
+        let storeSnapshot = store.snapshot()
+        guard physicalResidentBytes(storeSnapshot) == 0,
+              storeSnapshot.activeLeaseCount == 0,
+              retirementFailure?.strokeEpoch != strokeEpoch.identity
+        else { return }
+        if cancelledEpochs[strokeEpoch.identity] === strokeEpoch {
+            cancelledEpochs.removeValue(forKey: strokeEpoch.identity)
+        }
+        if retiringEpochs[strokeEpoch.identity] === strokeEpoch {
+            retiringEpochs.removeValue(forKey: strokeEpoch.identity)
+        }
+    }
+
+    private func reapTerminalEpochsIfReclaimed(
+        _ storeSnapshot: PaintTileStoreSnapshot
+    ) {
+        guard physicalResidentBytes(storeSnapshot) == 0,
+              storeSnapshot.activeLeaseCount == 0,
+              retirementFailure == nil
+        else { return }
+        for (identity, epoch) in retiringEpochs {
+            if cancelledEpochs[identity] === epoch {
+                cancelledEpochs.removeValue(forKey: identity)
+            }
+        }
+        retiringEpochs.removeAll()
     }
 
     func retryPendingPreparedAcknowledgement() async throws {
@@ -564,6 +653,30 @@ actor InteractiveStrokePresentationCache {
         }
     }
 
+    func settleRejectedUpdateAcknowledgement(
+        _ update: DocumentPaintTransientCacheUpdate
+    ) async throws {
+        guard pendingPreparedAcknowledgement == nil else {
+            throw InteractiveStrokePresentationCacheError.foreignUpdate
+        }
+        let ownerID = UUID()
+        guard update.acknowledgementSettlement.claimOwnership(
+            ownerID: ownerID
+        ) else {
+            throw InteractiveStrokePresentationCacheError.foreignUpdate
+        }
+        do {
+            try await settleAcknowledgement(update, ownerID: ownerID)
+        } catch {
+            pendingPreparedAcknowledgement = PendingPreparedAcknowledgement(
+                acknowledgement: update.acknowledgement,
+                settlement: update.acknowledgementSettlement,
+                ownerID: ownerID
+            )
+            throw error
+        }
+    }
+
     func waitBeforeRetirementRetry() async {
         await completionGate?.cacheRetirementDidFail()
     }
@@ -579,26 +692,6 @@ actor InteractiveStrokePresentationCache {
         )
     }
 
-    func terminallyAbandonFailedRetirement(
-        strokeEpoch: DocumentPaintStrokePresentationEpoch
-    ) {
-        precondition(
-            updatingOwnerID == nil
-                && retirementWaiters.isEmpty
-        )
-        if generationState?.strokeEpoch == strokeEpoch.identity {
-            generationState = nil
-        }
-        if published?.revision.strokeEpoch == strokeEpoch.identity {
-            published = nil
-        }
-        cancelledEpochs.remove(strokeEpoch.identity)
-        if retirementFailure?.strokeEpoch == strokeEpoch.identity {
-            retirementFailure = nil
-        }
-        store = PaintTileStore(device: device, byteBudget: byteBudget)
-    }
-
     func installFailureInjectionForTesting(
         _ failureInjection:
             InteractiveStrokePresentationCacheFailureInjection?
@@ -611,13 +704,32 @@ actor InteractiveStrokePresentationCache {
         self.failureInjection = failureInjection
     }
 
+    #if DEBUG
+    func installCompletionGateForTesting(
+        _ completionGate:
+            (any InteractiveStrokePresentationCacheCompletionGating)?
+    ) {
+        precondition(
+            generationState == nil
+                && published == nil
+                && updatingOwnerID == nil
+                && pendingPreparedAcknowledgement == nil
+                && retirementWaiters.isEmpty
+        )
+        self.completionGate = completionGate
+    }
+    #endif
+
     private func adoptCore(
         _ update: DocumentPaintTransientCacheUpdate,
         revision: InteractiveStrokePresentationRevision,
         ownerID: UUID,
         parameters: InteractiveStrokeCompositeParameters
     ) async throws -> InteractiveStrokePresentationRevision {
-        guard update.strokeEpoch == update.presentationEpoch.identity else {
+        guard update.descriptor.authenticates(
+            presentationEpoch: update.presentationEpoch
+        ), update.strokeEpoch == update.descriptor.authenticatedStrokeEpoch
+        else {
             throw InteractiveStrokePresentationCacheError.foreignUpdate
         }
         guard !update.presentationEpoch.isRetired else {
@@ -633,7 +745,10 @@ actor InteractiveStrokePresentationCache {
                 )
         }
         if let published {
-            guard revision.strokeEpoch == published.revision.strokeEpoch else {
+            guard revision.strokeEpoch == published.revision.strokeEpoch,
+                  generationState?.strokeEpoch
+                    === update.descriptor.authenticatedPresentationEpoch
+            else {
                 throw InteractiveStrokePresentationCacheError.foreignUpdate
             }
         }
@@ -657,7 +772,8 @@ actor InteractiveStrokePresentationCache {
         let state: GenerationState
         if let existing = generationState {
             guard existing.generation == update.generation,
-                  existing.strokeEpoch == update.strokeEpoch,
+                  existing.strokeEpoch
+                    === update.descriptor.authenticatedPresentationEpoch,
                   existing.layerID == update.layerID,
                   existing.pixelSize == authoritativeSource.pixelSize
             else { throw InteractiveStrokePresentationCacheError.foreignUpdate }
@@ -666,7 +782,8 @@ actor InteractiveStrokePresentationCache {
             state = GenerationState(
                 store: store,
                 generation: update.generation,
-                strokeEpoch: update.strokeEpoch,
+                strokeEpoch:
+                    update.descriptor.authenticatedPresentationEpoch,
                 layerID: update.layerID,
                 pixelSize: authoritativeSource.pixelSize
             )
@@ -860,7 +977,11 @@ actor InteractiveStrokePresentationCache {
             )
         }
         try Task.checkCancellation()
-        guard !cancelledEpochs.contains(update.strokeEpoch) else {
+        if let cancelled = cancelledEpochs[update.strokeEpoch] {
+            guard cancelled === update.descriptor.authenticatedPresentationEpoch
+            else {
+                throw InteractiveStrokePresentationCacheError.foreignUpdate
+            }
             throw CancellationError()
         }
 
@@ -961,9 +1082,32 @@ actor InteractiveStrokePresentationCache {
     private func physicalResidentBytes(
         _ snapshot: PaintTileStoreSnapshot
     ) -> Int {
-        snapshot.residentByteCount
-            + snapshot.provisionalByteCount
-            + snapshot.persistentZeroAllocationBytes
+        checkedPhysicalSum([
+            snapshot.residentByteCount,
+            snapshot.provisionalByteCount,
+            snapshot.persistentZeroAllocationBytes,
+            snapshot.backingByteCount,
+        ])
+    }
+
+    private func observePhysicalHighWater(
+        _ snapshot: PaintTileStoreSnapshot
+    ) {
+        totalPhysicalResidentByteHighWater = max(
+            totalPhysicalResidentByteHighWater,
+            physicalResidentBytes(snapshot),
+            snapshot.transferPeakTrackedByteHighWater
+        )
+    }
+
+    private func checkedPhysicalSum(_ values: [Int]) -> Int {
+        var result = 0
+        for value in values {
+            let (next, overflow) = result.addingReportingOverflow(value)
+            if overflow { return .max }
+            result = next
+        }
+        return result
     }
 
     private func encodeCopy(
@@ -1121,164 +1265,617 @@ enum InteractiveStrokeCacheAdoptionOperation {
         update: DocumentPaintTransientCacheUpdate,
         parameters: InteractiveStrokeCompositeParameters,
         terminal: @escaping @MainActor @Sendable ((any Error)?) -> Bool,
-        lifecycleTerminal: @escaping @Sendable (
+        lifecycleTerminal: @escaping @MainActor @Sendable (
             InteractiveStrokePresentationCacheSnapshot
         ) -> Void = { _ in }
     ) -> Task<Void, Never> {
-        Task { @MainActor [
-            cache,
-            update,
-            parameters,
-            terminal,
-            lifecycleTerminal,
-        ] in
-            let terminalError: (any Error)?
-            do {
-                _ = try await cache.adopt(update, parameters: parameters)
-                terminalError = nil
-            } catch {
-                terminalError = error
-            }
-            guard !terminal(terminalError) else { return }
-            InteractiveStrokeCacheLifecycleCoordinator.shared.retain(
-                cache: cache,
-                update: update,
-                lifecycleTerminal: lifecycleTerminal
-            )
-        }
+        InteractiveStrokeCacheLifecycleCoordinator.shared.enqueueHandoff(
+            cache: cache,
+            update: update,
+            parameters: parameters,
+            terminal: terminal,
+            lifecycleTerminal: lifecycleTerminal
+        )
     }
 }
 
-/// Durable event-driven owner for cache obligations whose UI owner vanished.
-/// Entries are removed only after ACK success plus epoch retirement.
+/// Durable event-driven owner for every cache ACK/retirement obligation.
+/// UI lifetime may change the requested terminal action but never owns credit.
 @MainActor
 final class InteractiveStrokeCacheLifecycleCoordinator {
     static let shared = InteractiveStrokeCacheLifecycleCoordinator()
 
-    private struct Entry {
-        let cache: InteractiveStrokePresentationCache
+    private enum Intent: Int {
+        case acknowledgementOnly
+        case retire
+        case cancel
+    }
+
+    private enum DriverPhase {
+        case handoff
+        case acknowledgement
+        case retirement
+    }
+
+    @MainActor
+    private final class HandoffCompletion {
+        var isFinished = false
+        var waiters: [CheckedContinuation<Void, Never>] = []
+
+        func wait() async {
+            guard !isFinished else { return }
+            await withCheckedContinuation { waiters.append($0) }
+        }
+
+        func finish() {
+            guard !isFinished else { return }
+            isFinished = true
+            let waiters = waiters
+            self.waiters.removeAll()
+            for waiter in waiters { waiter.resume() }
+        }
+    }
+
+    private final class Handoff {
+        let id = UUID()
         let update: DocumentPaintTransientCacheUpdate
-        let lifecycleTerminal: @Sendable (
+        let parameters: InteractiveStrokeCompositeParameters
+        let terminal: @MainActor @Sendable ((any Error)?) -> Bool
+        let completion: HandoffCompletion
+        var adoptionFinished = false
+        var terminalError: (any Error)?
+
+        init(
+            update: DocumentPaintTransientCacheUpdate,
+            parameters: InteractiveStrokeCompositeParameters,
+            terminal: @escaping @MainActor @Sendable ((any Error)?) -> Bool,
+            completion: HandoffCompletion
+        ) {
+            self.update = update
+            self.parameters = parameters
+            self.terminal = terminal
+            self.completion = completion
+        }
+    }
+
+    private final class Entry {
+        let entryID = UUID()
+        let cache: InteractiveStrokePresentationCache
+        let strokeEpoch: DocumentPaintStrokePresentationEpoch
+        var intent: Intent
+        var handoffs: [Handoff] = []
+        var handoffLifecycleTerminal: (@MainActor @Sendable (
             InteractiveStrokePresentationCacheSnapshot
-        ) -> Void
+        ) -> Void)?
+        var terminalActionLifecycleTerminal: (@MainActor @Sendable (
+            InteractiveStrokePresentationCacheSnapshot
+        ) -> Void)?
+        var failureTerminal: (@MainActor @Sendable (any Error) -> Void)?
+        var didReportRetirementFailure = false
+        var driverID: UUID?
+        var driverTask: Task<Void, Never>?
+        var retryTaskID: UUID?
+        var retryTask: Task<Void, Never>?
+        var retryAttemptCount = 0
+        var completedHandoffCount: UInt64 = 0
+
+        init(
+            cache: InteractiveStrokePresentationCache,
+            strokeEpoch: DocumentPaintStrokePresentationEpoch,
+            intent: Intent,
+            handoffLifecycleTerminal: (@MainActor @Sendable (
+                InteractiveStrokePresentationCacheSnapshot
+            ) -> Void)?,
+            failureTerminal:
+                (@MainActor @Sendable (any Error) -> Void)? = nil
+        ) {
+            self.cache = cache
+            self.strokeEpoch = strokeEpoch
+            self.intent = intent
+            self.handoffLifecycleTerminal = handoffLifecycleTerminal
+            self.failureTerminal = failureTerminal
+        }
     }
 
     private var entries: [UUID: Entry] = [:]
-    private var active: Set<UUID> = []
     private var quiescenceWaiters: [CheckedContinuation<Void, Never>] = []
-    private var retryAttemptCount: [UUID: Int] = [:]
-    private var retryTasks: [UUID: Task<Void, Never>] = [:]
+    private var lifecycleWaiters:
+        [UUID: [CheckedContinuation<Void, Never>]] = [:]
+    private var acknowledgementWaiters:
+        [UUID: [(UInt64, CheckedContinuation<Void, Never>)]] = [:]
+    /// The presentation cache has one affine prepared-ACK slot. Epoch-local
+    /// queues therefore share one cache-wide owner until that epoch has also
+    /// completed retirement; a later epoch must never mistake the earlier
+    /// epoch's pending ACK for its own handoff obligation.
+    private var cacheOwnerEntryIdentities: [ObjectIdentifier: UUID] = [:]
+    private var cacheWaitingEntryIdentities:
+        [ObjectIdentifier: [UUID]] = [:]
 
-    func retain(
+    func enqueueHandoff(
         cache: InteractiveStrokePresentationCache,
         update: DocumentPaintTransientCacheUpdate,
-        lifecycleTerminal: @escaping @Sendable (
+        parameters: InteractiveStrokeCompositeParameters,
+        terminal: @escaping @MainActor @Sendable ((any Error)?) -> Bool,
+        lifecycleTerminal: @escaping @MainActor @Sendable (
             InteractiveStrokePresentationCacheSnapshot
         ) -> Void
-    ) {
-        let identity = update.presentationEpoch.identity
-        precondition(entries[identity] == nil)
-        entries[identity] = Entry(
-            cache: cache,
+    ) -> Task<Void, Never> {
+        let authenticatedEpoch =
+            update.descriptor.authenticatedPresentationEpoch
+        let authentic = update.descriptor.authenticates(
+            presentationEpoch: update.presentationEpoch
+        ) && update.strokeEpoch == update.descriptor.authenticatedStrokeEpoch
+        let identity = authenticatedEpoch.identity
+        let entry: Entry
+        if let current = entries[identity] {
+            precondition(current.cache === cache)
+            precondition(current.strokeEpoch === authenticatedEpoch)
+            entry = current
+        } else {
+            entry = Entry(
+                cache: cache,
+                strokeEpoch: authenticatedEpoch,
+                intent: authenticatedEpoch.isRetired
+                    ? .cancel : .acknowledgementOnly,
+                handoffLifecycleTerminal: lifecycleTerminal
+            )
+            entries[identity] = entry
+        }
+        entry.handoffLifecycleTerminal = lifecycleTerminal
+        let completion = HandoffCompletion()
+        entry.handoffs.append(Handoff(
             update: update,
-            lifecycleTerminal: lifecycleTerminal
+            parameters: parameters,
+            terminal: { error in
+                terminal(authentic ? error :
+                    InteractiveStrokePresentationCacheError.foreignUpdate)
+            },
+            completion: completion
+        ))
+        startDriverIfPossible(entry)
+        return Task { @MainActor in await completion.wait() }
+    }
+
+    func requestCancellation(
+        cache: InteractiveStrokePresentationCache,
+        strokeEpoch: DocumentPaintStrokePresentationEpoch,
+        lifecycleTerminal: (@MainActor @Sendable (
+            InteractiveStrokePresentationCacheSnapshot
+        ) -> Void)? = nil,
+        failureTerminal:
+            (@MainActor @Sendable (any Error) -> Void)? = nil
+    ) {
+        requestTerminalAction(
+            cache: cache,
+            strokeEpoch: strokeEpoch,
+            intent: .cancel,
+            lifecycleTerminal: lifecycleTerminal,
+            failureTerminal: failureTerminal
         )
-        retryAttemptCount[identity] = 0
-        scheduleAutomaticRetry(identity)
+    }
+
+    func requestRetirement(
+        cache: InteractiveStrokePresentationCache,
+        strokeEpoch: DocumentPaintStrokePresentationEpoch,
+        lifecycleTerminal: (@MainActor @Sendable (
+            InteractiveStrokePresentationCacheSnapshot
+        ) -> Void)? = nil,
+        failureTerminal:
+            (@MainActor @Sendable (any Error) -> Void)? = nil
+    ) {
+        requestTerminalAction(
+            cache: cache,
+            strokeEpoch: strokeEpoch,
+            intent: .retire,
+            lifecycleTerminal: lifecycleTerminal,
+            failureTerminal: failureTerminal
+        )
+    }
+
+    private func requestTerminalAction(
+        cache: InteractiveStrokePresentationCache,
+        strokeEpoch: DocumentPaintStrokePresentationEpoch,
+        intent: Intent,
+        lifecycleTerminal: (@MainActor @Sendable (
+            InteractiveStrokePresentationCacheSnapshot
+        ) -> Void)?,
+        failureTerminal:
+            (@MainActor @Sendable (any Error) -> Void)?
+    ) {
+        let identity = strokeEpoch.identity
+        let entry: Entry
+        if let current = entries[identity] {
+            precondition(current.cache === cache)
+            precondition(current.strokeEpoch === strokeEpoch)
+            if let lifecycleTerminal {
+                current.handoffLifecycleTerminal = nil
+                current.terminalActionLifecycleTerminal = lifecycleTerminal
+            }
+            if current.failureTerminal == nil {
+                current.failureTerminal = failureTerminal
+            }
+            entry = current
+        } else {
+            entry = Entry(
+                cache: cache,
+                strokeEpoch: strokeEpoch,
+                intent: intent,
+                handoffLifecycleTerminal: nil,
+                failureTerminal: failureTerminal
+            )
+            entry.terminalActionLifecycleTerminal = lifecycleTerminal
+            entries[identity] = entry
+        }
+        upgrade(entry, to: intent)
+        // An intent upgrade is consumed by the already scheduled bounded
+        // lifecycle turn. Replacing a suspended retry before its cancellation
+        // handler unwinds can otherwise create two physical waiters even
+        // though Entry exposes only one task field.
+        if entry.retryTask == nil { startDriverIfPossible(entry) }
     }
 
     func advancePendingLifecycles() async {
         await waitForQuiescence()
-        for identity in entries.keys { advance(identity) }
+        for entry in entries.values {
+            if entry.retryTask == nil { startDriverIfPossible(entry) }
+        }
         await waitForQuiescence()
     }
 
-    private func advance(_ identity: UUID) {
-        guard entries[identity] != nil, active.insert(identity).inserted else {
-            return
-        }
-        Task { @MainActor [weak self] in
-            await self?.attempt(identity)
-        }
-    }
-
-    private func attempt(_ identity: UUID) async {
-        guard let entry = entries[identity] else {
-            finishAttempt(identity)
-            return
-        }
-        do {
-            if (await entry.cache.snapshot())
-                .pendingPreparedAcknowledgementCount > 0
-            {
-                try await entry.cache.retryPendingPreparedAcknowledgement()
-            }
-            guard (await entry.cache.snapshot())
-                    .pendingPreparedAcknowledgementCount == 0
-            else {
-                finishAttempt(identity)
+    private func startDriverIfPossible(_ entry: Entry) {
+        guard entry.driverID == nil,
+              entry.retryTask == nil,
+              entries[entry.strokeEpoch.identity] === entry
+        else { return }
+        let cacheIdentity = ObjectIdentifier(entry.cache)
+        if let ownerIdentity = cacheOwnerEntryIdentities[cacheIdentity] {
+            guard ownerIdentity == entry.strokeEpoch.identity else {
+                appendCacheWaiterIfNeeded(
+                    entry.strokeEpoch.identity,
+                    cacheIdentity: cacheIdentity
+                )
                 return
             }
-            try await entry.cache.retire(
-                strokeEpoch: entry.update.presentationEpoch
-            )
-            let snapshot = await entry.cache.snapshot()
-            retryTasks.removeValue(forKey: identity)?.cancel()
-            entries.removeValue(forKey: identity)
-            retryAttemptCount.removeValue(forKey: identity)
-            entry.lifecycleTerminal(snapshot)
-            finishAttempt(identity)
-        } catch {
-            await entry.cache.waitBeforeRetirementRetry()
-            finishAttempt(identity)
-            scheduleAutomaticRetry(identity)
+        } else {
+            var waiters = cacheWaitingEntryIdentities[cacheIdentity] ?? []
+            while let first = waiters.first,
+                  entries[first] == nil
+            {
+                waiters.removeFirst()
+            }
+            if let first = waiters.first,
+               first != entry.strokeEpoch.identity
+            {
+                cacheWaitingEntryIdentities[cacheIdentity] = waiters
+                appendCacheWaiterIfNeeded(
+                    entry.strokeEpoch.identity,
+                    cacheIdentity: cacheIdentity
+                )
+                return
+            }
+            if waiters.first == entry.strokeEpoch.identity {
+                waiters.removeFirst()
+            }
+            cacheWaitingEntryIdentities[cacheIdentity] = waiters.isEmpty
+                ? nil : waiters
+            cacheOwnerEntryIdentities[cacheIdentity] =
+                entry.strokeEpoch.identity
+        }
+        let driverID = UUID()
+        entry.driverID = driverID
+        entry.driverTask = Task { @MainActor [weak self, entry] in
+            await self?.drive(entry, driverID: driverID)
         }
     }
 
-    private func scheduleAutomaticRetry(_ identity: UUID) {
-        guard let entry = entries[identity], retryTasks[identity] == nil else {
-            return
+    private func drive(_ entry: Entry, driverID: UUID) async {
+        var phase = DriverPhase.handoff
+        do {
+            if let handoff = entry.handoffs.first {
+                let authentic = handoff.update.descriptor.authenticates(
+                    presentationEpoch: handoff.update.presentationEpoch
+                ) && handoff.update.strokeEpoch
+                    == handoff.update.descriptor.authenticatedStrokeEpoch
+                let didFinishAdoption = !handoff.adoptionFinished
+                if didFinishAdoption {
+                    do {
+                        if authentic {
+                            _ = try await entry.cache.adopt(
+                                handoff.update,
+                                parameters: handoff.parameters
+                            )
+                        } else {
+                            try await entry.cache
+                                .settleRejectedUpdateAcknowledgement(
+                                    handoff.update
+                                )
+                            handoff.terminalError =
+                                InteractiveStrokePresentationCacheError
+                                    .foreignUpdate
+                        }
+                    } catch {
+                        handoff.terminalError = error
+                    }
+                    handoff.adoptionFinished = true
+                }
+                guard isCurrent(entry, driverID: driverID) else { return }
+                var snapshot = await entry.cache.snapshot()
+                guard isCurrent(entry, driverID: driverID) else { return }
+                if didFinishAdoption,
+                   snapshot.pendingPreparedAcknowledgementCount > 0
+                {
+                    finishDriver(entry, driverID: driverID, retry: true)
+                    return
+                }
+                if snapshot.pendingPreparedAcknowledgementCount > 0 {
+                    phase = .acknowledgement
+                    try await entry.cache.retryPendingPreparedAcknowledgement()
+                    guard isCurrent(entry, driverID: driverID) else { return }
+                    snapshot = await entry.cache.snapshot()
+                    guard isCurrent(entry, driverID: driverID) else { return }
+                }
+                guard snapshot.pendingPreparedAcknowledgementCount == 0 else {
+                    finishDriver(entry, driverID: driverID, retry: true)
+                    return
+                }
+                phase = .handoff
+                let uiRetainsPresentation = handoff.terminal(
+                    handoff.terminalError
+                )
+                if !uiRetainsPresentation { upgrade(entry, to: .retire) }
+                guard entry.handoffs.first === handoff else { return }
+                entry.handoffs.removeFirst()
+                entry.completedHandoffCount &+= 1
+                handoff.completion.finish()
+                resumeAcknowledgementWaiters(entry.strokeEpoch.identity)
+                finishDriver(entry, driverID: driverID, retry: false)
+                if !entry.handoffs.isEmpty
+                    || entry.intent != .acknowledgementOnly
+                {
+                    startDriverIfPossible(entry)
+                }
+                return
+            }
+
+            let before = await entry.cache.snapshot()
+            guard isCurrent(entry, driverID: driverID) else { return }
+            if before.pendingPreparedAcknowledgementCount > 0 {
+                phase = .acknowledgement
+                try await entry.cache.retryPendingPreparedAcknowledgement()
+                guard isCurrent(entry, driverID: driverID) else { return }
+                phase = .handoff
+            }
+            let acknowledged = await entry.cache.snapshot()
+            guard isCurrent(entry, driverID: driverID) else { return }
+            guard acknowledged.pendingPreparedAcknowledgementCount == 0
+            else {
+                finishDriver(entry, driverID: driverID, retry: true)
+                return
+            }
+            switch entry.intent {
+            case .acknowledgementOnly:
+                parkAfterAcknowledgement(entry)
+                return
+            case .retire:
+                phase = .retirement
+                try await entry.cache.retire(strokeEpoch: entry.strokeEpoch)
+            case .cancel:
+                phase = .retirement
+                try await entry.cache.cancel(strokeEpoch: entry.strokeEpoch)
+            }
+            guard isCurrent(entry, driverID: driverID) else { return }
+            let terminal = await entry.cache.snapshot()
+            guard isCurrent(entry, driverID: driverID) else { return }
+            guard terminal.pendingPreparedAcknowledgementCount == 0,
+                  terminal.activeUpdateOwnerCount == 0,
+                  terminal.activeStrokeEpochCount == 0,
+                  entry.handoffs.isEmpty,
+                  terminal.isIdle
+            else {
+                finishDriver(entry, driverID: driverID, retry: true)
+                return
+            }
+            complete(entry, snapshot: terminal)
+        } catch {
+            guard isCurrent(entry, driverID: driverID) else { return }
+            if phase == .retirement {
+                await entry.cache.waitBeforeRetirementRetry()
+                guard isCurrent(entry, driverID: driverID) else { return }
+                if !entry.didReportRetirementFailure,
+                   let failureTerminal = entry.failureTerminal
+                {
+                    entry.didReportRetirementFailure = true
+                    failureTerminal(error)
+                }
+            }
+            finishDriver(entry, driverID: driverID, retry: true)
         }
-        let attempt = retryAttemptCount[identity, default: 0]
-        retryAttemptCount[identity] = attempt + 1
-        retryTasks[identity] = Task { @MainActor [weak self, entry] in
+    }
+
+    private func scheduleAutomaticRetry(_ entry: Entry) {
+        guard entries[entry.strokeEpoch.identity] === entry,
+              entry.retryTask == nil,
+              entry.driverID == nil
+        else { return }
+        let attempt = entry.retryAttemptCount
+        entry.retryAttemptCount += 1
+        let retryTaskID = UUID()
+        entry.retryTaskID = retryTaskID
+        entry.retryTask = Task { @MainActor [weak self, entry] in
             do {
                 try await entry.cache.waitForLifecycleRetry(attempt: attempt)
             } catch {
                 return
             }
             guard !Task.isCancelled, let self,
-                  self.entries[identity] != nil
+                  self.entries[entry.strokeEpoch.identity] === entry,
+                  entry.retryTaskID == retryTaskID
             else { return }
-            self.retryTasks[identity] = nil
-            self.advance(identity)
+            entry.retryTaskID = nil
+            entry.retryTask = nil
+            self.startDriverIfPossible(entry)
         }
     }
 
     func cancelRetainedLifecycle(_ identity: UUID) async {
-        guard let entry = entries.removeValue(forKey: identity) else { return }
-        retryTasks.removeValue(forKey: identity)?.cancel()
-        retryAttemptCount.removeValue(forKey: identity)
-        active.remove(identity)
-        await entry.cache.terminallyAbandonFailedRetirement(
-            strokeEpoch: entry.update.presentationEpoch
-        )
-        entry.lifecycleTerminal(await entry.cache.snapshot())
-        if active.isEmpty {
-            let waiters = quiescenceWaiters
-            quiescenceWaiters.removeAll()
-            for waiter in waiters { waiter.resume() }
+        guard let entry = entries[identity] else { return }
+        upgrade(entry, to: .cancel)
+        if entry.retryTask == nil { startDriverIfPossible(entry) }
+    }
+
+    func waitForLifecycle(_ identity: UUID) async {
+        guard entries[identity] != nil else { return }
+        await withCheckedContinuation {
+            lifecycleWaiters[identity, default: []].append($0)
         }
     }
 
+    func waitForAcknowledgement(_ identity: UUID) async {
+        guard let entry = entries[identity] else { return }
+        let generation = entry.completedHandoffCount
+            + UInt64(entry.handoffs.count)
+        guard entry.completedHandoffCount < generation else {
+            return
+        }
+        await withCheckedContinuation {
+            acknowledgementWaiters[identity, default: []].append(
+                (generation, $0)
+            )
+        }
+    }
+
+    func retainsLifecycle(_ identity: UUID) -> Bool {
+        entries[identity] != nil
+    }
+
     private func waitForQuiescence() async {
-        guard !active.isEmpty else { return }
+        guard entries.values.contains(where: { $0.driverID != nil }) else {
+            return
+        }
         await withCheckedContinuation { quiescenceWaiters.append($0) }
     }
 
-    private func finishAttempt(_ identity: UUID) {
-        active.remove(identity)
-        guard active.isEmpty else { return }
+    private func isCurrent(_ entry: Entry, driverID: UUID) -> Bool {
+        entries[entry.strokeEpoch.identity] === entry
+            && entry.driverID == driverID
+            && !Task.isCancelled
+    }
+
+    private func finishDriver(
+        _ entry: Entry,
+        driverID: UUID,
+        retry: Bool
+    ) {
+        guard entry.driverID == driverID else { return }
+        entry.driverID = nil
+        entry.driverTask = nil
+        resumeQuiescenceIfNeeded()
+        if retry { scheduleAutomaticRetry(entry) }
+    }
+
+    private func complete(
+        _ entry: Entry,
+        snapshot: InteractiveStrokePresentationCacheSnapshot
+    ) {
+        let identity = entry.strokeEpoch.identity
+        guard entries[identity] === entry else { return }
+        entries.removeValue(forKey: identity)
+        let nextCacheEntry = releaseCacheOwnership(entry)
+        cancelRetry(entry)
+        entry.driverID = nil
+        entry.driverTask = nil
+        let terminal = entry.terminalActionLifecycleTerminal
+            ?? entry.handoffLifecycleTerminal
+        entry.terminalActionLifecycleTerminal = nil
+        entry.handoffLifecycleTerminal = nil
+        terminal?(snapshot)
+        let waiters = lifecycleWaiters.removeValue(forKey: identity) ?? []
+        for waiter in waiters { waiter.resume() }
+        resumeAcknowledgementWaiters(identity)
+        resumeQuiescenceIfNeeded()
+        if let nextCacheEntry { startDriverIfPossible(nextCacheEntry) }
+    }
+
+    private func appendCacheWaiterIfNeeded(
+        _ identity: UUID,
+        cacheIdentity: ObjectIdentifier
+    ) {
+        guard cacheWaitingEntryIdentities[cacheIdentity]?.contains(identity)
+                != true
+        else { return }
+        cacheWaitingEntryIdentities[cacheIdentity, default: []]
+            .append(identity)
+    }
+
+    private func releaseCacheOwnership(_ entry: Entry) -> Entry? {
+        let cacheIdentity = ObjectIdentifier(entry.cache)
+        let identity = entry.strokeEpoch.identity
+        cacheWaitingEntryIdentities[cacheIdentity]?.removeAll {
+            $0 == identity || entries[$0] == nil
+        }
+        guard cacheOwnerEntryIdentities[cacheIdentity] == identity else {
+            return nil
+        }
+        cacheOwnerEntryIdentities.removeValue(forKey: cacheIdentity)
+        var waiters = cacheWaitingEntryIdentities[cacheIdentity] ?? []
+        while let nextIdentity = waiters.first {
+            waiters.removeFirst()
+            guard let next = entries[nextIdentity],
+                  next.cache === entry.cache
+            else { continue }
+            cacheWaitingEntryIdentities[cacheIdentity] = waiters.isEmpty
+                ? nil : waiters
+            cacheOwnerEntryIdentities[cacheIdentity] = nextIdentity
+            return next
+        }
+        cacheWaitingEntryIdentities.removeValue(forKey: cacheIdentity)
+        return nil
+    }
+
+    private func parkAfterAcknowledgement(_ entry: Entry) {
+        guard entries[entry.strokeEpoch.identity] === entry else { return }
+        precondition(entry.handoffs.isEmpty)
+        entry.driverID = nil
+        entry.driverTask = nil
+        cancelRetry(entry)
+        resumeAcknowledgementWaiters(entry.strokeEpoch.identity)
+        resumeQuiescenceIfNeeded()
+    }
+
+    private func resumeAcknowledgementWaiters(_ identity: UUID) {
+        guard let entry = entries[identity] else {
+            let waiters = acknowledgementWaiters.removeValue(forKey: identity)
+                ?? []
+            for (_, waiter) in waiters { waiter.resume() }
+            return
+        }
+        var remaining: [(UInt64, CheckedContinuation<Void, Never>)] = []
+        for (generation, waiter) in
+            acknowledgementWaiters.removeValue(forKey: identity) ?? []
+        {
+            if generation <= entry.completedHandoffCount {
+                waiter.resume()
+            } else {
+                remaining.append((generation, waiter))
+            }
+        }
+        if !remaining.isEmpty { acknowledgementWaiters[identity] = remaining }
+    }
+
+    private func upgrade(_ entry: Entry, to intent: Intent) {
+        if intent.rawValue > entry.intent.rawValue { entry.intent = intent }
+    }
+
+    private func cancelRetry(_ entry: Entry) {
+        entry.retryTaskID = nil
+        entry.retryTask?.cancel()
+        entry.retryTask = nil
+    }
+
+    private func resumeQuiescenceIfNeeded() {
+        guard !entries.values.contains(where: { $0.driverID != nil }) else {
+            return
+        }
         let waiters = quiescenceWaiters
         quiescenceWaiters.removeAll()
         for waiter in waiters { waiter.resume() }

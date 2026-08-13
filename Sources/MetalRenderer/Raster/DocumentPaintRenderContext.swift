@@ -356,6 +356,8 @@ private actor DocumentPaintTransactionWorker {
     private var dispatchSequence: UInt64 = 0
     private var isShutdown = false
     #if DEBUG
+    private var beforeMutationPublicationClaimForTesting:
+        (@Sendable () async -> Void)?
     private var afterMutationPublicationForTesting:
         (@Sendable () async -> Void)?
     #endif
@@ -384,7 +386,8 @@ private actor DocumentPaintTransactionWorker {
     func commitStroke(
         _ source: StrokePreparedCommitMutationSource,
         compositeParameters: DocumentPaintStrokeCompositeParameters,
-        canonicalReservation: DocumentPaintCanonicalRevisionReservation
+        canonicalReservation: DocumentPaintCanonicalRevisionReservation,
+        publicationState: StrokeCommitPublicationState?
     ) async throws -> DocumentPaintSurfaceWorkerResult {
         do {
             try beginCommand()
@@ -403,7 +406,8 @@ private actor DocumentPaintTransactionWorker {
                 requiresHistory: true,
                 strokeSource: source,
                 compositeParameters: compositeParameters,
-                canonicalReservation: canonicalReservation
+                canonicalReservation: canonicalReservation,
+                publicationState: publicationState
             )
         } catch {
             try? source.cancelUnclaimed()
@@ -537,7 +541,8 @@ private actor DocumentPaintTransactionWorker {
         requiresHistory: Bool,
         strokeSource: StrokePreparedCommitMutationSource? = nil,
         compositeParameters: DocumentPaintStrokeCompositeParameters? = nil,
-        canonicalReservation: DocumentPaintCanonicalRevisionReservation
+        canonicalReservation: DocumentPaintCanonicalRevisionReservation,
+        publicationState: StrokeCommitPublicationState? = nil
     ) async throws -> DocumentPaintSurfaceWorkerResult {
         var owned: OwnedMutation?
         do {
@@ -601,6 +606,13 @@ private actor DocumentPaintTransactionWorker {
                 }
                 owned = .terminal(terminal)
                 if Task.isCancelled {
+                    try settle(owned)
+                    throw CancellationError()
+                }
+                #if DEBUG
+                await beforeMutationPublicationClaimForTesting?()
+                #endif
+                guard publicationState?.claimPublication() ?? true else {
                     try settle(owned)
                     throw CancellationError()
                 }
@@ -690,6 +702,12 @@ private actor DocumentPaintTransactionWorker {
     }
 
     #if DEBUG
+    func testingSetBeforeMutationPublicationClaimHook(
+        _ hook: (@Sendable () async -> Void)?
+    ) {
+        beforeMutationPublicationClaimForTesting = hook
+    }
+
     func testingSetAfterMutationPublicationHook(
         _ hook: (@Sendable () async -> Void)?
     ) {
@@ -1588,7 +1606,8 @@ final class DocumentPaintRenderContext {
 
     func commitStroke(
         _ source: StrokePreparedCommitMutationSource,
-        compositeParameters: DocumentPaintStrokeCompositeParameters
+        compositeParameters: DocumentPaintStrokeCompositeParameters,
+        publicationState: StrokeCommitPublicationState? = nil
     ) async throws -> DocumentPaintSurfaceApplicationResult {
         guard activeStrokeSurfaceSlot.current != nil else {
             try? source.cancelUnclaimed()
@@ -1608,7 +1627,8 @@ final class DocumentPaintRenderContext {
         let result = try await transactionWorker.commitStroke(
             source,
             compositeParameters: compositeParameters,
-            canonicalReservation: reservation
+            canonicalReservation: reservation,
+            publicationState: publicationState
         )
         return applicationResult(result, reservation: reservation)
     }
@@ -1886,6 +1906,13 @@ final class DocumentPaintRenderContext {
     }
 
     #if DEBUG
+    func testingSetBeforeMutationPublicationClaimHook(
+        _ hook: (@Sendable () async -> Void)?
+    ) async {
+        await transactionWorker
+            .testingSetBeforeMutationPublicationClaimHook(hook)
+    }
+
     func testingSetAfterMutationPublicationHook(
         _ hook: (@Sendable () async -> Void)?
     ) async {

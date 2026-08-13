@@ -343,7 +343,7 @@ struct StrokeFrameSchedulerTests {
         mailbox.publish(.prepared(firstPage))
         var drained: [StrokePreparationResult] = []
         mailbox.drainResults(into: &drained)
-        try mailbox.submitCancellation(
+        mailbox.submitCancellation(
             generation: generation,
             reason: nil,
             frameDisposition: .abandonedBeforeSubmission
@@ -869,7 +869,7 @@ struct StrokeFrameSchedulerTests {
                 .authoritativeCandidateContinuationPending
         )
 
-        try bridge.submitCancellation(
+        bridge.submitCancellation(
             generation: generation,
             reason: nil,
             frameDisposition: .abandonedBeforeSubmission
@@ -3261,7 +3261,7 @@ struct StrokeFrameSchedulerTests {
             abandonedMailbox.snapshot.awaitingPreparedFrameSubmission
         )
 
-        try abandonedMailbox.submitCancellation(
+        abandonedMailbox.submitCancellation(
             generation: preparedGeneration,
             reason: nil,
             frameDisposition: .abandonedBeforeSubmission
@@ -3288,7 +3288,7 @@ struct StrokeFrameSchedulerTests {
         mainOwnedMailbox.publish(.prepared(prepared))
         var mainOwnedResults: [StrokePreparationResult] = []
         mainOwnedMailbox.drainResults(into: &mainOwnedResults)
-        try mainOwnedMailbox.submitCancellation(
+        mainOwnedMailbox.submitCancellation(
             generation: preparedGeneration,
             reason: nil,
             frameDisposition: .preserveMainOwnership
@@ -3326,7 +3326,7 @@ struct StrokeFrameSchedulerTests {
         let inFlightAcknowledgement = try #require(
             inFlightMailbox.takePreparedFrameAcknowledgement()
         )
-        try inFlightMailbox.submitCancellation(
+        inFlightMailbox.submitCancellation(
             generation: preparedGeneration,
             reason: nil,
             frameDisposition: .abandonedBeforeSubmission
@@ -3397,7 +3397,7 @@ struct StrokeFrameSchedulerTests {
         // actor call awaits Metal completion. Cancellation may be queued from
         // Main, but cannot enter the actor and mutate the reference-owned
         // continuation until the suspended call has returned.
-        try mailbox.submitCancellation(
+        mailbox.submitCancellation(
             generation: generation,
             reason: nil,
             frameDisposition: .preserveMainOwnership
@@ -5276,6 +5276,600 @@ extension StrokeFrameSchedulerTests {
         try bridge.submit(.cancel(generation: generation, reason: nil))
     }
 
+    @Test
+    @MainActor
+    func mailboxBackedACKRetainsWorkerThroughFailureAfterBridgeRelease()
+        async throws
+    {
+        guard let setup = try await stageCSurfaceTestSetup() else { return }
+        let generation: UInt64 = 0xD6_21
+        let injectedFailure = StrokePreparationFailure.unexpected(
+            "injected first scheduler ACK failure"
+        )
+        let store = PaintTileStore(
+            device: setup.device,
+            byteBudget: PaintTileDescriptor.residentByteCount * 32
+        )
+        let surfaces = try stageCCurrentSurfaceResources(
+            device: setup.device,
+            store: store,
+            layerID: UUID(),
+            generation: generation,
+            pixelSize: PixelSize(width: 512, height: 512),
+            pipeline: setup.tilePipeline
+        )
+        let descriptor = StrokeMetalResourceDescriptor(
+            surfaces: surfaces,
+            brush: setup.brush,
+            frameUniforms: stageCSurfaceFrameUniforms(side: 512),
+            forceCommandFailure: false
+        )
+        var bridge: StrokePreparationBridge? = StrokePreparationBridge(
+            budget: try frameBudget(
+                authoritativePerFrame: 4_096,
+                predictedPerFrame: 4_096,
+                authoritativeCapacity: 12_288,
+                predictedCapacity: 4_096
+            ),
+            targetFramesPerSecond: 120,
+            testingSchedulerAcknowledgementFailures: [injectedFailure]
+        )
+        weak let workerDriver = bridge?.workerDriverForTesting
+        let workerTask = try #require(bridge?.workerTaskForTesting)
+        let mailbox = try #require(bridge?.mailbox)
+        let progress = StrokePreparationAsyncProgressRegistration(
+            mailbox: mailbox
+        )
+        defer { progress.remove() }
+        try bridge?.submit(.begin(
+            generation: generation,
+            configuration: try preparationConfiguration(
+                program: stageCMetalTestProgram(
+                    id: "test.scheduler.worker-lifeline"
+                ),
+                metalResourceDescriptor: descriptor
+            ),
+            samples: [stageCPreparationSample(
+                phase: .began,
+                x: 64,
+                timestamp: 0
+            )]
+        ))
+
+        var scratch: [StrokePreparationResult] = []
+        var displayFrame: StrokePreparedDisplayFrame?
+        for _ in 0..<1_000 {
+            let revision = progress.currentRevision
+            bridge?.drainResults(into: &scratch)
+            if case let .prepared(batch)? = scratch.first {
+                displayFrame = batch.displayFrame
+                break
+            }
+            scratch.removeAll(keepingCapacity: true)
+            if progress.currentRevision != revision { continue }
+            _ = try await progress.waitForProgress(
+                after: revision,
+                timeoutNanoseconds: Self.asyncProgressTimeoutNanoseconds
+            )
+        }
+        let acknowledgement = try #require(displayFrame?.acknowledgement)
+        #expect(mailbox.snapshot.awaitingPreparedFrameSubmission)
+
+        bridge = nil
+        let acknowledgementRevision = progress.currentRevision
+        try acknowledgement.requestFulfillment()
+        _ = try await progress.waitForProgress(
+            after: acknowledgementRevision,
+            timeoutNanoseconds: Self.asyncProgressTimeoutNanoseconds
+        )
+
+        #expect(
+            acknowledgement.status
+                == .failed(.schedulerReleaseFailed(injectedFailure))
+        )
+        #expect(workerDriver != nil)
+        try await acknowledgement.fulfill()
+        #expect(acknowledgement.status == .fulfilled)
+
+        for _ in 0..<64 where workerDriver != nil {
+            let revision = progress.currentRevision
+            scratch.removeAll(keepingCapacity: true)
+            mailbox.drainResults(into: &scratch)
+            for result in scratch {
+                if case let .prepared(batch) = result,
+                   let continuationFrame = batch.displayFrame
+                {
+                    try await continuationFrame.acknowledgement.fulfill()
+                }
+            }
+            if workerDriver == nil { break }
+            if progress.currentRevision == revision {
+                let advanced = try await progress.waitForProgress(
+                    after: revision,
+                    timeoutNanoseconds: Self.asyncProgressTimeoutNanoseconds
+                )
+                if !advanced { break }
+            }
+        }
+        guard workerDriver == nil else {
+            let diagnostic =
+                "worker driver outlived Bridge and all exact ACKs; mailbox="
+                + String(describing: mailbox.snapshot)
+            Issue.record("\(diagnostic)")
+            return
+        }
+        await workerTask.value
+        #expect(store.snapshot().activeLeaseCount == 0)
+    }
+
+    @Test
+    @MainActor
+    func workerTurnRetainsOwnerBeforePreparedResultPublication()
+        async throws
+    {
+        guard let setup = try await stageCSurfaceTestSetup() else { return }
+        let generation: UInt64 = 0xD6_22
+        let store = PaintTileStore(
+            device: setup.device,
+            byteBudget: PaintTileDescriptor.residentByteCount * 32
+        )
+        let surfaces = try stageCCurrentSurfaceResources(
+            device: setup.device,
+            store: store,
+            layerID: UUID(),
+            generation: generation,
+            pixelSize: PixelSize(width: 512, height: 512),
+            pipeline: setup.tilePipeline
+        )
+        let descriptor = StrokeMetalResourceDescriptor(
+            surfaces: surfaces,
+            brush: setup.brush,
+            frameUniforms: stageCSurfaceFrameUniforms(side: 512),
+            forceCommandFailure: false
+        )
+        let publicationGate = StrokePreparationWorkerPublicationGate()
+        defer { publicationGate.release() }
+        var bridge: StrokePreparationBridge? = StrokePreparationBridge(
+            budget: try frameBudget(
+                authoritativePerFrame: 4_096,
+                predictedPerFrame: 4_096,
+                authoritativeCapacity: 12_288,
+                predictedCapacity: 4_096
+            ),
+            targetFramesPerSecond: 120,
+            testingSchedulerAcknowledgementFailures: [],
+            testingWorkerResultPublicationGate: {
+                await publicationGate.waitBeforePublication()
+            }
+        )
+        weak let workerDriver = bridge?.workerDriverForTesting
+        let workerTask = try #require(bridge?.workerTaskForTesting)
+        let mailbox = try #require(bridge?.mailbox)
+        let progress = StrokePreparationAsyncProgressRegistration(
+            mailbox: mailbox
+        )
+        defer { progress.remove() }
+        try bridge?.submit(.begin(
+            generation: generation,
+            configuration: try preparationConfiguration(
+                program: stageCMetalTestProgram(
+                    id: "test.scheduler.pre-publication-worker-lifeline"
+                ),
+                metalResourceDescriptor: descriptor
+            ),
+            samples: [stageCPreparationSample(
+                phase: .began,
+                x: 64,
+                timestamp: 0
+            )]
+        ))
+
+        try #require(await publicationGate.waitUntilArrived())
+        bridge = nil
+        guard workerDriver != nil else {
+            Issue.record(
+                "worker owner was destroyed before its prepared result could publish"
+            )
+            publicationGate.release()
+            await workerTask.value
+            return
+        }
+        publicationGate.release()
+
+        var scratch: [StrokePreparationResult] = []
+        for _ in 0..<64 where workerDriver != nil {
+            let revision = progress.currentRevision
+            mailbox.drainResults(into: &scratch)
+            for result in scratch {
+                if case let .prepared(batch) = result,
+                   let displayFrame = batch.displayFrame
+                {
+                    try await displayFrame.acknowledgement.fulfill()
+                }
+            }
+            scratch.removeAll(keepingCapacity: true)
+            if workerDriver == nil { break }
+            if progress.currentRevision == revision {
+                let advanced = try await progress.waitForProgress(
+                    after: revision,
+                    timeoutNanoseconds: Self.asyncProgressTimeoutNanoseconds
+                )
+                if !advanced { break }
+            }
+        }
+        #expect(workerDriver == nil)
+        guard workerDriver == nil else { return }
+        await workerTask.value
+        #expect(store.snapshot().activeLeaseCount == 0)
+    }
+
+    @Test
+    @MainActor
+    func undrainedPreparedResultRetainsWorkerThroughTerminalCancellation()
+        async throws
+    {
+        guard let setup = try await stageCSurfaceTestSetup() else { return }
+        let generation: UInt64 = 0xD6_23
+        let store = PaintTileStore(
+            device: setup.device,
+            byteBudget: PaintTileDescriptor.residentByteCount * 32
+        )
+        let surfaces = try stageCCurrentSurfaceResources(
+            device: setup.device,
+            store: store,
+            layerID: UUID(),
+            generation: generation,
+            pixelSize: PixelSize(width: 512, height: 512),
+            pipeline: setup.tilePipeline
+        )
+        let descriptor = StrokeMetalResourceDescriptor(
+            surfaces: surfaces,
+            brush: setup.brush,
+            frameUniforms: stageCSurfaceFrameUniforms(side: 512),
+            forceCommandFailure: false
+        )
+        var bridge: StrokePreparationBridge? = StrokePreparationBridge(
+            budget: try frameBudget(
+                authoritativePerFrame: 4_096,
+                predictedPerFrame: 4_096,
+                authoritativeCapacity: 12_288,
+                predictedCapacity: 4_096
+            ),
+            targetFramesPerSecond: 120
+        )
+        weak let workerDriver = bridge?.workerDriverForTesting
+        let workerTask = try #require(bridge?.workerTaskForTesting)
+        let mailbox = try #require(bridge?.mailbox)
+        let progress = StrokePreparationAsyncProgressRegistration(
+            mailbox: mailbox
+        )
+        defer { progress.remove() }
+        try bridge?.submit(.begin(
+            generation: generation,
+            configuration: try preparationConfiguration(
+                program: stageCMetalTestProgram(
+                    id: "test.scheduler.undrained-cancel-worker-lifeline"
+                ),
+                metalResourceDescriptor: descriptor
+            ),
+            samples: [stageCPreparationSample(
+                phase: .began,
+                x: 64,
+                timestamp: 0
+            )]
+        ))
+
+        var observedPreparedResult = mailbox.snapshot.pendingResultCount == 1
+        for _ in 0..<4 where !observedPreparedResult {
+            let revision = progress.currentRevision
+            if mailbox.snapshot.pendingResultCount == 1 {
+                observedPreparedResult = true
+                break
+            }
+            if progress.currentRevision == revision {
+                _ = try await progress.waitForProgress(
+                    after: revision,
+                    timeoutNanoseconds: 500_000_000
+                )
+            }
+            observedPreparedResult = mailbox.snapshot.pendingResultCount == 1
+        }
+        try #require(observedPreparedResult)
+        #expect(mailbox.snapshot.awaitingPreparedFrameSubmission)
+
+        bridge?.submitCancellation(
+            generation: generation,
+            reason: nil,
+            frameDisposition: .preserveMainOwnership
+        )
+        bridge = nil
+
+        var observedTerminalCancellation = mailbox.snapshot
+            .terminalCancellationPublicationCount == 1
+        for _ in 0..<4 where !observedTerminalCancellation {
+            let revision = progress.currentRevision
+            if progress.currentRevision == revision {
+                _ = try await progress.waitForProgress(
+                    after: revision,
+                    timeoutNanoseconds: 500_000_000
+                )
+            }
+            observedTerminalCancellation = mailbox.snapshot
+                .terminalCancellationPublicationCount == 1
+        }
+        #expect(observedTerminalCancellation)
+        guard observedTerminalCancellation else {
+            await workerTask.value
+            return
+        }
+        await workerTask.value
+        #expect(workerDriver == nil)
+        #expect(store.snapshot().activeLeaseCount == 0)
+    }
+
+    @Test
+    @MainActor
+    func discardedGenerationPublishesTerminalCancellationFailure()
+        throws
+    {
+        let generation: UInt64 = 0xD6_24
+        let mailbox = StrokePreparationMailbox(
+            budget: try frameBudget(
+                authoritativePerFrame: 64,
+                predictedPerFrame: 64,
+                authoritativeCapacity: 128,
+                predictedCapacity: 64
+            )
+        )
+        _ = mailbox.submitCancellation(
+            generation: generation,
+            reason: nil,
+            frameDisposition: .preserveMainOwnership
+        )
+        let failure = StrokePreparationFailure.unexpected(
+            "injected cancellation cleanup failure"
+        )
+        mailbox.publish(.failed(
+            generation: generation,
+            failure: failure
+        ))
+
+        var results: [StrokePreparationResult] = []
+        mailbox.drainResults(into: &results)
+        #expect(results.count == 1)
+        guard case let .failed(actualGeneration, actualFailure)? =
+            results.first
+        else {
+            Issue.record("matching cancellation failure was discarded")
+            return
+        }
+        #expect(actualGeneration == generation)
+        #expect(actualFailure == failure)
+        #expect(mailbox.snapshot.terminalCancellationPublicationCount == 0)
+        mailbox.publish(.cancelled(generation: generation, reason: nil))
+        results.removeAll(keepingCapacity: true)
+        mailbox.drainResults(into: &results)
+        #expect(results.count == 1)
+        #expect(mailbox.snapshot.terminalCancellationPublicationCount == 1)
+    }
+
+    @Test
+    @MainActor
+    func realCancellationCleanupFailureRetainsWorkerUntilRetrySucceeds()
+        async throws
+    {
+        guard let setup = try await stageCSurfaceTestSetup() else { return }
+        let generation: UInt64 = 0xD6_25
+        let store = PaintTileStore(
+            device: setup.device,
+            byteBudget: PaintTileDescriptor.residentByteCount * 32
+        )
+        let surfaces = try stageCCurrentSurfaceResources(
+            device: setup.device,
+            store: store,
+            layerID: UUID(),
+            generation: generation,
+            pixelSize: PixelSize(width: 512, height: 512),
+            pipeline: setup.tilePipeline
+        )
+        let descriptor = StrokeMetalResourceDescriptor(
+            surfaces: surfaces,
+            brush: setup.brush,
+            frameUniforms: stageCSurfaceFrameUniforms(side: 512),
+            forceCommandFailure: false
+        )
+        let cleanupFailure = StrokeTileSurfaceError.injectedFailure(
+            .beforePartition
+        )
+        var bridge: StrokePreparationBridge? = StrokePreparationBridge(
+            budget: try frameBudget(
+                authoritativePerFrame: 4_096,
+                predictedPerFrame: 4_096,
+                authoritativeCapacity: 12_288,
+                predictedCapacity: 4_096
+            ),
+            targetFramesPerSecond: 120,
+            testingSchedulerAcknowledgementFailures: [],
+            testingSchedulerCancellationCleanupFailures: [cleanupFailure]
+        )
+        weak let workerDriver = bridge?.workerDriverForTesting
+        let workerTask = try #require(bridge?.workerTaskForTesting)
+        let mailbox = try #require(bridge?.mailbox)
+        let progress = StrokePreparationAsyncProgressRegistration(
+            mailbox: mailbox
+        )
+        defer { progress.remove() }
+        try bridge?.submit(.begin(
+            generation: generation,
+            configuration: try preparationConfiguration(
+                program: stageCMetalTestProgram(
+                    id: "test.scheduler.real-cancel-cleanup-retry"
+                ),
+                metalResourceDescriptor: descriptor
+            ),
+            samples: [stageCPreparationSample(
+                phase: .began,
+                x: 64,
+                timestamp: 0
+            )]
+        ))
+        try #require(try await waitForMailboxResult(
+            mailbox,
+            progress: progress
+        ))
+
+        bridge?.submitCancellation(
+            generation: generation,
+            reason: nil,
+            frameDisposition: .preserveMainOwnership
+        )
+        try #require(try await waitForMailboxResult(
+            mailbox,
+            progress: progress
+        ))
+        #expect(mailbox.snapshot.terminalCancellationPublicationCount == 0)
+        #expect(workerDriver != nil)
+        #expect(!surfaces.capability.isTerminal)
+        var results: [StrokePreparationResult] = []
+        bridge?.drainResults(into: &results)
+        guard case let .failed(failedGeneration, failure)? = results.first
+        else {
+            Issue.record("first real cancellation cleanup did not fail")
+            return
+        }
+        #expect(failedGeneration == generation)
+        #expect(failure == .tileSurface(cleanupFailure))
+        #expect(mailbox.snapshot.terminalCancellationPublicationCount == 0)
+        #expect(workerDriver != nil)
+
+        results.removeAll(keepingCapacity: true)
+        try #require(try await waitForMailboxResult(
+            mailbox,
+            progress: progress
+        ))
+        bridge?.drainResults(into: &results)
+        guard case let .cancelled(cancelledGeneration, _)? = results.first
+        else {
+            Issue.record("retry did not publish terminal cancellation")
+            return
+        }
+        #expect(cancelledGeneration == generation)
+        #expect(mailbox.snapshot.terminalCancellationPublicationCount == 1)
+        #expect(surfaces.capability.isTerminal)
+
+        bridge = nil
+        await workerTask.value
+        #expect(workerDriver == nil)
+        #expect(store.snapshot().activeLeaseCount == 0)
+    }
+
+    @Test
+    @MainActor
+    func bridgeDropAutonomouslyRetriesCancellationCleanupFailure()
+        async throws
+    {
+        guard let setup = try await stageCSurfaceTestSetup() else { return }
+        let generation: UInt64 = 0xD6_26
+        let store = PaintTileStore(
+            device: setup.device,
+            byteBudget: PaintTileDescriptor.residentByteCount * 32
+        )
+        let surfaces = try stageCCurrentSurfaceResources(
+            device: setup.device,
+            store: store,
+            layerID: UUID(),
+            generation: generation,
+            pixelSize: PixelSize(width: 512, height: 512),
+            pipeline: setup.tilePipeline
+        )
+        let descriptor = StrokeMetalResourceDescriptor(
+            surfaces: surfaces,
+            brush: setup.brush,
+            frameUniforms: stageCSurfaceFrameUniforms(side: 512),
+            forceCommandFailure: false
+        )
+        let cleanupFailure = StrokeTileSurfaceError.injectedFailure(
+            .beforePartition
+        )
+        let publicationGate = StrokePreparationWorkerPublicationGate(
+            blockedInvocation: 2
+        )
+        defer { publicationGate.release() }
+        var bridge: StrokePreparationBridge? = StrokePreparationBridge(
+            budget: try frameBudget(
+                authoritativePerFrame: 4_096,
+                predictedPerFrame: 4_096,
+                authoritativeCapacity: 12_288,
+                predictedCapacity: 4_096
+            ),
+            targetFramesPerSecond: 120,
+            testingSchedulerAcknowledgementFailures: [],
+            testingSchedulerCancellationCleanupFailures: [cleanupFailure],
+            testingWorkerResultPublicationGate: {
+                await publicationGate.waitBeforePublication()
+            }
+        )
+        weak let workerDriver = bridge?.workerDriverForTesting
+        let workerTask = try #require(bridge?.workerTaskForTesting)
+        let mailbox = try #require(bridge?.mailbox)
+        let progress = StrokePreparationAsyncProgressRegistration(
+            mailbox: mailbox
+        )
+        defer { progress.remove() }
+        try bridge?.submit(.begin(
+            generation: generation,
+            configuration: try preparationConfiguration(
+                program: stageCMetalTestProgram(
+                    id: "test.scheduler.ownerless-cancel-cleanup-retry"
+                ),
+                metalResourceDescriptor: descriptor
+            ),
+            samples: [stageCPreparationSample(
+                phase: .began,
+                x: 64,
+                timestamp: 0
+            )]
+        ))
+        try #require(try await waitForMailboxResult(
+            mailbox,
+            progress: progress
+        ))
+
+        bridge?.submitCancellation(
+            generation: generation,
+            reason: nil,
+            frameDisposition: .preserveMainOwnership
+        )
+        try #require(await publicationGate.waitUntilArrived())
+        bridge = nil
+        #expect(workerDriver != nil)
+        publicationGate.release()
+
+        var reachedTerminal = workerDriver == nil
+        for _ in 0..<4 where !reachedTerminal {
+            let revision = progress.currentRevision
+            if workerDriver == nil {
+                reachedTerminal = true
+                break
+            }
+            if progress.currentRevision == revision {
+                _ = try await progress.waitForProgress(
+                    after: revision,
+                    timeoutNanoseconds: 500_000_000
+                )
+            }
+            reachedTerminal = workerDriver == nil
+        }
+        #expect(reachedTerminal)
+        #expect(surfaces.capability.isTerminal)
+        #expect(
+            mailbox.snapshot.terminalCancellationPublicationCount == 1
+        )
+        guard reachedTerminal else { return }
+        await workerTask.value
+        #expect(store.snapshot().activeLeaseCount == 0)
+    }
+
     @MainActor
     private func stageCSurfaceTestSetup() async throws -> (
         device: any MTLDevice,
@@ -5337,6 +5931,24 @@ extension StrokeFrameSchedulerTests {
         )
     }
 
+    private func waitForMailboxResult(
+        _ mailbox: StrokePreparationMailbox,
+        progress: StrokePreparationAsyncProgressRegistration
+    ) async throws -> Bool {
+        for _ in 0..<4 {
+            if mailbox.snapshot.pendingResultCount == 1 { return true }
+            let revision = progress.currentRevision
+            if mailbox.snapshot.pendingResultCount == 1 { return true }
+            if progress.currentRevision == revision {
+                _ = try await progress.waitForProgress(
+                    after: revision,
+                    timeoutNanoseconds: 500_000_000
+                )
+            }
+        }
+        return mailbox.snapshot.pendingResultCount == 1
+    }
+
     @MainActor
     private func stageCCurrentSurfaceResources(
         device: any MTLDevice,
@@ -5382,6 +5994,137 @@ extension StrokeFrameSchedulerTests {
             guideKind: 0,
             showCanvasBoundary: 0
         )
+    }
+}
+
+private final class StrokePreparationBoundedSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+    private var pendingResult: Bool?
+    private var isFinished = false
+
+    func wait(timeout: Duration = .seconds(5)) async -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask { await self.waitForSignal() }
+            group.addTask {
+                do {
+                    try await ContinuousClock().sleep(for: timeout)
+                } catch {}
+                return false
+            }
+            let result = await group.next() ?? false
+            if !result { resolve(false) }
+            group.cancelAll()
+            return result
+        }
+    }
+
+    func signal() { resolve(true) }
+
+    private func waitForSignal() async -> Bool {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if let pendingResult {
+                self.pendingResult = nil
+                isFinished = true
+                lock.unlock()
+                continuation.resume(returning: pendingResult)
+            } else if isFinished {
+                lock.unlock()
+                continuation.resume(returning: false)
+            } else {
+                self.continuation = continuation
+                lock.unlock()
+            }
+        }
+    }
+
+    private func resolve(_ result: Bool) {
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        guard let continuation else {
+            pendingResult = result
+            lock.unlock()
+            return
+        }
+        self.continuation = nil
+        isFinished = true
+        lock.unlock()
+        continuation.resume(returning: result)
+    }
+}
+
+private final class StrokePreparationWorkerPublicationGate:
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private let blockedInvocation: Int
+    private var invocationCount = 0
+    private var didArrive = false
+    private var isReleased = false
+    private var arrivalWaiters: [UUID: StrokePreparationBoundedSignal] = [:]
+    private var releaseWaiters:
+        [UUID: CheckedContinuation<Void, Never>] = [:]
+
+    init(blockedInvocation: Int = 1) {
+        precondition(blockedInvocation > 0)
+        self.blockedInvocation = blockedInvocation
+    }
+
+    func waitUntilArrived() async -> Bool {
+        let waiter = StrokePreparationBoundedSignal()
+        let waiterID = UUID()
+        let arrived = lock.withLock {
+            guard !didArrive else { return true }
+            arrivalWaiters[waiterID] = waiter
+            return false
+        }
+        if arrived { return true }
+        let result = await waiter.wait()
+        _ = lock.withLock { arrivalWaiters.removeValue(forKey: waiterID) }
+        return result
+    }
+
+    func waitBeforePublication() async {
+        let waiterID = UUID()
+        let arrivals: [StrokePreparationBoundedSignal]? = lock.withLock {
+            invocationCount += 1
+            guard invocationCount == blockedInvocation else { return nil }
+            didArrive = true
+            defer { arrivalWaiters.removeAll() }
+            return Array(arrivalWaiters.values)
+        }
+        guard let arrivals else { return }
+        for arrival in arrivals { arrival.signal() }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let resumeImmediately = lock.withLock {
+                    if isReleased || Task.isCancelled { return true }
+                    releaseWaiters[waiterID] = continuation
+                    return false
+                }
+                if resumeImmediately { continuation.resume() }
+            }
+        } onCancel: {
+            self.cancelReleaseWaiter(waiterID)
+        }
+    }
+
+    func release() {
+        let waiters: [CheckedContinuation<Void, Never>] = lock.withLock {
+            isReleased = true
+            defer { releaseWaiters.removeAll() }
+            return Array(releaseWaiters.values)
+        }
+        for waiter in waiters { waiter.resume() }
+    }
+
+    private func cancelReleaseWaiter(_ waiterID: UUID) {
+        let waiter = lock.withLock { releaseWaiters.removeValue(forKey: waiterID) }
+        waiter?.resume()
     }
 }
 

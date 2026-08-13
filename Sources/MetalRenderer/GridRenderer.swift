@@ -5,6 +5,10 @@ import Metal
 import MetalKit
 import PatternEngine
 
+protocol InteractiveStrokePaintCommitGating: Sendable {
+    func waitBeforeCommit() async
+}
+
 public struct GridStructuralCounters: Equatable, Sendable {
     public var newDabsThisEvent = 0
     public var totalDabsThisStroke = 0
@@ -281,11 +285,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public private(set) var interactiveGridVisibility = false
     public var isIdle: Bool {
         activeStroke == nil
+            && paintCommitTask == nil
             && strokeWorkspaceState == .available
-            && interactiveStrokeCacheRetirementTask == nil
-            && interactiveStrokeCacheRetirementFailure == nil
-            && interactiveStrokeCacheAcknowledgementRetryTask == nil
-            && interactiveStrokeCacheAcknowledgementRetryFailure == nil
+            && interactiveStrokeCacheLifecycleEpochs.isEmpty
     }
     public var strokeRuntimeSnapshot: StrokeRuntimeTelemetrySnapshot? {
         strokeRuntimeController?.snapshot
@@ -525,6 +527,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private var paintDisplayAcknowledgementStatusOverrideForTesting:
         StrokePreparedFrameAcknowledgementStatus?
     private var paintRevisionReleaseFailureForTesting: MetalRendererError?
+    private var paintStrokeCommitFailureForTesting: MetalRendererError?
+    private var paintStrokeCommitGateForTesting:
+        (any InteractiveStrokePaintCommitGating)?
     #endif
     #if DEBUG
     private var paintDisplayPublishedRevisions:
@@ -606,6 +611,27 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     ) {
         paintRevisionReleaseFailureForTesting = error
     }
+    package func installPaintStrokeCommitFailureForTesting(
+        _ error: MetalRendererError
+    ) {
+        paintStrokeCommitFailureForTesting = error
+    }
+    func installPaintStrokeCommitGateForTesting(
+        _ gate: any InteractiveStrokePaintCommitGating
+    ) {
+        paintStrokeCommitGateForTesting = gate
+    }
+    package func installAfterPaintMutationPublicationHookForTesting(
+        _ hook: (@Sendable () async -> Void)?
+    ) async {
+        await paintContext.testingSetAfterMutationPublicationHook(hook)
+    }
+    package func installBeforePaintMutationPublicationClaimHookForTesting(
+        _ hook: (@Sendable () async -> Void)?
+    ) async {
+        await paintContext
+            .testingSetBeforeMutationPublicationClaimHook(hook)
+    }
     package var paintDisplayPreparationRevisionForTesting: UInt64 {
         paintDisplayPreparationSequence
     }
@@ -619,19 +645,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private var activePaintTransientSource:
         DocumentPaintTransientDisplaySource?
     private var interactiveStrokeCacheAdoptionTask: Task<Void, Never>?
-    private var interactiveStrokeCacheRetirementTask: Task<Void, Never>?
-    private var interactiveStrokeCacheRetirementFailure: (
-        strokeEpoch: DocumentPaintStrokePresentationEpoch,
-        error: MetalRendererError
-    )?
-    private var interactiveStrokeCacheAcknowledgementRetryTask:
-        Task<Void, Never>?
-    private var interactiveStrokeCacheAcknowledgementRetryFailure:
-        MetalRendererError?
+    private var interactiveStrokeCacheLifecycleEpochs: Set<UUID> = []
+    private var interactiveStrokeCacheLifecycleEpochObjects:
+        [UUID: DocumentPaintStrokePresentationEpoch] = [:]
+    private var lastInteractiveStrokeCacheLifecycleIdentity: UUID?
     private var nextInteractiveStrokeCacheSequence: UInt64 = 1
     private var paintCommitTask: Task<Void, Never>?
+    private var paintCommitPublicationState: StrokeCommitPublicationState?
     private var paintLifecycleTask: Task<Void, Never>?
     private var paintCommandError: MetalRendererError?
+    private var strokeWorkspaceRetirementErrorWasReported = false
     private var paintRevisionResidentBytesState = 0
     private var pendingPaintHarnessDabCount = 0
     private var pendingPaintHarnessInstanceCount = 0
@@ -842,6 +865,36 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 liveVisible: true
             )
         )
+    }
+
+    deinit {
+        if paintCommitPublicationState?.claimFailure() != false {
+            paintCommitTask?.cancel()
+        }
+        if let bridge = strokePreparationBridge,
+           let generation = strokePreparationGeneration,
+           strokeWorkspaceState == .borrowed(generation)
+        {
+            bridge.submitCancellation(
+                generation: generation,
+                reason: nil,
+                frameDisposition: .preserveMainOwnership
+            )
+        }
+        let cache = interactiveStrokePresentationCache
+        var epochByIdentity = interactiveStrokeCacheLifecycleEpochObjects
+        if let activeEpoch = activeStrokeTileSurfaceResources?
+            .capability.presentationEpoch
+        {
+            epochByIdentity[activeEpoch.identity] = activeEpoch
+        }
+        let epochs = Array(epochByIdentity.values)
+        Task { @MainActor [cache, epochs] in
+            for epoch in epochs {
+                InteractiveStrokeCacheLifecycleCoordinator.shared
+                    .requestCancellation(cache: cache, strokeEpoch: epoch)
+            }
+        }
     }
 
     public func applyTiling(_ tiling: TilingKind) async throws {
@@ -1333,6 +1386,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             strokePreparationBridge = bridge
             strokePreparationGeneration = generation
             strokeWorkspaceState = .borrowed(generation)
+            strokeWorkspaceRetirementErrorWasReported = false
             try submitStrokeInput(
                 .begin(
                     generation: generation,
@@ -2150,98 +2204,160 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         paintDisplayPreparationScheduleCount &+= 1
         activePaintDisplayPreparationRevision = revision
         let preparationDemandCheckpoint = interactiveFramePump.demandCheckpoint
+        let preparationGate = presentationPreparationGate
+        let preparationContext = paintContext
+        let preparationTilingStrategy = tilingStrategy
+        let preparationStoragePixelSize = storagePixelSize
+        let preparationStyle = transient == nil ? nil : activeStroke?.style
         paintDisplayPreparationTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            let gate = self.presentationPreparationGate
-            await gate?.preparationDidBegin(revision: revision)
+            await preparationGate?.preparationDidBegin(revision: revision)
             do {
-                if let injectedFailure = await gate?
+                if let injectedFailure = await preparationGate?
                     .injectedPreparationFailure(revision: revision)
                 {
                     throw injectedFailure
                 }
-                let submission = try await self.makePaintDisplaySubmission(
+                let submission = try await CanvasDisplayCompositor.prepare(
+                    context: preparationContext,
                     snapshot: snapshot,
-                    transient: transient
+                    tilingStrategy: preparationTilingStrategy,
+                    storagePixelSize: preparationStoragePixelSize,
+                    transient: transient,
+                    transientMode: preparationStyle?.compositeMode,
+                    strokeOpacity: preparationStyle?.color.alpha ?? 1,
+                    eraserStrength:
+                        preparationStyle?.eraserStrength ?? 1
                 )
                 guard !Task.isCancelled,
-                      self.paintDisplayPreparationSequence
-                        == revision.sequence,
-                      self.activePaintDisplayPreparationRevision == revision
+                      self?.installPreparedPaintDisplayIfCurrent(
+                        submission,
+                        snapshot: snapshot,
+                        revision: revision
+                      ) == true
                 else {
-                    try self.paintContext
+                    try preparationContext
                         .cancelLayerDisplaySubmission(submission)
-                    try await self.paintContext
+                    try await preparationContext
                         .retryLayerDisplayCompletions()
-                    await gate?.preparationDidRetire(revision: revision)
-                    return
-                }
-                self.preparedPaintDisplay = PreparedPaintDisplay(
-                    snapshot: snapshot,
-                    submission: submission
-                )
-                #if DEBUG
-                self.paintDisplayPublishedRevisions.append(revision)
-                #endif
-                self.interactiveFramePump.signal(.cachePublished(revision))
-                await gate?.preparationDidPublish(revision: revision)
-                await gate?.preparationDidRetire(revision: revision)
-                guard !Task.isCancelled,
-                      self.activePaintDisplayPreparationRevision == revision
-                else { return }
-                self.paintDisplayPreparationTask = nil
-                self.activePaintDisplayPreparationRevision = nil
-                self.requestPaintDisplay(in: view)
-            } catch is CancellationError {
-                await gate?.preparationDidRetire(revision: revision)
-                guard self.activePaintDisplayPreparationRevision == revision
-                else { return }
-                self.paintDisplayPreparationTask = nil
-                self.activePaintDisplayPreparationRevision = nil
-            } catch {
-                guard self.paintDisplayPreparationSequence
-                        == revision.sequence,
-                      self.activePaintDisplayPreparationRevision == revision,
-                      !Task.isCancelled
-                else {
-                    try? await self.paintContext
-                        .retryLayerDisplayCompletions()
-                    await gate?.preparationDidRetire(revision: revision)
-                    return
-                }
-                await gate?.preparationDidRetire(revision: revision)
-                guard !Task.isCancelled,
-                      self.paintDisplayPreparationSequence
-                        == revision.sequence,
-                      self.activePaintDisplayPreparationRevision == revision
-                else { return }
-                self.paintDisplayPreparationTask = nil
-                self.activePaintDisplayPreparationRevision = nil
-                if Self.isDeferredPaintDisplayPreparationFailure(error) {
-                    self.pendingLatestPaintDisplaySnapshot = snapshot
-                    if self.activePaintTransientSource?
-                        .acknowledgementStatus == .fulfilled
-                    {
-                        self.activePaintTransientSource = nil
-                        self.invalidatePaintDisplayPreparation()
-                    }
-                    return
-                }
-                self.paintCommandError = (error as? MetalRendererError)
-                    ?? .commandFailed(error.localizedDescription)
-                let shouldContinue = self.interactiveFramePump
-                    .settleTerminalFailure(
-                        upTo: revision,
-                        since: preparationDemandCheckpoint
+                    await preparationGate?.preparationDidRetire(
+                        revision: revision
                     )
-                self.failActiveOperationIfNeeded(
-                    self.paintCommandError!
+                    return
+                }
+                await preparationGate?.preparationDidPublish(
+                    revision: revision
                 )
-                if shouldContinue {
-                    self.requestPaintDisplay(in: view)
+                await preparationGate?.preparationDidRetire(
+                    revision: revision
+                )
+                if !Task.isCancelled {
+                    self?.finishSuccessfulPaintDisplayPreparation(
+                        revision: revision,
+                        in: view
+                    )
+                }
+            } catch is CancellationError {
+                await preparationGate?.preparationDidRetire(
+                    revision: revision
+                )
+                self?.finishCancelledPaintDisplayPreparation(
+                    revision: revision
+                )
+            } catch {
+                guard !Task.isCancelled,
+                      self?.paintDisplayPreparationIsCurrent(revision) == true
+                else {
+                    try? await preparationContext
+                        .retryLayerDisplayCompletions()
+                    await preparationGate?.preparationDidRetire(
+                        revision: revision
+                    )
+                    return
+                }
+                await preparationGate?.preparationDidRetire(
+                    revision: revision
+                )
+                if !Task.isCancelled {
+                    self?.finishFailedPaintDisplayPreparation(
+                        error,
+                        snapshot: snapshot,
+                        revision: revision,
+                        demandCheckpoint: preparationDemandCheckpoint,
+                        in: view
+                    )
                 }
             }
         }
+    }
+
+    private func paintDisplayPreparationIsCurrent(
+        _ revision: CanvasPresentationRevision
+    ) -> Bool {
+        paintDisplayPreparationSequence == revision.sequence
+            && activePaintDisplayPreparationRevision == revision
+    }
+
+    private func installPreparedPaintDisplayIfCurrent(
+        _ submission: PreparedLayerCompositeDisplaySubmission,
+        snapshot: CanvasPresentationSnapshot,
+        revision: CanvasPresentationRevision
+    ) -> Bool {
+        guard paintDisplayPreparationIsCurrent(revision) else { return false }
+        preparedPaintDisplay = PreparedPaintDisplay(
+            snapshot: snapshot,
+            submission: submission
+        )
+        #if DEBUG
+        paintDisplayPublishedRevisions.append(revision)
+        #endif
+        interactiveFramePump.signal(.cachePublished(revision))
+        return true
+    }
+
+    private func finishSuccessfulPaintDisplayPreparation(
+        revision: CanvasPresentationRevision,
+        in view: MTKView
+    ) {
+        guard activePaintDisplayPreparationRevision == revision else { return }
+        paintDisplayPreparationTask = nil
+        activePaintDisplayPreparationRevision = nil
+        requestPaintDisplay(in: view)
+    }
+
+    private func finishCancelledPaintDisplayPreparation(
+        revision: CanvasPresentationRevision
+    ) {
+        guard activePaintDisplayPreparationRevision == revision else { return }
+        paintDisplayPreparationTask = nil
+        activePaintDisplayPreparationRevision = nil
+    }
+
+    private func finishFailedPaintDisplayPreparation(
+        _ error: any Error,
+        snapshot: CanvasPresentationSnapshot,
+        revision: CanvasPresentationRevision,
+        demandCheckpoint: UInt64,
+        in view: MTKView
+    ) {
+        guard paintDisplayPreparationIsCurrent(revision) else { return }
+        paintDisplayPreparationTask = nil
+        activePaintDisplayPreparationRevision = nil
+        if Self.isDeferredPaintDisplayPreparationFailure(error) {
+            pendingLatestPaintDisplaySnapshot = snapshot
+            if activePaintTransientSource?.acknowledgementStatus == .fulfilled {
+                activePaintTransientSource = nil
+                invalidatePaintDisplayPreparation()
+            }
+            return
+        }
+        paintCommandError = (error as? MetalRendererError)
+            ?? .commandFailed(error.localizedDescription)
+        let shouldContinue = interactiveFramePump.settleTerminalFailure(
+            upTo: revision,
+            since: demandCheckpoint
+        )
+        failActiveOperationIfNeeded(paintCommandError!)
+        if shouldContinue { requestPaintDisplay(in: view) }
     }
 
     public func suspendPaintDisplayPreparationForCapture(
@@ -3044,7 +3160,41 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     func shutdown(
         reason: DocumentPaintRenderContextShutdownReason
     ) async throws -> DocumentPaintRenderContextShutdownSnapshot {
-        try await paintContext.shutdown(reason: reason)
+        if let paintCommitTask {
+            if paintCommitPublicationState?.claimFailure() != false {
+                paintCommitTask.cancel()
+            }
+            await paintCommitTask.value
+        }
+        if let execution = activeStroke {
+            finishPaintStrokeFailure(
+                token: execution.token,
+                error: .commandFailed(
+                    "stroke cancelled during renderer shutdown"
+                )
+            )
+        }
+        var epochByIdentity = interactiveStrokeCacheLifecycleEpochObjects
+        if let activeEpoch = activeStrokeTileSurfaceResources?
+            .capability.presentationEpoch
+        {
+            epochByIdentity[activeEpoch.identity] = activeEpoch
+        }
+        for epoch in epochByIdentity.values {
+            InteractiveStrokeCacheLifecycleCoordinator.shared
+                .requestCancellation(
+                    cache: interactiveStrokePresentationCache,
+                    strokeEpoch: epoch
+                )
+        }
+        if activeStroke == nil, !isIdle {
+            _ = try await completePendingInteractiveStrokeAndAwaitIdle()
+        }
+        let snapshot = try await paintContext.shutdown(reason: reason)
+        guard activeStroke == nil, isIdle else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        return snapshot
     }
 
     /// Awaits a previously requested current stroke commit and returns only
@@ -3264,42 +3414,45 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     private func drainCompletedInteractiveOperationsCore() throws {
-        if interactiveStrokeCacheAcknowledgementRetryFailure != nil {
-            scheduleInteractiveStrokeCacheAcknowledgementRetry()
-        }
         try drainStrokePreparationResultsCore()
     }
 
     private func startPaintLifecyclePump() {
         guard paintLifecycleTask == nil else { return }
         paintLifecycleTask = Task { @MainActor [weak self] in
-            guard let self else { return }
             while !Task.isCancelled {
-                do {
-                    try self.drainStrokePreparationResultsCore()
-                } catch let error as MetalRendererError {
-                    self.failActiveOperationIfNeeded(error)
-                } catch {
-                    self.failActiveOperationIfNeeded(
-                        .commandFailed(error.localizedDescription)
-                    )
-                }
-                if self.activeStroke == nil,
-                   self.strokeWorkspaceState == .available,
-                   self.paintCommitTask == nil
-                {
-                    break
+                guard let shouldContinue = self?
+                    .performPaintLifecycleTurn()
+                else { return }
+                if !shouldContinue {
+                    self?.paintLifecycleTask = nil
+                    return
                 }
                 try? await Task.sleep(nanoseconds: 1_000_000)
             }
-            self.paintLifecycleTask = nil
+            self?.paintLifecycleTask = nil
         }
     }
 
-    private func drainStrokePreparationResultsCore() throws {
-        if interactiveStrokeCacheAcknowledgementRetryFailure != nil {
-            scheduleInteractiveStrokeCacheAcknowledgementRetry()
+    /// One non-suspending lifecycle turn. Keeping the strong renderer borrow
+    /// inside this call prevents the stored pump task from retaining Grid
+    /// across its bounded sleep when all external owners have disappeared.
+    private func performPaintLifecycleTurn() -> Bool {
+        do {
+            try drainStrokePreparationResultsCore()
+        } catch let error as MetalRendererError {
+            failActiveOperationIfNeeded(error)
+        } catch {
+            failActiveOperationIfNeeded(
+                .commandFailed(error.localizedDescription)
+            )
         }
+        return activeStroke != nil
+            || strokeWorkspaceState != .available
+            || paintCommitTask != nil
+    }
+
+    private func drainStrokePreparationResultsCore() throws {
         let ownsEventOperation = beginRendererEventOperationIfNeeded()
         defer {
             endRendererEventOperationIfNeeded(
@@ -3308,6 +3461,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
         }
         guard let bridge = strokePreparationBridge else { return }
+        // Cache completion returns the worker's one prepared-page credit
+        // before the MainActor terminal callback clears its task handle. A
+        // following page may therefore already be published. Leave it in the
+        // bounded mailbox until the prior adoption handoff is terminal.
+        guard interactiveStrokeCacheAdoptionTask == nil else { return }
         bridge.drainResults(into: &strokePreparationResultScratch)
         #if DEBUG
         let observesSyntheticZeroWorkAcknowledgement =
@@ -3365,9 +3523,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     if case let .retiring(generation) = strokeWorkspaceState,
                        generation == result.generation
                     {
-                        finishStrokeWorkspaceRetirement(
-                            generation: generation
-                        )
+                        if !strokeWorkspaceRetirementErrorWasReported {
+                            strokeWorkspaceRetirementErrorWasReported = true
+                            report(rendererError(for: failure))
+                        }
                         continue
                     }
                     throw rendererError(for: failure)
@@ -3418,38 +3577,59 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             eraserStrength: execution.style.eraserStrength
         )
         let token = execution.token
+        let context = paintContext
+        let capability = activeStrokeTileSurfaceResources?.capability
+        let publicationState = StrokeCommitPublicationState()
+        paintCommitPublicationState = publicationState
+        #if DEBUG
+        let commitGate = paintStrokeCommitGateForTesting
+        let injectedCommitFailure = paintStrokeCommitFailureForTesting
+        paintStrokeCommitFailureForTesting = nil
+        #endif
         paintCommitTask = Task { @MainActor [weak self] in
-            guard let self else {
-                if case let .source(source) = mutation {
-                    try? source.cancelUnclaimed()
-                }
-                return
-            }
             do {
+                #if DEBUG
+                await commitGate?.waitBeforeCommit()
+                if let injectedCommitFailure {
+                    throw injectedCommitFailure
+                }
+                #endif
+                try Task.checkCancellation()
                 let result = try await StrokeCommitter.commit(
                     mutation,
-                    context: self.paintContext,
-                    capability: self.activeStrokeTileSurfaceResources?
-                        .capability,
-                    parameters: parameters
+                    context: context,
+                    capability: capability,
+                    parameters: parameters,
+                    publicationState: publicationState
                 )
+                // StrokeCommitter returns only after the Context has
+                // irreversibly published its canonical revision and history.
+                // Cancellation beyond this linearization point must finalize
+                // that success; reporting a cancelled operation would invent
+                // a rollback that did not occur.
+                let revisionResidentBytes = await context.snapshot()
+                    .revisionResidentBytes
+                guard let self else { return }
                 guard let current = self.activeStroke,
                       current.token == token
                 else { throw MetalRendererError.invalidRendererOperationToken }
-                await self.refreshPaintRevisionResidentBytes()
+                self.paintRevisionResidentBytesState = revisionResidentBytes
                 self.finishPaintStrokeCommit(
                     result,
                     execution: current
                 )
             } catch is CancellationError {
-                self.finishPaintStrokeFailure(
+                if case let .source(source) = mutation {
+                    try? source.cancelUnclaimed()
+                }
+                self?.finishPaintStrokeFailure(
                     token: token,
                     error: .commandFailed("stroke commit cancelled")
                 )
             } catch let error as MetalRendererError {
-                self.finishPaintStrokeFailure(token: token, error: error)
+                self?.finishPaintStrokeFailure(token: token, error: error)
             } catch {
-                self.finishPaintStrokeFailure(
+                self?.finishPaintStrokeFailure(
                     token: token,
                     error: .commandFailed(error.localizedDescription)
                 )
@@ -3465,9 +3645,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         defer { notifyIdleStateIfChanged(from: wasIdle) }
         let runtimeEndEvents = endStrokeRuntimeIfPossible()
         activeStroke = nil
-        activeStrokeTileSurfaceResources = nil
         activePaintTransientSource = nil
         paintCommitTask = nil
+        paintCommitPublicationState = nil
         resetLiveState(invalidateStrokeEvents: false)
         setDocumentGeometryLocked(result.didPublish || documentDomainLocked)
         stageStrokeRuntimeEvents(runtimeEndEvents)
@@ -3491,13 +3671,20 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         token: RendererOperationToken,
         error: MetalRendererError
     ) {
+        guard activeStroke?.token == token else {
+            let wasIdle = isIdle
+            paintCommitTask = nil
+            paintCommitPublicationState = nil
+            notifyIdleStateIfChanged(from: wasIdle)
+            return
+        }
         let wasIdle = isIdle
         defer { notifyIdleStateIfChanged(from: wasIdle) }
         let runtimeEndEvents = endStrokeRuntimeIfPossible()
         activeStroke = nil
-        activeStrokeTileSurfaceResources = nil
         activePaintTransientSource = nil
         paintCommitTask = nil
+        paintCommitPublicationState = nil
         resetLiveState()
         stageStrokeRuntimeEvents(runtimeEndEvents)
         report(error)
@@ -3597,15 +3784,23 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     "interactive stroke cache sequence overflow"
                 )
             }
+            guard let transientLayerID = displayFrame.surface.layerID else {
+                throw MetalRendererError.invalidStrokeLifecycle
+            }
+            let parameters = try paintContext
+                .interactiveStrokeCompositeParameters(
+                    layerID: transientLayerID
+                )
             let update = try paintContext.makeTransientCacheUpdate(
                 frame: displayFrame,
                 sequence: sequence
             )
-            let parameters = try paintContext
-                .interactiveStrokeCompositeParameters(
-                    layerID: update.layerID
-                )
             nextInteractiveStrokeCacheSequence = nextSequence
+            let lifecycleIdentity = update.presentationEpoch.identity
+            interactiveStrokeCacheLifecycleEpochs.insert(lifecycleIdentity)
+            interactiveStrokeCacheLifecycleEpochObjects[lifecycleIdentity] =
+                update.presentationEpoch
+            lastInteractiveStrokeCacheLifecycleIdentity = lifecycleIdentity
             interactiveStrokeCacheAdoptionTask =
                 InteractiveStrokeCacheAdoptionOperation.start(
                     cache: interactiveStrokePresentationCache,
@@ -3626,10 +3821,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                             self.paintCommandError = rendererError
                             self.failActiveOperationIfNeeded(rendererError)
                         }
-                        if error != nil {
-                            self.scheduleInteractiveStrokeCacheAcknowledgementRetry()
-                        }
                         return true
+                    },
+                    lifecycleTerminal: { [weak self] _ in
+                        guard let self else { return }
+                        let wasIdle = self.isIdle
+                        self.interactiveStrokeCacheLifecycleEpochs.remove(
+                            lifecycleIdentity
+                        )
+                        self.interactiveStrokeCacheLifecycleEpochObjects
+                            .removeValue(forKey: lifecycleIdentity)
+                        self.notifyIdleStateIfChanged(from: wasIdle)
                     }
                 )
             pendingPaintHarnessDabCount = batch.logicalDabs.count
@@ -4324,6 +4526,18 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     var offMainPreparationWorkerTaskPriorityForTesting: TaskPriority? {
         warmedStrokePreparationBridge.mailbox.snapshot.workerTaskPriority
+    }
+
+    var offMainPreparationWorkerDriverForTesting: AnyObject? {
+        strokePreparationBridge?.workerDriverForTesting
+    }
+
+    var offMainPreparationWorkerTaskForTesting: Task<Void, Never>? {
+        strokePreparationBridge?.workerTaskForTesting
+    }
+
+    var offMainPreparationMailboxForTesting: StrokePreparationMailbox? {
+        strokePreparationBridge?.mailbox
     }
 
     var offMainPreparationMailboxSnapshotForTesting:
@@ -5267,6 +5481,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
               let generation = strokePreparationGeneration
         else {
             strokeWorkspaceState = .available
+            strokeWorkspaceRetirementErrorWasReported = false
             return false
         }
         switch strokeWorkspaceState {
@@ -5285,19 +5500,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 strokeEpoch: activeStrokeTileSurfaceResources?
                     .capability.presentationEpoch
             )
-            do {
-                try bridge.submitCancellation(
-                    generation: generation,
-                    reason: nil,
-                    frameDisposition: cancellationFrameDisposition
-                )
-            } catch {
-                report(
-                    .commandFailed(
-                        "stroke workspace cancellation failed: \(error)"
-                    )
-                )
-            }
+            bridge.submitCancellation(
+                generation: generation,
+                reason: nil,
+                frameDisposition: cancellationFrameDisposition
+            )
             strokeWorkspaceState = .retiring(generation)
             return true
         }
@@ -5314,71 +5521,38 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         strokePreparationGeneration = nil
         activeStrokeTileSurfaceResources = nil
         strokeWorkspaceState = .available
+        strokeWorkspaceRetirementErrorWasReported = false
         notifyIdleStateIfChanged(from: wasIdle)
     }
 
     private func beginInteractiveStrokeCacheRetirement(
-        strokeEpoch: DocumentPaintStrokePresentationEpoch?,
-        automaticRetryRemaining: Int = 1
+        strokeEpoch: DocumentPaintStrokePresentationEpoch?
     ) {
-        guard interactiveStrokeCacheRetirementTask == nil else { return }
         guard let strokeEpoch else { return }
-        interactiveStrokeCacheRetirementFailure = nil
-        interactiveStrokeCacheRetirementTask = Task {
-            @MainActor [weak self] in
-            guard let self else { return }
-            let wasIdle = self.isIdle
-            do {
-                try await self.interactiveStrokePresentationCache.cancel(
-                    strokeEpoch: strokeEpoch
-                )
-            } catch {
-                let retirementError = MetalRendererError.commandFailed(
-                    "interactive stroke cache retirement failed: \(error)"
-                )
-                self.interactiveStrokeCacheRetirementFailure = (
-                    strokeEpoch,
-                    retirementError
-                )
-                self.report(retirementError)
-            }
-            self.interactiveStrokeCacheRetirementTask = nil
-            if self.interactiveStrokeCacheRetirementFailure != nil,
-               automaticRetryRemaining > 0
-            {
-                self.beginInteractiveStrokeCacheRetirement(
-                    strokeEpoch: strokeEpoch,
-                    automaticRetryRemaining:
-                        automaticRetryRemaining - 1
-                )
-            } else if self.interactiveStrokeCacheRetirementFailure != nil {
-                await self.interactiveStrokePresentationCache
-                    .terminallyAbandonFailedRetirement(
-                        strokeEpoch: strokeEpoch
-                    )
-            }
-            self.notifyIdleStateIfChanged(from: wasIdle)
-        }
-    }
-
-    private func scheduleInteractiveStrokeCacheAcknowledgementRetry() {
-        guard interactiveStrokeCacheAcknowledgementRetryTask == nil else {
-            return
-        }
-        interactiveStrokeCacheAcknowledgementRetryFailure = nil
-        interactiveStrokeCacheAcknowledgementRetryTask = Task {
-            @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                try await self.interactiveStrokePresentationCache
-                    .retryPendingPreparedAcknowledgement()
-            } catch {
-                self.interactiveStrokeCacheAcknowledgementRetryFailure =
-                    (error as? MetalRendererError)
-                    ?? .commandFailed(error.localizedDescription)
-            }
-            self.interactiveStrokeCacheAcknowledgementRetryTask = nil
-        }
+        let identity = strokeEpoch.identity
+        let completionMailbox = strokePreparationBridge?.mailbox
+        interactiveStrokeCacheLifecycleEpochs.insert(identity)
+        interactiveStrokeCacheLifecycleEpochObjects[identity] = strokeEpoch
+        lastInteractiveStrokeCacheLifecycleIdentity = identity
+        InteractiveStrokeCacheLifecycleCoordinator.shared
+            .requestCancellation(
+                cache: interactiveStrokePresentationCache,
+                strokeEpoch: strokeEpoch,
+                lifecycleTerminal: { [weak self] _ in
+                    guard let self else { return }
+                    let wasIdle = self.isIdle
+                    self.interactiveStrokeCacheLifecycleEpochs.remove(identity)
+                    self.interactiveStrokeCacheLifecycleEpochObjects
+                        .removeValue(forKey: identity)
+                    self.notifyIdleStateIfChanged(from: wasIdle)
+                    completionMailbox?.recordExternalProgress()
+                },
+                failureTerminal: { [weak self] error in
+                    self?.report(.commandFailed(
+                        "interactive stroke cache retirement failed: \(error)"
+                    ))
+                }
+            )
     }
 
     func installInteractiveStrokeCacheFailureInjectionForTesting(
@@ -5389,20 +5563,25 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             .installFailureInjectionForTesting(failureInjection)
     }
 
+    #if DEBUG
+    func installInteractiveStrokeCacheCompletionGateForTesting(
+        _ gate: (any InteractiveStrokePresentationCacheCompletionGating)?
+    ) async {
+        await interactiveStrokePresentationCache
+            .installCompletionGateForTesting(gate)
+    }
+    #endif
+
     func awaitInteractiveStrokeCacheRetirementForHarness() async {
-        await interactiveStrokeCacheRetirementTask?.value
-        await interactiveStrokeCacheRetirementTask?.value
+        guard let identity = lastInteractiveStrokeCacheLifecycleIdentity else {
+            return
+        }
+        await InteractiveStrokeCacheLifecycleCoordinator.shared
+            .waitForLifecycle(identity)
     }
 
     func retryInteractiveStrokeCacheRetirementForHarness() async {
-        guard interactiveStrokeCacheRetirementTask == nil,
-              let failure = interactiveStrokeCacheRetirementFailure
-        else { return }
-        beginInteractiveStrokeCacheRetirement(
-            strokeEpoch: failure.strokeEpoch,
-            automaticRetryRemaining: 0
-        )
-        await interactiveStrokeCacheRetirementTask?.value
+        await awaitInteractiveStrokeCacheRetirementForHarness()
     }
 
     func interactiveStrokeCacheSnapshotForTesting() async
@@ -5411,23 +5590,63 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         await interactiveStrokePresentationCache.snapshot()
     }
 
+    func interactiveStrokePresentationCacheForTesting()
+        -> InteractiveStrokePresentationCache
+    {
+        interactiveStrokePresentationCache
+    }
+
+    func interactiveStrokeCacheLifecycleIdentityForTesting() -> UUID? {
+        lastInteractiveStrokeCacheLifecycleIdentity
+    }
+
     func installFailedInteractiveStrokeCacheUpdateForTesting(
         _ update: DocumentPaintTransientCacheUpdate,
-        parameters: InteractiveStrokeCompositeParameters
+        parameters: InteractiveStrokeCompositeParameters,
+        lifecycleTerminal: @escaping @MainActor @Sendable (
+            InteractiveStrokePresentationCacheSnapshot
+        ) -> Void = { _ in }
     ) async {
-        do {
-            _ = try await interactiveStrokePresentationCache.adopt(
-                update,
-                parameters: parameters
-            )
-        } catch {
-            interactiveStrokeCacheAcknowledgementRetryFailure =
-                .commandFailed(error.localizedDescription)
-        }
+        await startInteractiveStrokeCacheUpdateForTesting(
+            update,
+            parameters: parameters,
+            lifecycleTerminal: lifecycleTerminal
+        ).value
+    }
+
+    @discardableResult
+    func startInteractiveStrokeCacheUpdateForTesting(
+        _ update: DocumentPaintTransientCacheUpdate,
+        parameters: InteractiveStrokeCompositeParameters,
+        lifecycleTerminal: @escaping @MainActor @Sendable (
+            InteractiveStrokePresentationCacheSnapshot
+        ) -> Void = { _ in }
+    ) -> Task<Void, Never> {
+        let identity = update.presentationEpoch.identity
+        interactiveStrokeCacheLifecycleEpochs.insert(identity)
+        interactiveStrokeCacheLifecycleEpochObjects[identity] =
+            update.presentationEpoch
+        lastInteractiveStrokeCacheLifecycleIdentity = identity
+        return InteractiveStrokeCacheAdoptionOperation.start(
+            cache: interactiveStrokePresentationCache,
+            update: update,
+            parameters: parameters,
+            terminal: { _ in true },
+            lifecycleTerminal: { [weak self] snapshot in
+                self?.interactiveStrokeCacheLifecycleEpochs.remove(identity)
+                self?.interactiveStrokeCacheLifecycleEpochObjects
+                    .removeValue(forKey: identity)
+                lifecycleTerminal(snapshot)
+            }
+        )
     }
 
     func awaitInteractiveStrokeCacheAcknowledgementRetryForHarness() async {
-        await interactiveStrokeCacheAcknowledgementRetryTask?.value
+        guard let identity = lastInteractiveStrokeCacheLifecycleIdentity else {
+            return
+        }
+        await InteractiveStrokeCacheLifecycleCoordinator.shared
+            .waitForAcknowledgement(identity)
     }
 
     package func drainStrokeWorkspaceRetirementForHarness() throws {
@@ -5473,6 +5692,23 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
     }
 
+    #if DEBUG
+    func replaceAvailableStrokePreparationWorkspaceForTesting(
+        budget: DepositionFrameBudget,
+        cancellationCleanupFailures: [StrokeTileSurfaceError]
+    ) {
+        guard strokeWorkspaceState == .available else { return }
+        warmedStrokePreparationBridge = StrokePreparationBridge(
+            budget: budget,
+            targetFramesPerSecond: 120,
+            traceRecorder: interactiveBrushTraceRecorder,
+            testingSchedulerAcknowledgementFailures: [],
+            testingSchedulerCancellationCleanupFailures:
+                cancellationCleanupFailures
+        )
+    }
+    #endif
+
     func report(_ error: MetalRendererError) {
         lastError = error
         stageRendererEvent(.error(error))
@@ -5499,6 +5735,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             report(error)
             return false
         }
+        // Compete atomically with the transaction immediately before its
+        // irreversible canonical publication. If publication already owns
+        // the terminal result, the commit task must report that success.
+        if let publicationState = paintCommitPublicationState,
+           !publicationState.claimFailure()
+        {
+            return true
+        }
+        paintCommitTask?.cancel()
         let wasIdle = isIdle
         defer { notifyIdleStateIfChanged(from: wasIdle) }
         let runtimeEndEvents = endStrokeRuntimeIfPossible()
