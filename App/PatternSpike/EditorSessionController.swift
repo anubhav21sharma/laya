@@ -957,7 +957,9 @@ final class EditorSessionController {
 
         var candidate = layerStack
         let removal = try candidate.delete(id)
-        let revision = try renderer.applyLayerStack(candidate)
+        guard let revision = try renderer.applyLayerStack(candidate) else {
+            throw LayerStackError.invalidRestoration
+        }
         let command = DocumentHistoryCommand.layerDeletion(
             LayerDeletionHistoryCommand(
                 removal: removal,
@@ -1026,7 +1028,9 @@ final class EditorSessionController {
         var candidate = layerStack
         try mutation(&candidate)
         guard candidate != layerStack else { return }
-        let revision = try renderer.applyLayerStack(candidate)
+        guard let revision = try renderer.applyLayerStack(candidate) else {
+            throw LayerStackError.invalidRestoration
+        }
         let command = DocumentHistoryCommand.layerMetadata(
             LayerStackMetadataCommand(
                 before: layerStack.snapshot,

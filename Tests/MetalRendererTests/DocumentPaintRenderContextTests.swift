@@ -80,7 +80,8 @@ struct DocumentPaintRenderContextTests {
         #expect(after.geometryRevision == before.geometryRevision)
         #expect(after.layerStackRevision == before.layerStackRevision + 1)
         #expect(after.compositeRevision == before.compositeRevision + 1)
-        try await fixture.context.releaseRevisions([result.revision.id])
+        let revision = try #require(result.revision)
+        try await fixture.context.releaseRevisions([revision.id])
     }
 
     @Test
@@ -106,6 +107,145 @@ struct DocumentPaintRenderContextTests {
         #expect(fixture.context.layerStack != target)
         #expect(await fixture.context.snapshot().documentGeneration
             == beforeGeneration)
+    }
+
+    @Test
+    @MainActor
+    func identicalLayerStackIsNoOpWithoutHistoryOrIdentityAdvance()
+        async throws
+    {
+        guard let fixture = try makeFixture(size: 64) else { return }
+        let context = fixture.context
+        let beforeIdentity = context.canonicalStateIdentity()
+        let beforeSnapshot = await context.snapshot()
+
+        let result = try context.applyLayerStack(context.layerStack)
+
+        #expect(!result.didPublish)
+        #expect(result.revision == nil)
+        #expect(context.canonicalStateIdentity() == beforeIdentity)
+        let afterSnapshot = await context.snapshot()
+        #expect(afterSnapshot.documentGeneration
+            == beforeSnapshot.documentGeneration)
+        #expect(afterSnapshot.revisionResidentBytes
+            == beforeSnapshot.revisionResidentBytes)
+    }
+
+    @Test
+    @MainActor
+    func identicalLayerStackAtMaxRevisionsDoesNotOverflow() async throws {
+        guard let fixture = try makeFixture(
+            size: 64,
+            layerStackRevision: .max,
+            compositeRevision: .max
+        ) else { return }
+        let before = fixture.context.canonicalStateIdentity()
+
+        let result = try fixture.context.applyLayerStack(
+            fixture.context.layerStack
+        )
+
+        #expect(!result.didPublish)
+        #expect(result.revision == nil)
+        #expect(fixture.context.canonicalStateIdentity() == before)
+    }
+
+    @Test
+    @MainActor
+    func restoringAlreadyActiveLayerAndRasterEndpointsIsNoOp() async throws {
+        guard let fixture = try makeFixture(size: 2) else { return }
+        let context = fixture.context
+        var target = context.layerStack
+        try target.setOpacity(fixture.layerID, opacity: 0.5)
+        let layerChange = try context.applyLayerStack(target)
+        let layerRevision = try #require(layerChange.revision)
+        let firstLayerRestore = try context.restoreLayerStack(
+            layerRevision,
+            endpoint: .before
+        )
+        #expect(firstLayerRestore.didPublish)
+        let beforeRepeatedLayer = context.canonicalStateIdentity()
+        let layerSnapshot = await context.snapshot()
+
+        let repeatedLayerRestore = try context.restoreLayerStack(
+            layerRevision,
+            endpoint: .before
+        )
+
+        #expect(!repeatedLayerRestore.didPublish)
+        #expect(context.canonicalStateIdentity() == beforeRepeatedLayer)
+        #expect(await context.snapshot().documentGeneration
+            == layerSnapshot.documentGeneration)
+
+        let geometry = beforeRepeatedLayer.geometry
+        _ = try await context.importEncodedBGRA8(
+            candidateGeometry: geometry,
+            input: .singleRaster(.init(
+                width: 2,
+                height: 2,
+                bytesPerRow: 8,
+                bytes: Data([
+                    0, 0, 255, 255, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0,
+                ])
+            ))
+        )
+        let cleared = try await context.clear()
+        let pair = try #require(cleared.historyPair)
+        let firstRasterRestore = try await context.restorePublishedRevision(
+            pair.before,
+            targetGeometry: geometry
+        )
+        #expect(firstRasterRestore.didPublish)
+        let beforeRepeatedRaster = context.canonicalStateIdentity()
+        let rasterSnapshot = await context.snapshot()
+
+        let repeatedRasterRestore = try await context
+            .restorePublishedRevision(pair.before, targetGeometry: geometry)
+
+        #expect(!repeatedRasterRestore.didPublish)
+        #expect(context.canonicalStateIdentity() == beforeRepeatedRaster)
+        #expect(await context.snapshot().documentGeneration
+            == rasterSnapshot.documentGeneration)
+        try await context.releaseRevisions(pair.revisionIDs)
+        try await context.releaseRevisions([layerRevision.id])
+    }
+
+    @Test
+    @MainActor
+    func releasedActiveRasterEndpointIsNotAcceptedAsNoOp() async throws {
+        guard let fixture = try makeFixture(size: 2) else { return }
+        let context = fixture.context
+        let geometry = context.canonicalStateIdentity().geometry
+        _ = try await context.importEncodedBGRA8(
+            candidateGeometry: geometry,
+            input: .singleRaster(.init(
+                width: 2,
+                height: 2,
+                bytesPerRow: 8,
+                bytes: Data([
+                    0, 0, 255, 255, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0,
+                ])
+            ))
+        )
+        let cleared = try await context.clear()
+        let pair = try #require(cleared.historyPair)
+        _ = try await context.restorePublishedRevision(
+            pair.before,
+            targetGeometry: geometry
+        )
+        try await context.releaseRevisions(pair.revisionIDs)
+
+        await #expect(
+            throws: DocumentPaintSurfaceTransactionError
+                .restoreReferenceUnavailable
+        ) {
+            _ = try await context.restorePublishedRevision(
+                pair.before,
+                targetGeometry: geometry
+            )
+        }
     }
 
     @Test
@@ -148,7 +288,8 @@ struct DocumentPaintRenderContextTests {
         #expect(resizedIdentity.documentGeneration
             == initial.documentGeneration)
 
-        _ = try context.restoreLayerStack(resized.revision, endpoint: .before)
+        let resizeRevision = try #require(resized.revision)
+        _ = try context.restoreLayerStack(resizeRevision, endpoint: .before)
         let restored = context.canonicalStateIdentity()
         #expect(restored.geometry == initial.geometry)
         #expect(restored.geometryRevision == resizedIdentity.geometryRevision + 1)
@@ -157,7 +298,7 @@ struct DocumentPaintRenderContextTests {
         #expect(restored.compositeRevision
             == resizedIdentity.compositeRevision + 1)
         #expect(restored != initial)
-        try await context.releaseRevisions([resized.revision.id])
+        try await context.releaseRevisions([resizeRevision.id])
     }
 
     @Test
@@ -273,7 +414,8 @@ struct DocumentPaintRenderContextTests {
         try context.cancelStrokeSurface(capability)
         let result = try context.applyLayerStack(target)
         #expect(result.after == target)
-        try await context.releaseRevisions([result.revision.id])
+        let revision = try #require(result.revision)
+        try await context.releaseRevisions([revision.id])
     }
 
     @Test
@@ -283,14 +425,15 @@ struct DocumentPaintRenderContextTests {
         var target = fixture.context.layerStack
         try target.rename(fixture.layerID, to: "Renamed")
         let result = try fixture.context.applyLayerStack(target)
-        #expect(fixture.context.containsLayerRevision(result.revision.id))
+        let revision = try #require(result.revision)
+        #expect(fixture.context.containsLayerRevision(revision.id))
 
         let shutdown = try await fixture.context.shutdown(
             reason: .sessionReplacement
         )
 
         #expect(shutdown.isComplete)
-        #expect(!fixture.context.containsLayerRevision(result.revision.id))
+        #expect(!fixture.context.containsLayerRevision(revision.id))
         #expect(await fixture.context.snapshot().revisionResidentBytes == 0)
     }
 
@@ -366,7 +509,8 @@ struct DocumentPaintRenderContextTests {
             try await context.resize(to: resizedGeometry)
         )
         #expect(resized.generation == 12)
-        try await context.releaseRevisions([resized.revision.id])
+        let revision = try #require(resized.revision)
+        try await context.releaseRevisions([revision.id])
         try await context.retryTransactionCleanup()
 
         let output = try await context.collectStableFiniteCanonical(

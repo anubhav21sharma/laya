@@ -1245,6 +1245,29 @@ final class LayerSurfaceHistoryRevision: @unchecked Sendable, Equatable {
     deinit { close() }
 }
 
+extension DocumentPaintSurfaceStore {
+    func currentStateMatches(
+        _ revision: LayerSurfaceHistoryRevision,
+        endpoint: LayerSurfaceRevisionEndpoint
+    ) -> Bool {
+        let target: LayerSurfaceHistoryRevision.Endpoint
+        switch endpoint {
+        case .before: target = revision.before
+        case .after: target = revision.after
+        }
+        return withLock {
+            let epoch = currentEpoch
+            return revision.registryIdentity == identity
+                && revision.storeIdentity == sharedTileStore.identity
+                && epoch.geometry == target.geometry
+                && epoch.layerStack == target.layerStack
+                && epoch.layerStates == target.layerStates
+                && epoch.persistedTileIdentities
+                    == target.persistedTileIdentities
+        }
+    }
+}
+
 /// One immutable, coherently published document registry state. Readers copy
 /// this single reference under the registry lock, so generation, geometry,
 /// layer order, and layer contents can never originate from different commits.

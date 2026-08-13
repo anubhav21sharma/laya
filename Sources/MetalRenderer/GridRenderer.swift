@@ -841,7 +841,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 proposed.compiledSymmetry.domain.finite?.radial.configuration
         )
         if let result {
-            try await paintContext.releaseRevisions([result.revision.id])
+            guard let revision = result.revision else {
+                throw MetalRendererError.commandFailed(
+                    "Published geometry change has no history revision."
+                )
+            }
+            try await paintContext.releaseRevisions([revision.id])
         }
         await refreshPaintRevisionResidentBytes()
         tilingStrategy = proposed
@@ -2253,9 +2258,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     public func applyLayerStack(
         _ layerStack: LayerStack
-    ) throws -> LayerSurfaceRevisionReference {
+    ) throws -> LayerSurfaceRevisionReference? {
         let result = try paintContext.applyLayerStack(layerStack)
-        invalidatePaintDisplayPreparation()
+        if result.didPublish {
+            invalidatePaintDisplayPreparation()
+        }
         return result.revision
     }
 
@@ -2375,6 +2382,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             await refreshPaintRevisionResidentBytes()
             installPaintGeometry(strategy: strategy)
             if let result {
+                guard let revision = result.revision else {
+                    throw MetalRendererError.commandFailed(
+                        "Published geometry change has no history revision."
+                    )
+                }
                 stageRendererEvent(.operationCompleted(
                     .layerGeometrySuccess(LayerGeometryMutationReceipt(
                         token: token,
@@ -2382,7 +2394,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                             result.beforeGeometry.documentPixelSize,
                         afterPixelSize:
                             result.afterGeometry.documentPixelSize,
-                        revision: result.revision
+                        revision: revision
                     ))
                 ))
             } else {

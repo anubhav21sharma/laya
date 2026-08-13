@@ -134,13 +134,14 @@ private final class DocumentPaintCanonicalRevisionReservation:
 }
 
 struct DocumentPaintLayerApplicationResult: Equatable, Sendable {
+    let didPublish: Bool
     let before: LayerStack
     let after: LayerStack
     let beforeGeometry: DocumentPaintGeometry
     let afterGeometry: DocumentPaintGeometry
     let baseGeneration: UInt64
     let generation: UInt64
-    let revision: LayerSurfaceRevisionReference
+    let revision: LayerSurfaceRevisionReference?
 }
 
 struct DocumentPaintTransientDisplaySource: @unchecked Sendable {
@@ -667,6 +668,7 @@ final class DocumentPaintRenderContext {
     private var compositeRevision: UInt64 = 0
     private var activeCanonicalReservation:
         DocumentPaintCanonicalRevisionReservation?
+    private var activeRasterEndpoint: RasterRevisionReference?
     private var layerHistoryRevisions:
         [StoredRasterRevisionID: LayerSurfaceHistoryRevision] = [:]
     private var layerHistoryResidentBytes = 0
@@ -877,6 +879,7 @@ final class DocumentPaintRenderContext {
                 preconditionFailure("Published mutation lost revision reservation")
             }
             identity = publishCanonicalRevisionAdvance(prepared)
+            activeRasterEndpoint = result.historyPair?.after
         } else {
             identity = canonicalStateIdentity()
         }
@@ -1241,6 +1244,7 @@ final class DocumentPaintRenderContext {
                 preconditionFailure("Native import lost revision reservation")
             }
             _ = publishCanonicalRevisionAdvance(prepared)
+            activeRasterEndpoint = nil
         } catch {
             do {
                 try writer.cancel()
@@ -1503,6 +1507,19 @@ final class DocumentPaintRenderContext {
     ) throws -> DocumentPaintLayerApplicationResult {
         let claim = try beginCommandOperation()
         defer { finishCommandOperation(claim) }
+        let current = registry.snapshot()
+        if target == current.layerStack {
+            return DocumentPaintLayerApplicationResult(
+                didPublish: false,
+                before: current.layerStack,
+                after: current.layerStack,
+                beforeGeometry: current.geometry,
+                afterGeometry: current.geometry,
+                baseGeneration: current.generation,
+                generation: current.generation,
+                revision: nil
+            )
+        }
         let transaction = try registry.prepareLayerSurfaceTransaction(
             layerStack: target
         )
@@ -1563,10 +1580,12 @@ final class DocumentPaintRenderContext {
             preconditionFailure("Layer transaction lost revision reservation")
         }
         _ = publishCanonicalRevisionAdvance(prepared)
+        activeRasterEndpoint = nil
         nextLayerRevisionID += 1
         layerHistoryRevisions[id] = receipt.historyRevision
         layerHistoryResidentBytes = nextResidentBytes
         return DocumentPaintLayerApplicationResult(
+            didPublish: true,
             before: receipt.before,
             after: receipt.after,
             beforeGeometry: beforeGeometry,
@@ -1592,6 +1611,19 @@ final class DocumentPaintRenderContext {
             throw DocumentPaintRenderContextError
                 .missingLayerHistoryRevision(reference.id)
         }
+        if registry.currentStateMatches(revision, endpoint: endpoint) {
+            let current = registry.snapshot()
+            return DocumentPaintLayerApplicationResult(
+                didPublish: false,
+                before: current.layerStack,
+                after: current.layerStack,
+                beforeGeometry: current.geometry,
+                afterGeometry: current.geometry,
+                baseGeneration: current.generation,
+                generation: current.generation,
+                revision: reference
+            )
+        }
         let targetGeometry = revision.geometry(for: endpoint)
         let beforeGeometry = registry.geometry
         let canonicalReservation = canonicalRevisionReservation(
@@ -1607,7 +1639,9 @@ final class DocumentPaintRenderContext {
             preconditionFailure("Layer restore lost revision reservation")
         }
         _ = publishCanonicalRevisionAdvance(prepared)
+        activeRasterEndpoint = nil
         return DocumentPaintLayerApplicationResult(
+            didPublish: true,
             before: receipt.before,
             after: receipt.after,
             beforeGeometry: beforeGeometry,
@@ -1687,6 +1721,18 @@ final class DocumentPaintRenderContext {
             reference: reference,
             targetGeometry: targetGeometry
         )
+        if activeRasterEndpoint == reference,
+           targetGeometry == canonicalGeometry {
+            let generation = registry.snapshot().generation
+            return DocumentPaintSurfaceRestoreResult(
+                didPublish: false,
+                layerID: reference.layerID,
+                beforeGeneration: generation,
+                afterGeneration: generation,
+                reference: reference,
+                restoredCoordinates: []
+            )
+        }
         let geometryChanges = targetGeometry != registry.geometry
         let canonicalReservation = canonicalRevisionReservation(
             geometry: geometryChanges,
@@ -1703,6 +1749,7 @@ final class DocumentPaintRenderContext {
                 preconditionFailure("Raster restore lost revision reservation")
             }
             _ = publishCanonicalRevisionAdvance(prepared)
+            activeRasterEndpoint = reference
         }
         return result
     }
@@ -1724,6 +1771,10 @@ final class DocumentPaintRenderContext {
         let rasterRevisionIDs = revisionIDs.subtracting(layerRevisionIDs)
         if !rasterRevisionIDs.isEmpty {
             try await transactionWorker.releaseRevisions(rasterRevisionIDs)
+            if let activeRasterEndpoint,
+               rasterRevisionIDs.contains(activeRasterEndpoint.id) {
+                self.activeRasterEndpoint = nil
+            }
         }
         for id in layerRevisionIDs {
             guard let revision = layerHistoryRevisions.removeValue(forKey: id)

@@ -38,6 +38,20 @@ private func makeResizeRenderer(pixelSize: PixelSize) throws -> GridRenderer? {
 
 @Test
 @MainActor
+func identicalRendererLayerStackApplicationIsSuccessfulNoOp() throws {
+    guard let renderer = try makeResizeRenderer(
+        pixelSize: PixelSize(width: 64, height: 64)
+    ) else { return }
+    let before = renderer.paintCanonicalStateIdentityForTesting()
+
+    let revision = try renderer.applyLayerStack(renderer.layerStack)
+
+    #expect(revision == nil)
+    #expect(renderer.paintCanonicalStateIdentityForTesting() == before)
+}
+
+@Test
+@MainActor
 func currentResizeShrinkCropsOnlyRightAndBottomBytes() async throws {
     let oldSize = PixelSize(width: 96, height: 80)
     let newSize = PixelSize(width: 64, height: 64)

@@ -300,6 +300,7 @@ public struct DocumentPaintSurfaceCommitResult: Equatable, Sendable {
 }
 
 public struct DocumentPaintSurfaceRestoreResult: Equatable, Sendable {
+    public let didPublish: Bool
     public let layerID: UUID
     public let beforeGeneration: UInt64
     public let afterGeneration: UInt64
@@ -1467,6 +1468,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                     .registryPreparationFailed
             }
             current.result = DocumentPaintSurfaceRestoreResult(
+                didPublish: true,
                 layerID: current.layerID,
                 beforeGeneration: current.baseGeneration,
                 afterGeneration: current.candidate.generation,
@@ -2387,14 +2389,20 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                 throw DocumentPaintSurfaceTransactionError
                     .terminalPreflightFailed
             }
+            let publishedDirtyCoordinates = Set(
+                current.dirtyCoordinates + current.removedCoordinates
+            ).filter {
+                (try? PaintTileDescriptor(
+                    coordinate: $0,
+                    logicalPixelSize:
+                        current.candidateGeometry.storagePixelSize
+                )) != nil
+            }.sorted()
             let result = DocumentPaintSurfaceCommitResult(
                 layerID: current.layerID,
                 beforeGeneration: current.baseGeneration,
                 afterGeneration: current.candidate.generation,
-                dirtyCoordinates: Set(
-                    current.dirtyCoordinates
-                        + current.removedCoordinates
-                ).sorted(),
+                dirtyCoordinates: publishedDirtyCoordinates,
                 historyPair: current.revisionPair
             )
             let prepared: DocumentPaintPreparedCommit

@@ -134,3 +134,121 @@ Commit SHA: `0222c88293de7d2ffd1ccdea08ae30c4cdddc7cc`
 The unbounded full-package run is currently unsuitable as a signal on this host
 because unrelated GPU/resource-heavy suites contend in parallel. The exact
 Task 2 suites and all new regressions are clean.
+
+---
+
+# Task 2 fix round 1
+
+## Files changed
+
+- `Sources/MetalRenderer/Raster/DocumentPaintSurfaceTransaction.swift`
+- `Sources/MetalRenderer/Raster/DocumentPaintRenderContext.swift`
+- `Sources/MetalRenderer/Raster/DocumentPaintSurfaceStore.swift`
+- `Sources/MetalRenderer/GridRenderer.swift`
+- `App/PatternSpike/EditorSessionController.swift`
+- `Tests/MetalRendererTests/DocumentPaintSurfaceTransactionTests.swift`
+- `Tests/MetalRendererTests/DocumentPaintRenderContextTests.swift`
+- `Tests/MetalRendererTests/RendererResizeTests.swift`
+
+## RED evidence
+
+1. Shrinking-import dirty bounds:
+
+   `swift test --filter 'shrinkingImportPublishesOnlyDirtiesInsideResultGeometry'`
+
+   The regression failed because the result published coordinates `(0, 0)` and
+   `(1, 0)` after shrinking to a one-tile-wide geometry; constructing a
+   descriptor for `(1, 0)` threw
+   `coordinateOutsideSurface(PaintTileCoordinate(x: 1, y: 0))`.
+
+2. Identical stack and already-active endpoint no-ops:
+
+   The new context regressions initially failed to compile because
+   `DocumentPaintLayerApplicationResult` and
+   `DocumentPaintSurfaceRestoreResult` could not express `didPublish == false`,
+   and the layer revision was non-optional. This established that the result
+   contract could not accurately represent non-publication before production
+   edits.
+
+3. Review integration regressions:
+
+   `swift test --filter 'identicalRendererLayerStackApplicationIsSuccessfulNoOp|releasedActiveRasterEndpointIsNotAcceptedAsNoOp'`
+
+   Both tests failed as intended: the renderer wrapper threw
+   `LayerStackError.invalidRestoration` for a successful identical-stack no-op,
+   and restoring a released-but-tracked active raster endpoint returned success
+   instead of reporting the unavailable revision.
+
+## Implementation decisions
+
+- Geometry-changing transaction dirties are sorted and deduplicated, then
+  filtered against the resulting storage geometry. Old-geometry removals that
+  are outside the result are represented by the canonical geometry identity
+  change rather than published as invalid new-geometry coordinates.
+- Identical layer-stack application compares state before reserving revisions or
+  preparing a history transaction and returns `didPublish == false`, unchanged
+  generation/geometry/stack, no history revision, and unchanged canonical
+  identity. This path remains valid at `UInt64.max`.
+- Layer endpoint restoration compares the registry's complete physical endpoint
+  state before reservation. Repeating the already-active endpoint returns a
+  non-publishing result.
+- Raster endpoint identity is tracked by the context only. Repeating the active
+  endpoint returns an empty non-publishing restore result; mutations that
+  supersede it and releases containing its revision ID invalidate the marker.
+- `GridRenderer.applyLayerStack` now exposes the optional revision so a no-op is
+  successful. Editor history call sites already reject identical candidate
+  stacks; they defensively require a revision before recording history.
+
+## GREEN evidence
+
+1. Required finding regressions:
+
+   `swift test --filter 'shrinkingImportPublishesOnlyDirtiesInsideResultGeometry|identicalLayerStackIsNoOpWithoutHistoryOrIdentityAdvance|identicalLayerStackAtMaxRevisionsDoesNotOverflow|restoringAlreadyActiveLayerAndRasterEndpointsIsNoOp'`
+
+   Result: 4 tests passed, 0 failures, 0.092 seconds.
+
+2. Final exact regressions, including review edge cases:
+
+   `swift test --filter 'shrinkingImportPublishesOnlyDirtiesInsideResultGeometry|identicalLayerStackIsNoOpWithoutHistoryOrIdentityAdvance|identicalLayerStackAtMaxRevisionsDoesNotOverflow|restoringAlreadyActiveLayerAndRasterEndpointsIsNoOp|identicalRendererLayerStackApplicationIsSuccessfulNoOp|releasedActiveRasterEndpointIsNotAcceptedAsNoOp'`
+
+   Result: 6 tests passed, 0 failures, 0.097 seconds.
+
+3. Final focused verification:
+
+   `swift test --filter 'DocumentPaintSurfaceTransactionTests|DocumentPaintRenderContextTests|RendererResizeTests'`
+
+   Result: 135 tests passed, 0 failures, 3.339 seconds. The original selected
+   suite contained 129 tests; the four requested regressions and two review
+   regressions account for the new total.
+
+   Per the fix-round instruction, the unbounded parallel full suite was not
+   rerun.
+
+## Self-review and mutation check
+
+- Removing result-geometry dirty filtering reproduces the out-of-bounds shrink
+  failure while preserving the in-bounds changed coordinate.
+- Moving equality checks after reservation reproduces identity overflow at max
+  counters and creates unwanted history/generation publication.
+- Removing full registry endpoint equality makes repeated layer restoration
+  publish again; removing raster endpoint tracking does the same for raster
+  restoration.
+- Keeping the active raster marker after revision release makes an unavailable
+  reference appear valid; the review regression detects this.
+- Converting the renderer no-op to an error is detected at the public wrapper.
+- Independent review found these two integration issues after the initial fix;
+  both received focused RED regressions and are now GREEN.
+
+## Diff check and concerns
+
+- `git diff --check`: clean.
+- Scope reviewed against fix round 1; no snapshots or presentation caches were
+  added, and the repair plan was not edited.
+- Preserved unrelated untracked `.vscode/` and
+  `brushes/procreate/1_FREE_Charcoal_Set.key`.
+- No implementation concerns. The broad-suite host contention concern from the
+  original Task 2 report remains unchanged.
+
+## Commit
+
+Fix-round commit SHA is recorded in the final handoff.

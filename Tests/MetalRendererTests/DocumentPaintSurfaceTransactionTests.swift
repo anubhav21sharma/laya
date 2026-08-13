@@ -2149,6 +2149,44 @@ struct DocumentPaintSurfaceTransactionTests {
     }
 
     @Test
+    func shrinkingImportPublishesOnlyDirtiesInsideResultGeometry() throws {
+        guard let fixture = try TransactionFixture.make(width: 512, height: 256)
+        else { return }
+        let retained = PaintTileCoordinate(x: 0, y: 0)
+        let cropped = PaintTileCoordinate(x: 1, y: 0)
+        try transactionSeedActive(fixture, coordinates: [retained, cropped])
+        let target = try transactionGeometry(width: 256, height: 256)
+        let bytes = Data(
+            repeating: 255,
+            count: target.storagePixelSize.width
+                * target.storagePixelSize.height * 4
+        )
+
+        let result = try transactionCommitEncodedImport(
+            fixture,
+            request: try transactionValidatedImportRequest(
+                layerID: fixture.layerID,
+                geometry: target,
+                width: target.storagePixelSize.width,
+                height: target.storagePixelSize.height,
+                bytesPerRow: target.storagePixelSize.width * 4,
+                bytes: bytes
+            )
+        )
+
+        #expect(result.dirtyCoordinates == [retained])
+        for coordinate in result.dirtyCoordinates {
+            _ = try PaintTileDescriptor(
+                coordinate: coordinate,
+                logicalPixelSize: target.storagePixelSize
+            )
+        }
+        #expect(fixture.registry.snapshot().geometry == target)
+        #expect(fixture.registry.snapshot().layers[0].references
+            .map(\.coordinate) == [retained])
+    }
+
+    @Test
     func encodedImportFailuresRestoreExactBaselineAndAllowImmediateReuse() throws {
         guard let reserve = try TransactionFixture.make(width: 1, height: 1)
         else { return }
