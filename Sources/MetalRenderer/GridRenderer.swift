@@ -264,6 +264,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private var strokeEventGeneration: UInt64?
     private var telemetryEventGeneration: UInt64?
     private var strokeRuntimeController: StrokeRuntimeProductionController?
+    private let interactiveBrushTraceRecorder =
+        InteractiveBrushTraceRecorder()
+    private struct PendingInteractiveBrushInputTrace {
+        let sample: StrokeSample
+        let lineage: InteractiveBrushInputTrace
+    }
+    private var pendingInteractiveBrushInputTraces:
+        [PendingInteractiveBrushInputTrace] = []
     struct StrokeRuntimeFrameIdentity: Hashable {
         let telemetryGeneration: UInt64
         let frameID: UInt64
@@ -281,6 +289,41 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
     public var strokeRuntimeRecordedEvidence: StrokeRuntimeRecordedEvidence? {
         strokeRuntimeController?.recordedEvidence
+    }
+
+    public func configureInteractiveBrushTrace(
+        sink: (any InteractiveBrushTraceSink)?
+    ) {
+        pendingInteractiveBrushInputTraces.removeAll(keepingCapacity: true)
+        interactiveBrushTraceRecorder.configure(sink: sink)
+    }
+
+    public func recordInteractiveBrushInputReceipt(
+        sample: StrokeSample,
+        identity: StrokeTraceIdentity,
+        monotonicNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds
+    ) {
+        guard interactiveBrushTraceRecorder.isEnabled else { return }
+        if sample.phase == .began {
+            pendingInteractiveBrushInputTraces.removeAll(keepingCapacity: true)
+        } else if pendingInteractiveBrushInputTraces.count == 8_192 {
+            pendingInteractiveBrushInputTraces.removeFirst()
+        }
+        let lineage = InteractiveBrushInputTrace(
+            identity: identity,
+            eventReceiptMonotonicNanoseconds: monotonicNanoseconds
+        )
+        pendingInteractiveBrushInputTraces.append(
+            PendingInteractiveBrushInputTrace(
+                sample: sample,
+                lineage: lineage
+            )
+        )
+        interactiveBrushTraceRecorder.record(
+            stage: .eventReceived,
+            lineage: lineage,
+            monotonicNanoseconds: monotonicNanoseconds
+        )
     }
 
     public func configureStrokeRuntimeTelemetry(
@@ -640,7 +683,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         activeStrokeTileSurfaceResources = nil
         warmedStrokePreparationBridge = StrokePreparationBridge(
             budget: frameBudget,
-            targetFramesPerSecond: 120
+            targetFramesPerSecond: 120,
+            traceRecorder: interactiveBrushTraceRecorder
         )
         activeDrawBrush = nil
         activeEraserBrush = nil
@@ -1171,7 +1215,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     ),
                     samples: [sample]
                 ),
-                using: bridge
+                using: bridge,
+                traceLineage: takeInteractiveBrushTraceLineage(for: sample)
             )
             startPaintLifecyclePump()
             stageStrokeRuntimeEvents(runtimeBeginEvents)
@@ -1218,7 +1263,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     generation: generation,
                     sample: sample
                 ),
-                using: bridge
+                using: bridge,
+                traceLineage: takeInteractiveBrushTraceLineage(for: sample)
             )
         } else {
             try appendAuthoritativeStroke(token: token, sample: sample)
@@ -1375,7 +1421,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 samples: samples,
                 acceptedCount: submittedSampleCount
             ),
-            using: bridge
+            using: bridge,
+            traceLineage: samples.compactMap {
+                takeInteractiveBrushTraceLineage(for: $0).first
+            }
         )
     }
 
@@ -1436,7 +1485,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 samples: Array(samples),
                 acceptedCount: samples.count
             ),
-            using: bridge
+            using: bridge,
+            traceLineage: samples.compactMap {
+                takeInteractiveBrushTraceLineage(for: $0).first
+            }
         )
     }
 
@@ -1459,7 +1511,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 generation: generation,
                 sample: sample
             ),
-            using: bridge
+            using: bridge,
+            traceLineage: takeInteractiveBrushTraceLineage(for: sample)
         )
     }
 
@@ -1517,7 +1570,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         try submitStrokeInput(
             .finish(generation: generation, samples: [sample]),
-            using: bridge
+            using: bridge,
+            traceLineage: takeInteractiveBrushTraceLineage(for: sample)
         )
         activeStroke?.isFinishedTransiently = true
         operationSucceeded = true
@@ -1579,7 +1633,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 generation: generation,
                 sample: sample
             ),
-            using: bridge
+            using: bridge,
+            traceLineage: takeInteractiveBrushTraceLineage(for: sample)
         )
         operationSucceeded = true
     }
@@ -1644,10 +1699,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     @discardableResult
     private func submitStrokeInput(
         _ message: StrokeInputMessage,
-        using bridge: StrokePreparationBridge
+        using bridge: StrokePreparationBridge,
+        traceLineage: [InteractiveBrushInputTrace] = []
     ) throws -> StrokeInputAdmission {
         do {
-            return try bridge.submit(message)
+            return try bridge.submit(
+                message,
+                traceLineage: traceLineage
+            )
         } catch let error as StrokeInputQueueError {
             let rendererError: MetalRendererError
             switch error {
@@ -1666,6 +1725,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             failActiveOperationIfNeeded(rendererError)
             throw rendererError
         }
+    }
+
+    private func takeInteractiveBrushTraceLineage(
+        for sample: StrokeSample
+    ) -> [InteractiveBrushInputTrace] {
+        guard let index = pendingInteractiveBrushInputTraces.firstIndex(
+            where: { $0.sample == sample }
+        ) else { return [] }
+        return [pendingInteractiveBrushInputTraces.remove(at: index).lineage]
     }
 
     /// Frozen projected-dab oracle entry point. It bypasses public stroke
@@ -4726,7 +4794,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard strokeWorkspaceState == .available else { return }
         warmedStrokePreparationBridge = StrokePreparationBridge(
             budget: budget,
-            targetFramesPerSecond: 120
+            targetFramesPerSecond: 120,
+            traceRecorder: interactiveBrushTraceRecorder
         )
     }
 

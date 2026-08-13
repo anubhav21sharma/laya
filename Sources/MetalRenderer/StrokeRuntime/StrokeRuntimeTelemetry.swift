@@ -1,5 +1,71 @@
 import Foundation
 import PatternEngine
+import os
+
+final class InteractiveBrushTraceRecorder: @unchecked Sendable {
+    private struct State {
+        var sink: (any InteractiveBrushTraceSink)?
+        var lastTimestampByIdentity: [StrokeTraceIdentity: UInt64] = [:]
+    }
+
+    private let state = OSAllocatedUnfairLock(
+        initialState: State(sink: nil)
+    )
+
+    var isEnabled: Bool {
+        state.withLock { $0.sink != nil }
+    }
+
+    func configure(sink: (any InteractiveBrushTraceSink)?) {
+        state.withLock { state in
+            state.sink = sink
+            state.lastTimestampByIdentity.removeAll(keepingCapacity: true)
+        }
+    }
+
+    func record(
+        stage: InteractiveBrushTraceStage,
+        lineage: InteractiveBrushInputTrace,
+        monotonicNanoseconds: UInt64? = nil,
+        authoritativeBacklog: Int = 0,
+        dirtyTileCount: Int = 0,
+        residentBytes: Int = 0,
+        activeOwnershipCount: Int = 0,
+        message: String? = nil
+    ) {
+        let value: (
+            InteractiveBrushTraceRecord,
+            any InteractiveBrushTraceSink
+        )? = state.withLock { state in
+            guard let sink = state.sink else { return nil }
+            var timestamp = monotonicNanoseconds
+                ?? DispatchTime.now().uptimeNanoseconds
+            if let identity = lineage.identity,
+               let previous = state.lastTimestampByIdentity[identity]
+            {
+                timestamp = max(timestamp, previous)
+                state.lastTimestampByIdentity[identity] = timestamp
+            } else if let identity = lineage.identity {
+                state.lastTimestampByIdentity[identity] = timestamp
+            }
+            return (
+                InteractiveBrushTraceRecord(
+                    stage: stage,
+                    identity: lineage.identity,
+                    monotonicNanoseconds: timestamp,
+                    authoritativeBacklog: authoritativeBacklog,
+                    dirtyTileCount: dirtyTileCount,
+                    residentBytes: residentBytes,
+                    activeOwnershipCount: activeOwnershipCount,
+                    message: message
+                ),
+                sink
+            )
+        }
+        guard let value else { return }
+        value.1.record(value.0)
+    }
+}
 
 public enum StageDAcceptanceProducerKind: String, Codable, Sendable {
     case packageHarness

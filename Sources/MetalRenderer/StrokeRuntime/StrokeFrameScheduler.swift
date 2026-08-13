@@ -354,6 +354,7 @@ struct StrokePreparedDepositionBatch: Sendable {
     let displayFrame: StrokePreparedDisplayFrame?
     let surfaceSnapshot: StrokePrivateSurfaceEncoderSnapshot?
     let preparationCPUNanoseconds: UInt64
+    let traceLineage: [InteractiveBrushInputTrace]
 
     var isSyntheticZeroWorkContinuation: Bool {
         surfaceLease == nil
@@ -384,7 +385,34 @@ struct StrokePreparedDepositionBatch: Sendable {
             surfaceLease: surfaceLease,
             displayFrame: displayFrame,
             surfaceSnapshot: surfaceSnapshot,
-            preparationCPUNanoseconds: preparationCPUNanoseconds
+            preparationCPUNanoseconds: preparationCPUNanoseconds,
+            traceLineage: traceLineage
+        )
+    }
+
+    func installingTraceLineage(
+        _ traceLineage: [InteractiveBrushInputTrace]
+    ) -> Self {
+        Self(
+            generation: generation,
+            sequence: sequence,
+            frameToken: frameToken,
+            logicalDabs: logicalDabs,
+            dirtyRegions: dirtyRegions,
+            authoritativeInstanceCount: authoritativeInstanceCount,
+            newAuthoritativeInstanceCount: newAuthoritativeInstanceCount,
+            predictedInstanceCount: predictedInstanceCount,
+            predictionProvenanceBoundary: predictionProvenanceBoundary,
+            coordinatorSnapshot: coordinatorSnapshot,
+            replayRetention: replayRetention,
+            executorProbe: executorProbe,
+            isFinishing: isFinishing,
+            predictionAdmission: predictionAdmission,
+            surfaceLease: surfaceLease,
+            displayFrame: displayFrame,
+            surfaceSnapshot: surfaceSnapshot,
+            preparationCPUNanoseconds: preparationCPUNanoseconds,
+            traceLineage: traceLineage
         )
     }
 }
@@ -781,6 +809,7 @@ actor StrokeFrameScheduler {
     private let budget: DepositionFrameBudget
     private let targetFrameDurationNanoseconds: UInt64
     private let preparationClock: @Sendable () -> UInt64
+    private let traceRecorder: InteractiveBrushTraceRecorder?
     private let stageCFailureInjection: StrokeStageCFailureInjection?
     private var scheduler: FrameScheduler
     private var activeGeneration: UInt64?
@@ -872,7 +901,8 @@ actor StrokeFrameScheduler {
         preparationClock: @escaping @Sendable () -> UInt64 = {
             DispatchTime.now().uptimeNanoseconds
         },
-        stageCFailureInjection: StrokeStageCFailureInjection? = nil
+        stageCFailureInjection: StrokeStageCFailureInjection? = nil,
+        traceRecorder: InteractiveBrushTraceRecorder? = nil
     ) {
         precondition(targetFramesPerSecond > 0)
         self.budget = budget
@@ -886,6 +916,7 @@ actor StrokeFrameScheduler {
         )
         self.preparationClock = preparationClock
         self.stageCFailureInjection = stageCFailureInjection
+        self.traceRecorder = traceRecorder
         targetFrameDurationNanoseconds = UInt64(
             1_000_000_000 / targetFramesPerSecond
         )
@@ -966,6 +997,39 @@ actor StrokeFrameScheduler {
     }
 
     func process(
+        _ message: StrokeInputMessage
+    ) async -> StrokePreparationResult? {
+        await process(StrokeInputEnvelope(message: message, traceLineage: []))
+    }
+
+    func process(
+        _ input: StrokeInputEnvelope
+    ) async -> StrokePreparationResult? {
+        guard !input.traceLineage.isEmpty else {
+            return await processMessage(input.message)
+        }
+        for lineage in input.traceLineage {
+            traceRecorder?.record(stage: .workerDequeued, lineage: lineage)
+        }
+        guard let result = await processMessage(input.message) else {
+            return nil
+        }
+        let tracedResult: StrokePreparationResult
+        if case let .prepared(batch) = result {
+            tracedResult = .prepared(
+                batch.installingTraceLineage(input.traceLineage)
+            )
+            for lineage in input.traceLineage {
+                traceRecorder?.record(stage: .dabPrepared, lineage: lineage)
+                traceRecorder?.record(stage: .settled, lineage: lineage)
+            }
+        } else {
+            tracedResult = result
+        }
+        return tracedResult
+    }
+
+    private func processMessage(
         _ message: StrokeInputMessage
     ) async -> StrokePreparationResult? {
         do {
@@ -4003,7 +4067,8 @@ actor StrokeFrameScheduler {
             surfaceLease: surfaceLease,
             displayFrame: nil,
             surfaceSnapshot: privateSurfaceEncoder?.snapshot,
-            preparationCPUNanoseconds: preparationCPUNanoseconds
+            preparationCPUNanoseconds: preparationCPUNanoseconds,
+            traceLineage: []
         )
         allocationProbe?.disarmAndRecord(.batchPackaging)
         packagingProbeIsArmed = false

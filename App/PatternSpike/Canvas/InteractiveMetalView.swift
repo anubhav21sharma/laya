@@ -153,6 +153,9 @@ final class InteractiveMetalView: MTKView {
     private var brushCursorDescriptor: BrushCursorDescriptor?
     private var brushCursorSupportFrame: CGRect = .zero
     private var brushTrackingArea: NSTrackingArea?
+    private var traceStrokeGeneration: UInt64 = 0
+    private var traceAuthoritativeSequence: UInt64 = 0
+    private var traceSampleSequence: UInt64 = 0
 
     private static let invisibleCursor: NSCursor = {
         let size = NSSize(width: 1, height: 1)
@@ -617,8 +620,48 @@ final class InteractiveMetalView: MTKView {
     }
 
     private func deliver(_ samples: [StrokeSample]) {
+        recordTraceReceipts(for: samples)
         controller.handleStrokeSamples(samples)
         requestDraw()
+    }
+
+    private func recordTraceReceipts(for samples: [StrokeSample]) {
+        guard !samples.isEmpty else { return }
+        if samples.contains(where: { $0.phase == .began }) {
+            traceStrokeGeneration &+= 1
+            traceAuthoritativeSequence = 0
+            traceSampleSequence = 0
+        }
+        if samples.contains(where: { $0.kind != .predicted }) {
+            traceAuthoritativeSequence &+= 1
+        }
+        let receipt = DispatchTime.now().uptimeNanoseconds
+        for sample in samples {
+            traceSampleSequence &+= 1
+            gridRenderer.recordInteractiveBrushInputReceipt(
+                sample: sample,
+                identity: StrokeTraceIdentity(
+                    strokeGeneration: traceStrokeGeneration,
+                    authoritativeSequence: traceAuthoritativeSequence,
+                    sampleSequence: traceSampleSequence,
+                    provenance: traceProvenance(for: sample.kind)
+                ),
+                monotonicNanoseconds: receipt
+            )
+        }
+    }
+
+    private func traceProvenance(
+        for kind: StrokeSampleKind
+    ) -> StrokeTraceProvenance {
+        switch kind {
+        case .actual, .estimatedUpdate:
+            .authoritative
+        case .coalesced:
+            .coalesced
+        case .predicted:
+            .predicted
+        }
     }
 
     private func updateRefreshRate(for window: NSWindow) {
@@ -644,6 +687,8 @@ final class InteractiveMetalView: MTKView {
     private var nextInputGeneration: UInt64 = 1
     private var pendingEstimatedTouches =
         PendingEstimatedInputRegistry<UITouch>()
+    private var traceAuthoritativeSequence: UInt64 = 0
+    private var traceSampleSequence: UInt64 = 0
 
     init(
         frame: CGRect,
@@ -691,6 +736,8 @@ final class InteractiveMetalView: MTKView {
         brushInputAdapter.beginTouch()
         activeTouch = touch
         activeInputGeneration = takeInputGeneration()
+        traceAuthoritativeSequence = 0
+        traceSampleSequence = 0
         deliver(
             touch,
             event: event,
@@ -771,6 +818,10 @@ final class InteractiveMetalView: MTKView {
                 for: touch,
                 in: self
             ) {
+                recordTraceReceipts(
+                    for: [sample],
+                    strokeGeneration: inputGeneration
+                )
                 controller.handleStrokeSample(
                     sample,
                     inputGeneration: inputGeneration
@@ -886,6 +937,10 @@ final class InteractiveMetalView: MTKView {
             cancelActiveTouch()
             return
         }
+        recordTraceReceipts(
+            for: samples,
+            strokeGeneration: inputGeneration
+        )
         controller.handleStrokeSamples(
             samples,
             inputGeneration: inputGeneration,
@@ -893,6 +948,37 @@ final class InteractiveMetalView: MTKView {
                 predictionBatch.submittedCount
         )
         requestDraw()
+    }
+
+    private func recordTraceReceipts(
+        for samples: [StrokeSample],
+        strokeGeneration: UInt64
+    ) {
+        if samples.contains(where: { $0.kind != .predicted }) {
+            traceAuthoritativeSequence &+= 1
+        }
+        let receipt = DispatchTime.now().uptimeNanoseconds
+        for sample in samples {
+            traceSampleSequence &+= 1
+            let provenance: StrokeTraceProvenance = switch sample.kind {
+            case .actual, .estimatedUpdate:
+                .authoritative
+            case .coalesced:
+                .coalesced
+            case .predicted:
+                .predicted
+            }
+            gridRenderer.recordInteractiveBrushInputReceipt(
+                sample: sample,
+                identity: StrokeTraceIdentity(
+                    strokeGeneration: strokeGeneration,
+                    authoritativeSequence: traceAuthoritativeSequence,
+                    sampleSequence: traceSampleSequence,
+                    provenance: provenance
+                ),
+                monotonicNanoseconds: receipt
+            )
+        }
     }
 
     private var coordinateTransform: DrawableCoordinateTransform? {

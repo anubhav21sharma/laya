@@ -172,7 +172,8 @@ struct StrokeInputQueue: Sendable {
 
     @discardableResult
     mutating func enqueue(
-        _ message: StrokeInputMessage
+        _ message: StrokeInputMessage,
+        traceLineage: [InteractiveBrushInputTrace] = []
     ) throws -> StrokeInputAdmission {
         switch message {
         case let .begin(generation, _, samples),
@@ -213,7 +214,11 @@ struct StrokeInputQueue: Sendable {
             }
             guard !samples.isEmpty else { return .authoritative }
             authoritative.append(
-                QueuedMessage(sequence: takeSequence(), message: message)
+                QueuedMessage(
+                    sequence: takeSequence(),
+                    message: message,
+                    traceLineage: traceLineage
+                )
             )
             authoritativeSampleCount += samples.count
             authoritativeHighWater = max(
@@ -243,7 +248,8 @@ struct StrokeInputQueue: Sendable {
                     message: .appendAuthoritativeSample(
                         generation: generation,
                         sample: sample
-                    )
+                    ),
+                    traceLineage: traceLineage
                 )
             )
             authoritativeSampleCount += 1
@@ -274,7 +280,8 @@ struct StrokeInputQueue: Sendable {
                     message: .applyEstimatedUpdate(
                         generation: generation,
                         sample: sample
-                    )
+                    ),
+                    traceLineage: traceLineage
                 )
             )
             authoritativeSampleCount += 1
@@ -311,7 +318,10 @@ struct StrokeInputQueue: Sendable {
                                 index: index,
                                 count: acceptedCount,
                                 submittedCount: submittedCount
-                            )
+                            ),
+                            traceLineage: index < traceLineage.count
+                                ? [traceLineage[index]]
+                                : []
                         )
                     )
                 }
@@ -331,7 +341,8 @@ struct StrokeInputQueue: Sendable {
                             generation: generation,
                             samples: [],
                             acceptedCount: 0
-                        )
+                        ),
+                        traceLineage: traceLineage
                     )
                 )
             }
@@ -353,7 +364,8 @@ struct StrokeInputQueue: Sendable {
                     message: .replacePredictionSample(
                         generation: generation,
                         sample: sample
-                    )
+                    ),
+                    traceLineage: traceLineage
                 )
             )
             predictedSampleCount = 1
@@ -365,7 +377,11 @@ struct StrokeInputQueue: Sendable {
 
         case .commit:
             authoritative.append(
-                QueuedMessage(sequence: takeSequence(), message: message)
+                QueuedMessage(
+                    sequence: takeSequence(),
+                    message: message,
+                    traceLineage: traceLineage
+                )
             )
             return .authoritative
 
@@ -384,9 +400,16 @@ struct StrokeInputQueue: Sendable {
     }
 
     mutating func dequeue() -> StrokeInputMessage? {
+        dequeueEnvelope()?.message
+    }
+
+    mutating func dequeueEnvelope() -> StrokeInputEnvelope? {
         if let pendingCancellation {
             self.pendingCancellation = nil
-            return pendingCancellation
+            return StrokeInputEnvelope(
+                message: pendingCancellation,
+                traceLineage: []
+            )
         }
         switch (authoritative.first, prediction.first) {
         case (nil, nil):
@@ -405,7 +428,7 @@ struct StrokeInputQueue: Sendable {
 
     private mutating func removeAuthoritative(
         _ queued: QueuedMessage
-    ) -> StrokeInputMessage {
+    ) -> StrokeInputEnvelope {
         _ = authoritative.removeFirst()
         switch queued.message {
         case let .begin(_, _, samples),
@@ -423,12 +446,15 @@ struct StrokeInputQueue: Sendable {
              .cancel:
             preconditionFailure("Invalid authoritative input queue payload")
         }
-        return queued.message
+        return StrokeInputEnvelope(
+            message: queued.message,
+            traceLineage: queued.traceLineage
+        )
     }
 
     private mutating func removePrediction(
         _ queued: QueuedMessage
-    ) -> StrokeInputMessage {
+    ) -> StrokeInputEnvelope {
         _ = prediction.removeFirst()
         switch queued.message {
         case let .replacePrediction(_, _, acceptedCount):
@@ -439,7 +465,10 @@ struct StrokeInputQueue: Sendable {
         default:
             preconditionFailure("Invalid prediction input queue payload")
         }
-        return queued.message
+        return StrokeInputEnvelope(
+            message: queued.message,
+            traceLineage: queued.traceLineage
+        )
     }
 
     private mutating func cancelForCapacityFailure(
@@ -475,6 +504,7 @@ struct StrokeInputQueue: Sendable {
 private struct QueuedMessage: Equatable, Sendable {
     let sequence: UInt64
     let message: StrokeInputMessage
+    let traceLineage: [InteractiveBrushInputTrace]
 }
 
 private struct MessageRing: Sendable {
@@ -1264,10 +1294,12 @@ final class StrokePreparationMailbox: Sendable {
 
     @discardableResult
     func submit(
-        _ message: StrokeInputMessage
+        _ message: StrokeInputMessage,
+        traceLineage: [InteractiveBrushInputTrace] = []
     ) throws -> StrokeInputAdmission {
         try submit(
             message,
+            traceLineage: traceLineage,
             cancellationFrameDisposition: .preserveMainOwnership
         )
     }
@@ -1280,17 +1312,22 @@ final class StrokePreparationMailbox: Sendable {
     ) throws -> StrokeInputAdmission {
         try submit(
             .cancel(generation: generation, reason: reason),
+            traceLineage: [],
             cancellationFrameDisposition: frameDisposition
         )
     }
 
     private func submit(
         _ message: StrokeInputMessage,
+        traceLineage: [InteractiveBrushInputTrace],
         cancellationFrameDisposition:
             StrokePreparationCancellationFrameDisposition
     ) throws -> StrokeInputAdmission {
         try state.withLock { state in
-            let admission = try state.input.enqueue(message)
+            let admission = try state.input.enqueue(
+                message,
+                traceLineage: traceLineage
+            )
             if case let .cancel(generation, _) = message {
                 state.discardedGeneration = generation
                 if let awaiting = state.awaitingFrame,
@@ -1314,13 +1351,19 @@ final class StrokePreparationMailbox: Sendable {
     }
 
     func takeInput() -> StrokeInputMessage? {
+        takeInputEnvelope()?.message
+    }
+
+    func takeInputEnvelope() -> StrokeInputEnvelope? {
         state.withLock { state in
             guard state.results.count == 0,
                   state.awaitingFrame == nil,
                   state.pendingAcknowledgement == nil,
                   !state.workerIsProcessing
             else { return nil }
-            guard let message = state.input.dequeue() else { return nil }
+            guard let message = state.input.dequeueEnvelope() else {
+                return nil
+            }
             state.workerIsProcessing = true
             return message
         }
@@ -1721,12 +1764,14 @@ final class StrokePreparationBridge: Sendable {
 
     init(
         budget: DepositionFrameBudget,
-        targetFramesPerSecond: Int
+        targetFramesPerSecond: Int,
+        traceRecorder: InteractiveBrushTraceRecorder? = nil
     ) {
         let mailbox = StrokePreparationMailbox(budget: budget)
         let scheduler = StrokeFrameScheduler(
             budget: budget,
-            targetFramesPerSecond: targetFramesPerSecond
+            targetFramesPerSecond: targetFramesPerSecond,
+            traceRecorder: traceRecorder
         )
         let pair = AsyncStream<Void>.makeStream(
             bufferingPolicy: .bufferingNewest(1)
@@ -1791,8 +1836,10 @@ final class StrokePreparationBridge: Sendable {
                         mailbox.completeWorkerOperation()
                         continue
                     }
-                    guard let message = mailbox.takeInput() else { break }
-                    if let result = await scheduler.process(message) {
+                    guard let input = mailbox.takeInputEnvelope() else {
+                        break
+                    }
+                    if let result = await scheduler.process(input) {
                         Self.publishForDisplay(
                             result,
                             mailbox: mailbox,
@@ -1843,9 +1890,13 @@ final class StrokePreparationBridge: Sendable {
 
     @discardableResult
     func submit(
-        _ message: StrokeInputMessage
+        _ message: StrokeInputMessage,
+        traceLineage: [InteractiveBrushInputTrace] = []
     ) throws -> StrokeInputAdmission {
-        let admission = try mailbox.submit(message)
+        let admission = try mailbox.submit(
+            message,
+            traceLineage: traceLineage
+        )
         wake.yield()
         return admission
     }

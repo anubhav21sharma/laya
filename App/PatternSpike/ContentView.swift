@@ -194,6 +194,8 @@ struct ContentView: View {
     @State private var stageDRouteEvidence = StageDAppRouteEvidenceRecorder()
     @State private var pointerCancellationGeneration: UInt = 0
     @State private var editorFocusCompletionGeneration: UInt64 = 0
+    @State private var interactiveBrushTraceLogger:
+        InteractiveBrushTraceLogger?
     @FocusState private var focusTarget: EditorFocusTarget?
     #if DEBUG && os(macOS)
     @State private var debugHUDVisible = false
@@ -377,6 +379,7 @@ struct ContentView: View {
         }
         .onAppear {
             stageDRouteEvidence.bind(controller)
+            configureInteractiveBrushTrace(controller)
             requestEditorFocus()
             controller.onError = {
                 runtimeError = $0
@@ -393,6 +396,7 @@ struct ContentView: View {
         }
         .onDisappear {
             stageDRouteEvidence.unbind(controller)
+            finishInteractiveBrushTrace(controller)
             cancelCurrentInteraction(controller)
             controller.onError = nil
             controller.renderer.onError = nil
@@ -429,6 +433,31 @@ struct ContentView: View {
         )
         #endif
         .id(ObjectIdentifier(controller))
+    }
+
+    private func configureInteractiveBrushTrace(
+        _ controller: EditorSessionController
+    ) {
+        guard interactiveBrushTraceLogger == nil,
+              let logURL = InteractiveBrushAcceptanceConfiguration().logURL,
+              let logger = try? InteractiveBrushTraceLogger(logURL: logURL)
+        else {
+            controller.renderer.configureInteractiveBrushTrace(
+                sink: interactiveBrushTraceLogger
+            )
+            return
+        }
+        interactiveBrushTraceLogger = logger
+        controller.renderer.configureInteractiveBrushTrace(sink: logger)
+    }
+
+    private func finishInteractiveBrushTrace(
+        _ controller: EditorSessionController
+    ) {
+        controller.renderer.configureInteractiveBrushTrace(sink: nil)
+        guard let logger = interactiveBrushTraceLogger else { return }
+        interactiveBrushTraceLogger = nil
+        Task { try? await logger.finish() }
     }
 
     private func requestEditorFocus() {

@@ -266,6 +266,8 @@ let package = Package(
                 "PatternSpike/BrushLab/BrushLabManualCard.swift",
                 "PatternSpike/BrushLab/BrushLabSession.swift",
                 "PatternSpike/Input/BrushInputAdapter.swift",
+                "PatternSpike/Acceptance/InteractiveBrushAcceptanceConfiguration.swift",
+                "PatternSpike/Acceptance/InteractiveBrushTraceLogger.swift",
                 "PatternSpike/Canvas/InteractiveMetalView.swift",
                 "PatternSpike/Canvas/MetalCanvas.swift",
                 "PatternSpike/Commands/EditorFocusedCommands.swift",
@@ -287,6 +289,7 @@ let package = Package(
                 "Tests/EditorTopBarColorBoundaryTests.swift",
                 "Tests/EditorSessionControllerTests.swift",
                 "Tests/PatternProjectBridgeTests.swift",
+                "Tests/InteractiveBrushTraceLoggerTests.swift",
             ]
         ),
     ]

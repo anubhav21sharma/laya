@@ -4,6 +4,125 @@ import Metal
 import PatternEngine
 import Testing
 
+@Suite
+struct StrokeRuntimeTelemetryTests {
+@MainActor
+@Test
+func shippingTracePreservesPerInputIdentityAndMonotonicStageOrder() async throws {
+    guard let device = MTLCreateSystemDefaultDevice() else { return }
+    let renderer = try GridRenderer(
+        device: device,
+        library: try strokeRuntimeTestLibrary(device: device),
+        drawableSize: PatternSize(width: 64, height: 64),
+        configuration: try TilingCanvasConfiguration(
+            pixelSize: PixelSize(width: 64, height: 64),
+            tiling: .grid
+        )
+    )
+    try renderer.installNativeHarnessBrushes()
+    let sink = InteractiveBrushTraceTestSink()
+    renderer.configureInteractiveBrushTrace(sink: sink)
+    let token = RendererOperationToken(rawValue: 0x5452_4143)
+    let style = try renderer.nativeHarnessStrokeStyle(
+        diameter: 12,
+        seed: token.rawValue
+    )
+    let tracedInputs: [(StrokeSample, StrokeTraceIdentity)] = [
+        (
+            runtimeStrokeSample(x: 12, phase: .began, timestamp: 0),
+            StrokeTraceIdentity(
+                strokeGeneration: 7,
+                authoritativeSequence: 1,
+                sampleSequence: 1,
+                provenance: .authoritative
+            )
+        ),
+        (
+            StrokeSample(
+                position: ScreenPoint(x: 24, y: 32),
+                pressure: 1,
+                timestamp: 1 / 120,
+                phase: .moved,
+                source: .mouse,
+                kind: .coalesced
+            ),
+            StrokeTraceIdentity(
+                strokeGeneration: 7,
+                authoritativeSequence: 2,
+                sampleSequence: 2,
+                provenance: .coalesced
+            )
+        ),
+        (
+            StrokeSample(
+                position: ScreenPoint(x: 36, y: 32),
+                pressure: 1,
+                timestamp: 2 / 120,
+                phase: .moved,
+                source: .pencil,
+                kind: .predicted
+            ),
+            StrokeTraceIdentity(
+                strokeGeneration: 7,
+                authoritativeSequence: 2,
+                sampleSequence: 3,
+                provenance: .predicted
+            )
+        ),
+        (
+            runtimeStrokeSample(x: 52, phase: .ended, timestamp: 3 / 120),
+            StrokeTraceIdentity(
+                strokeGeneration: 7,
+                authoritativeSequence: 3,
+                sampleSequence: 4,
+                provenance: .authoritative
+            )
+        ),
+    ]
+
+    for (offset, input) in tracedInputs.enumerated() {
+        renderer.recordInteractiveBrushInputReceipt(
+            sample: input.0,
+            identity: input.1,
+            monotonicNanoseconds: UInt64(100 + offset)
+        )
+    }
+    try renderer.beginStroke(
+        token: token,
+        sample: tracedInputs[0].0,
+        style: style
+    )
+    _ = try await renderer.flushAcceptedStrokeInputForHarness()
+    try renderer.appendStrokeBatch(
+        token: token,
+        authoritativeSamples: [tracedInputs[1].0],
+        predictedSamples: [tracedInputs[2].0]
+    )
+    _ = try await renderer.flushPendingLiveForHarness()
+    try renderer.requestStrokeCommit(token: token, sample: tracedInputs[3].0)
+    while renderer.brushLabDiagnosticSnapshot.deposition
+        .authoritativePending > 0
+    {
+        _ = try await renderer.flushAcceptedStrokeInputForHarness()
+    }
+    _ = try await renderer.flushPendingLiveForHarness()
+    _ = try await renderer.finishCommitForHarness()
+
+    for input in tracedInputs where input.1.provenance != .predicted {
+        let records = sink.records(for: input.1)
+        #expect(records.map(\.stage).starts(with: [
+            .eventReceived, .workerDequeued, .dabPrepared,
+        ]))
+        #expect(records.last?.stage == .settled)
+        #expect(
+            records.map(\.monotonicNanoseconds)
+                == records.map(\.monotonicNanoseconds).sorted()
+        )
+    }
+    #expect(Set(tracedInputs.map(\.1)).count == tracedInputs.count)
+}
+}
+
 @Test
 func strokeRuntimeTelemetryAggregatesAttributableProductionFrames() throws {
     let clock = SyntheticRuntimeTimestampSource([
@@ -114,6 +233,24 @@ func strokeRuntimeTelemetryAggregatesAttributableProductionFrames() throws {
     #expect(snapshot.attributedFrameCount == 2)
     #expect(snapshot.observedDurationNanoseconds == 2_500)
     #expect(snapshot.authoritativeQueueDepths == [3, 1])
+}
+
+private final class InteractiveBrushTraceTestSink:
+    InteractiveBrushTraceSink,
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private var storage: [InteractiveBrushTraceRecord] = []
+
+    func record(_ record: InteractiveBrushTraceRecord) {
+        lock.withLock { storage.append(record) }
+    }
+
+    func records(
+        for identity: StrokeTraceIdentity
+    ) -> [InteractiveBrushTraceRecord] {
+        lock.withLock { storage.filter { $0.identity == identity } }
+    }
 }
 
 @MainActor
