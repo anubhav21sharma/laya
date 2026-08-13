@@ -712,10 +712,12 @@ struct StrokePreparedDisplayFrame: @unchecked Sendable {
     let clearedPredictionSurface: Bool
     let encodingRanOnMainThread: Bool
     let newBindingCount: Int
+    let traceIdentities: [StrokeTraceIdentity]
 
     fileprivate init(
         lease: StrokePreparedSurfaceLease,
-        acknowledgement: StrokePreparedFrameAcknowledgement
+        acknowledgement: StrokePreparedFrameAcknowledgement,
+        traceIdentities: [StrokeTraceIdentity]
     ) {
         self.lease = lease
         self.acknowledgement = acknowledgement
@@ -727,6 +729,7 @@ struct StrokePreparedDisplayFrame: @unchecked Sendable {
         clearedPredictionSurface = lease.clearedPredictionSurface
         encodingRanOnMainThread = lease.encodingRanOnMainThread
         newBindingCount = lease.newBindingCount
+        self.traceIdentities = traceIdentities
         surface = StrokePreparedDisplaySurface(lease: lease)
     }
 
@@ -735,6 +738,9 @@ struct StrokePreparedDisplayFrame: @unchecked Sendable {
         testingCapability capability: DocumentPaintStrokeSurfaceCapability,
         layer: StrokePrivateSurfaceLayer,
         changedCoordinates: [PaintTileCoordinate],
+        clearedAuthoritativeSurface: Bool,
+        clearedPredictionSurface: Bool,
+        traceIdentities: [StrokeTraceIdentity],
         acknowledgementIsAvailable: Bool,
         acknowledgementReleaseFailures: [StrokePreparationFailure],
         acknowledgementCompletionIsDeferred: Bool
@@ -757,16 +763,20 @@ struct StrokePreparedDisplayFrame: @unchecked Sendable {
         self.layer = layer
         authoritativeInstanceCount = 0
         predictedInstanceCount = 0
-        clearedAuthoritativeSurface = false
-        clearedPredictionSurface = false
+        self.clearedAuthoritativeSurface = clearedAuthoritativeSurface
+        self.clearedPredictionSurface = clearedPredictionSurface
         encodingRanOnMainThread = false
         newBindingCount = 0
+        self.traceIdentities = traceIdentities
     }
 
     static func testing(
         capability: DocumentPaintStrokeSurfaceCapability,
         layer: StrokePrivateSurfaceLayer = .authoritative,
         changedCoordinates: [PaintTileCoordinate] = [],
+        clearedAuthoritativeSurface: Bool = false,
+        clearedPredictionSurface: Bool = false,
+        traceIdentities: [StrokeTraceIdentity] = [],
         acknowledgementIsAvailable: Bool = false,
         acknowledgementReleaseFailures: [StrokePreparationFailure] = [],
         acknowledgementCompletionIsDeferred: Bool = false
@@ -775,6 +785,9 @@ struct StrokePreparedDisplayFrame: @unchecked Sendable {
             testingCapability: capability,
             layer: layer,
             changedCoordinates: changedCoordinates,
+            clearedAuthoritativeSurface: clearedAuthoritativeSurface,
+            clearedPredictionSurface: clearedPredictionSurface,
+            traceIdentities: traceIdentities,
             acknowledgementIsAvailable: acknowledgementIsAvailable,
             acknowledgementReleaseFailures: acknowledgementReleaseFailures,
             acknowledgementCompletionIsDeferred:
@@ -921,6 +934,15 @@ private final class StrokePreparedFrameAcknowledgementCore:
                 return
             }
             do {
+                #if DEBUG
+                lock.lock()
+                requestCount += 1
+                lock.unlock()
+                if let failure = consumeTestingReleaseFailure() {
+                    fail(failure)
+                    return
+                }
+                #endif
                 guard let mailbox, let wake else {
                     complete()
                     return
@@ -1876,7 +1898,8 @@ final class StrokePreparationBridge: Sendable {
         let acknowledgement = StrokePreparedFrameAcknowledgement(core: core)
         let displayFrame = StrokePreparedDisplayFrame(
             lease: lease,
-            acknowledgement: acknowledgement
+            acknowledgement: acknowledgement,
+            traceIdentities: batch.traceLineage.compactMap(\.identity)
         )
         mailbox.publish(
             .prepared(batch.installingDisplayFrame(displayFrame))

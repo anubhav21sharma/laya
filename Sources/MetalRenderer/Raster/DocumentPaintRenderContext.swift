@@ -175,6 +175,54 @@ struct DocumentPaintTransientDisplaySource: @unchecked Sendable {
     #endif
 }
 
+/// Authenticated, immutable cache-copy handoff. It deliberately contains no
+/// viewport or periodic display addressing: exact physical providers and the
+/// Context's captured canonical geometry are the complete copy contract.
+struct DocumentPaintTransientCacheUpdate: @unchecked Sendable {
+    let generation: UInt64
+    let sequence: UInt64
+    let layerID: UUID
+    let canonicalIdentity: CanvasCanonicalStateIdentity
+    let changedRole: StrokePrivateSurfaceLayer
+    let changedCoordinates: [PaintTileCoordinate]
+    let clearedAuthoritativeSurface: Bool
+    let clearedPredictionSurface: Bool
+    let descriptor: DocumentPaintTransientVisibleSourceDescriptor
+    let acknowledgement: StrokePreparedFrameAcknowledgement
+    let traceIdentities: [StrokeTraceIdentity]
+    let acknowledgementSettlement:
+        DocumentPaintTransientCacheAcknowledgementSettlement
+}
+
+final class DocumentPaintTransientCacheAcknowledgementSettlement:
+    @unchecked Sendable
+{
+    private enum State: Equatable {
+        case available
+        case owned
+        case settled
+    }
+
+    private let lock = NSLock()
+    private var state = State.available
+
+    func claimOwnership() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard state == .available else { return false }
+        state = .owned
+        return true
+    }
+
+    func claimSettlement() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard state == .owned else { return false }
+        state = .settled
+        return true
+    }
+}
+
 private final class DocumentPaintActiveStrokeSurfaceSlot:
     @unchecked Sendable
 {
@@ -640,11 +688,6 @@ private actor DocumentPaintTransactionWorker {
 /// read immutable snapshots. Fallible work runs on owned actors off MainActor.
 @MainActor
 final class DocumentPaintRenderContext {
-    private struct LayerDisplayTransientObligation {
-        let source: DocumentPaintTransientDisplaySource
-        let submission: PreparedLayerCompositeDisplaySubmission
-    }
-
     private let identity = UUID()
     private let canonicalDocumentGeneration: UInt64
     private var canonicalGeometry: DocumentPaintGeometry
@@ -677,8 +720,6 @@ final class DocumentPaintRenderContext {
     private let activeStrokeSurfaceSlot = DocumentPaintActiveStrokeSurfaceSlot()
     private var activeTransientDisplaySource:
         DocumentPaintTransientDisplaySource?
-    private var layerDisplayTransientObligations:
-        [UUID: LayerDisplayTransientObligation] = [:]
     private var activeCommandOperationID: UUID?
     private var hasPublishedTransientSurfaceSnapshot = false
     private var hasRequestedShutdown = false
@@ -941,8 +982,7 @@ final class DocumentPaintRenderContext {
             visiblePlan: visiblePlan,
             stableCollectionRenderer: stableCollectionRenderer,
             layerCompositor: layerCompositor,
-            pendingLayerDisplayAcknowledgementCount:
-                layerDisplayTransientObligations.count
+            pendingLayerDisplayAcknowledgementCount: 0
         )
     }
 
@@ -1042,6 +1082,72 @@ final class DocumentPaintRenderContext {
         activeTransientDisplaySource = source
         hasPublishedTransientSurfaceSnapshot = true
         return source
+    }
+
+    func makeTransientCacheUpdate(
+        frame: StrokePreparedDisplayFrame,
+        sequence: UInt64
+    ) throws -> DocumentPaintTransientCacheUpdate {
+        guard !hasRequestedShutdown else {
+            throw DocumentPaintRenderContextError.isShutdown
+        }
+        guard let capability = activeStrokeSurfaceSlot.current,
+              frame.acknowledgement.status == .available,
+              frame.surface.authenticates(capability),
+              frame.generation == capability.generation,
+              frame.surface.storeIdentity == registry.tileStoreIdentity,
+              frame.surface.layerID == capability.layerID,
+              frame.surface.pixelSize == capability.pixelSize,
+              frame.surface.radialLayout == capability.radialLayout,
+              frame.surface.authoritativeSurfaceID
+                == capability.authoritativeSurfaceID,
+              frame.surface.predictionSurfaceID
+                == capability.predictionSurfaceID
+        else {
+            throw DocumentPaintRenderContextError.foreignTransientDisplayFrame
+        }
+        let coordinates = frame.surface.changedCoordinates.sorted()
+        for index in coordinates.indices.dropFirst()
+        where coordinates[index - 1] == coordinates[index] {
+            throw DocumentPaintSurfaceStoreError.duplicateCoordinate(
+                coordinates[index]
+            )
+        }
+        return try DocumentPaintTransientCacheUpdate(
+            generation: frame.generation,
+            sequence: sequence,
+            layerID: capability.layerID,
+            canonicalIdentity: canonicalStateIdentity(),
+            changedRole: frame.surface.changedRole,
+            changedCoordinates: coordinates,
+            clearedAuthoritativeSurface:
+                frame.clearedAuthoritativeSurface,
+            clearedPredictionSurface: frame.clearedPredictionSurface,
+            descriptor: DocumentPaintTransientVisibleSourceDescriptor(
+                cacheCapability: capability
+            ),
+            acknowledgement: frame.acknowledgement,
+            traceIdentities: frame.traceIdentities,
+            acknowledgementSettlement:
+                DocumentPaintTransientCacheAcknowledgementSettlement()
+        )
+    }
+
+    func interactiveStrokeCompositeParameters(
+        layerID: UUID
+    ) throws -> InteractiveStrokeCompositeParameters {
+        guard !hasRequestedShutdown else {
+            throw DocumentPaintRenderContextError.isShutdown
+        }
+        guard activeStrokeSurfaceSlot.current?.layerID == layerID,
+              let layer = registry.layerStack.layer(id: layerID)
+        else {
+            throw DocumentPaintRenderContextError.foreignTransientDisplayFrame
+        }
+        return InteractiveStrokeCompositeParameters(
+            blendMode: layer.blendMode,
+            opacity: layer.opacity
+        )
     }
 
     func abandonTransientDisplaySource(
@@ -1975,19 +2081,8 @@ final class DocumentPaintRenderContext {
         do {
             let submission = try await layerCompositor.prepareDisplay(
                 plan,
-                parameters: parameters,
-                onTerminal: {
-                    guard let transient else { return }
-                    try? transient.requestAcknowledgement()
-                }
+                parameters: parameters
             )
-            if let transient {
-                layerDisplayTransientObligations[transient.sourceIdentity] =
-                    LayerDisplayTransientObligation(
-                        source: transient,
-                        submission: submission
-                    )
-            }
             return submission
         } catch {
             if let transient {
@@ -2037,33 +2132,11 @@ final class DocumentPaintRenderContext {
         _ submission: PreparedLayerCompositeDisplaySubmission
     ) throws {
         try submission.cancel()
-        settleLayerDisplayAcknowledgements()
     }
 
     func retryLayerDisplayCompletions() async throws {
         try await layerCompositor.retryDisplayCompletion()
-        settleLayerDisplayAcknowledgements()
         try await visiblePlanController.retryRetirementsAndCompletions()
-        settleLayerDisplayAcknowledgements()
-    }
-
-    private func settleLayerDisplayAcknowledgements() {
-        for identity in Array(layerDisplayTransientObligations.keys) {
-            guard let obligation = layerDisplayTransientObligations[identity],
-                  obligation.submission.isTerminal
-            else { continue }
-            switch obligation.source.acknowledgementStatus {
-            case .available, .failed:
-                try? obligation.source.requestAcknowledgement()
-            case .pending:
-                break
-            case .fulfilled:
-                layerDisplayTransientObligations.removeValue(forKey: identity)
-                if activeTransientDisplaySource?.sourceIdentity == identity {
-                    activeTransientDisplaySource = nil
-                }
-            }
-        }
     }
 
     func retryVisiblePlanRetirementsAndCompletions() async throws {
@@ -2080,12 +2153,6 @@ final class DocumentPaintRenderContext {
         defer { finishCommandOperation(claim) }
         hasRequestedShutdown = true
         try await layerCompositor.shutdown()
-        for obligation in layerDisplayTransientObligations.values {
-            await visiblePlanController.retainAndSettleUnrequestedTransientSource(
-                obligation.source
-            )
-        }
-        layerDisplayTransientObligations.removeAll(keepingCapacity: false)
         if let source = activeTransientDisplaySource {
             await visiblePlanController
                 .retainAndSettleUnrequestedTransientSource(source)

@@ -9,7 +9,7 @@ import Testing
 @Suite("Grid renderer sparse cutover", .serialized)
 struct GridRendererSparseCutoverTests {
     @Test
-    func displayPreparationWaitsForPendingTransientAcknowledgement() {
+    func displayPreparationDoesNotOwnPendingPreparedPageCredit() {
         #expect(
             GridRenderer.paintDisplayPreparationAction(for: nil) == .stable
         )
@@ -18,7 +18,8 @@ struct GridRendererSparseCutoverTests {
                 == .transient
         )
         #expect(
-            GridRenderer.paintDisplayPreparationAction(for: .pending) == .wait
+            GridRenderer.paintDisplayPreparationAction(for: .pending)
+                == .stable
         )
         #expect(
             GridRenderer.paintDisplayPreparationAction(for: .fulfilled)

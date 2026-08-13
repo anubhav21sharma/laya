@@ -2132,6 +2132,80 @@ struct DocumentPaintRenderContextTests {
 
     @Test
     @MainActor
+    func transientCacheUpdateAuthenticatesEpochWithoutDisplayAddressing()
+        async throws
+    {
+        guard let first = try makeFixture(size: 513),
+              let second = try makeFixture(size: 513)
+        else { return }
+        let firstCapability = try first.context.beginStrokeSurface()
+        let secondCapability = try second.context.beginStrokeSurface()
+        let coordinate = PaintTileCoordinate(x: 1, y: 0)
+        let reservation = try firstCapability.reserveStrokeTiles(
+            role: .prediction,
+            coordinates: [coordinate],
+            pinReasons: [.visible, .inFlight],
+            workspace: PaintTileStrokeLeaseWorkspace(maximumBindingCount: 1),
+            failureInjection: nil
+        )
+        try firstCapability.testingMarkDirty(reservation)
+        try firstCapability.releaseFrameReservations(
+            authoritative: nil,
+            prediction: reservation
+        )
+        let frame = StrokePreparedDisplayFrame.testing(
+            capability: firstCapability,
+            layer: .prediction,
+            changedCoordinates: [coordinate],
+            clearedPredictionSurface: true,
+            acknowledgementIsAvailable: true
+        )
+        let foreign = StrokePreparedDisplayFrame.testing(
+            capability: secondCapability,
+            acknowledgementIsAvailable: true
+        )
+
+        #expect(
+            throws: DocumentPaintRenderContextError
+                .foreignTransientDisplayFrame
+        ) {
+            _ = try first.context.makeTransientCacheUpdate(
+                frame: foreign,
+                sequence: 1
+            )
+        }
+        let update = try first.context.makeTransientCacheUpdate(
+            frame: frame,
+            sequence: 7
+        )
+
+        #expect(update.generation == firstCapability.generation)
+        #expect(update.layerID == firstCapability.layerID)
+        #expect(update.sequence == 7)
+        #expect(update.changedRole == .prediction)
+        #expect(update.changedCoordinates == [coordinate])
+        #expect(update.clearedPredictionSurface)
+        #expect(update.descriptor.sources.isEmpty)
+        #expect(update.descriptor.authoritativeProvider.surfaceID
+            == firstCapability.authoritativeSurfaceID)
+        #expect(update.descriptor.predictionProvider.surfaceID
+            == firstCapability.predictionSurfaceID)
+        #expect(update.descriptor.predictionProvider.references.map(\.coordinate)
+            == [coordinate])
+        #expect(update.canonicalIdentity.geometry.storagePixelSize
+            == firstCapability.pixelSize)
+        #expect(try first.context.interactiveStrokeCompositeParameters(
+            layerID: update.layerID
+        ) == .init(blendMode: .normal, opacity: 1))
+
+        try await update.acknowledgement.fulfill()
+        try first.context.cancelStrokeSurface(firstCapability)
+        try await foreign.acknowledgement.fulfill()
+        try second.context.cancelStrokeSurface(secondCapability)
+    }
+
+    @Test
+    @MainActor
     func controllerRetainsTransientObligationAcrossPlanSupersessionFailure()
         async throws
     {

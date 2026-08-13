@@ -207,7 +207,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     enum PaintDisplayPreparationAction: Equatable, Sendable {
         case stable
         case transient
-        case wait
         case fail(StrokePreparationAcknowledgementError)
     }
 
@@ -215,12 +214,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         for status: StrokePreparedFrameAcknowledgementStatus?
     ) -> PaintDisplayPreparationAction {
         switch status {
-        case nil, .fulfilled:
+        case nil, .pending, .fulfilled:
             .stable
         case .available:
             .transient
-        case .pending:
-            .wait
         case let .failed(error):
             .fail(error)
         }
@@ -264,8 +261,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private var strokeEventGeneration: UInt64?
     private var telemetryEventGeneration: UInt64?
     private var strokeRuntimeController: StrokeRuntimeProductionController?
-    private let interactiveBrushTraceRecorder =
-        InteractiveBrushTraceRecorder()
+    private let interactiveBrushTraceRecorder:
+        InteractiveBrushTraceRecorder
+    private let interactiveStrokePresentationCache:
+        InteractiveStrokePresentationCache
     private struct PendingInteractiveBrushInputTrace {
         let sample: StrokeSample
         let lineage: InteractiveBrushInputTrace
@@ -283,6 +282,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public var isIdle: Bool {
         activeStroke == nil
             && strokeWorkspaceState == .available
+            && interactiveStrokeCacheRetirementTask == nil
     }
     public var strokeRuntimeSnapshot: StrokeRuntimeTelemetrySnapshot? {
         strokeRuntimeController?.snapshot
@@ -615,6 +615,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
     private var activePaintTransientSource:
         DocumentPaintTransientDisplaySource?
+    private var interactiveStrokeCacheAdoptionTask: Task<Void, Never>?
+    private var interactiveStrokeCacheRetirementTask: Task<Void, Never>?
+    private var nextInteractiveStrokeCacheSequence: UInt64 = 1
     private var paintCommitTask: Task<Void, Never>?
     private var paintLifecycleTask: Task<Void, Never>?
     private var paintCommandError: MetalRendererError?
@@ -755,11 +758,29 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             transferByteCapacity: 64 * 1_024 * 1_024,
             maximumRevisionBytes: historyByteBudget
         )
+        let traceRecorder = InteractiveBrushTraceRecorder()
+        let transientCacheByteBudget = 512 * 1_024 * 1_024
+        let transientCacheBytesPerTile =
+            PaintTileDescriptor.residentByteCount
+            + DepositionComponentCoverage.residentByteCount(
+                width: PaintTileDescriptor.side,
+                height: PaintTileDescriptor.side
+            )!
         self.device = device
         self.historyByteBudget = historyByteBudget
         self.commandQueue = commandQueue
         self.library = library
         self.paintContext = paintContext
+        interactiveBrushTraceRecorder = traceRecorder
+        interactiveStrokePresentationCache =
+            InteractiveStrokePresentationCache(
+                device: device,
+                commandQueue: commandQueue,
+                byteBudget: transientCacheByteBudget,
+                maximumTileCount:
+                    transientCacheByteBudget / transientCacheBytesPerTile,
+                traceRecorder: traceRecorder
+            )
         documentPixelSizeState = configuration.pixelSize
         storagePixelSizeState = storageSize
         let frameBudget = try DepositionFrameBudget(
@@ -782,7 +803,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         warmedStrokePreparationBridge = StrokePreparationBridge(
             budget: frameBudget,
             targetFramesPerSecond: 120,
-            traceRecorder: interactiveBrushTraceRecorder
+            traceRecorder: traceRecorder
         )
         activeDrawBrush = nil
         activeEraserBrush = nil
@@ -2051,8 +2072,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             transient = nil
         case .transient:
             transient = source
-        case .wait:
-            return
         case let .fail(error):
             #if DEBUG
             paintDisplayAcknowledgementStatusOverrideForTesting = nil
@@ -3550,20 +3569,46 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             else {
                 throw MetalRendererError.invalidStrokeLifecycle
             }
-            let source = try paintContext.adoptTransientDisplayFrame(
-                displayFrame,
-                addressing: CanvasDisplayCompositor.addressing(
-                    tilingStrategy: tilingStrategy,
-                    storagePixelSize: storagePixelSize
+            guard interactiveStrokeCacheAdoptionTask == nil else {
+                throw MetalRendererError.invalidStrokeLifecycle
+            }
+            let sequence = nextInteractiveStrokeCacheSequence
+            let (nextSequence, sequenceOverflow) = sequence
+                .addingReportingOverflow(1)
+            guard !sequenceOverflow else {
+                throw MetalRendererError.commandFailed(
+                    "interactive stroke cache sequence overflow"
                 )
+            }
+            let update = try paintContext.makeTransientCacheUpdate(
+                frame: displayFrame,
+                sequence: sequence
             )
-            activePaintTransientSource = source
+            let parameters = try paintContext
+                .interactiveStrokeCompositeParameters(
+                    layerID: update.layerID
+                )
+            nextInteractiveStrokeCacheSequence = nextSequence
+            interactiveStrokeCacheAdoptionTask = Task {
+                @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    _ = try await self.interactiveStrokePresentationCache
+                        .adopt(update, parameters: parameters)
+                    self.interactiveStrokeCacheAdoptionTask = nil
+                    self.invalidatePaintDisplayPreparation()
+                } catch is CancellationError {
+                    self.interactiveStrokeCacheAdoptionTask = nil
+                } catch {
+                    self.interactiveStrokeCacheAdoptionTask = nil
+                    let rendererError = (error as? MetalRendererError)
+                        ?? .commandFailed(error.localizedDescription)
+                    self.paintCommandError = rendererError
+                    self.failActiveOperationIfNeeded(rendererError)
+                }
+            }
             pendingPaintHarnessDabCount = batch.logicalDabs.count
             pendingPaintHarnessInstanceCount = totalInstanceCount
-            if paintDisplayView != nil {
-                interactiveFramePump.signal(.input)
-                invalidatePaintDisplayPreparation()
-            }
             if totalInstanceCount == 0 {
                 lastOffMainZeroWorkLeaseCount += 1
             }
@@ -5208,9 +5253,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             precondition(borrowedGeneration == generation)
             let cancellationFrameDisposition:
                 StrokePreparationCancellationFrameDisposition =
-                    activePaintTransientSource == nil
+                    interactiveStrokeCacheAdoptionTask == nil
                         ? .abandonedBeforeSubmission
                         : .preserveMainOwnership
+            beginInteractiveStrokeCacheRetirement(generation: generation)
             do {
                 try bridge.submitCancellation(
                     generation: generation,
@@ -5241,6 +5287,26 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         activeStrokeTileSurfaceResources = nil
         strokeWorkspaceState = .available
         notifyIdleStateIfChanged(from: wasIdle)
+    }
+
+    private func beginInteractiveStrokeCacheRetirement(generation: UInt64) {
+        guard interactiveStrokeCacheRetirementTask == nil else { return }
+        interactiveStrokeCacheRetirementTask = Task {
+            @MainActor [weak self] in
+            guard let self else { return }
+            let wasIdle = self.isIdle
+            do {
+                try await self.interactiveStrokePresentationCache.cancel(
+                    generation: generation
+                )
+            } catch {
+                self.report(.commandFailed(
+                    "interactive stroke cache retirement failed: \(error)"
+                ))
+            }
+            self.interactiveStrokeCacheRetirementTask = nil
+            self.notifyIdleStateIfChanged(from: wasIdle)
+        }
     }
 
     package func drainStrokeWorkspaceRetirementForHarness() throws {

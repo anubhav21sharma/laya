@@ -1102,6 +1102,8 @@ struct DocumentPaintCanonicalVisibleSourceCapture: @unchecked Sendable {
 struct DocumentPaintTransientVisibleSourceDescriptor: @unchecked Sendable {
     fileprivate let capability: DocumentPaintStrokeSurfaceCapability
     let sources: [SparseTileSourceRequest]
+    let authoritativeProvider: TiledRasterExactReferenceProvider
+    let predictionProvider: TiledRasterExactReferenceProvider
 
     init(
         capability: DocumentPaintStrokeSurfaceCapability,
@@ -1117,6 +1119,24 @@ struct DocumentPaintTransientVisibleSourceDescriptor: @unchecked Sendable {
             addressing: addressing,
             disposition: disposition
         )
+        authoritativeProvider = try capability.authoritative
+            .makeExactReferenceProvider()
+        predictionProvider = try capability.prediction
+            .makeExactReferenceProvider()
+    }
+
+    /// Cache-copy capture has no display-addressing semantics. The Context
+    /// authenticates the registry epoch and freezes only exact physical source
+    /// providers; viewport/periodic addressing is introduced later by display.
+    init(
+        cacheCapability capability: DocumentPaintStrokeSurfaceCapability
+    ) throws {
+        self.capability = capability
+        sources = []
+        authoritativeProvider = try capability.authoritative
+            .makeExactReferenceProvider()
+        predictionProvider = try capability.prediction
+            .makeExactReferenceProvider()
     }
 }
 
