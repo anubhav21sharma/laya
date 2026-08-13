@@ -16,6 +16,202 @@ struct DocumentPaintRenderContextTests {
 
     @Test
     @MainActor
+    func applicationResultPreservesExactCommitDirtiesAndCanonicalIdentity()
+        async throws
+    {
+        guard let fixture = try makeFixture(size: 8_192) else { return }
+        let context = fixture.context
+        let coordinates = [
+            PaintTileCoordinate(x: 0, y: 0),
+            PaintTileCoordinate(x: 31, y: 17),
+        ]
+        let before = context.canonicalStateIdentity()
+        let capability = try context.beginStrokeSurface()
+        let frame = try capability.reserveStrokeTiles(
+            role: .authoritative,
+            coordinates: coordinates,
+            pinReasons: [.dirty, .inFlight],
+            workspace: PaintTileStrokeLeaseWorkspace(
+                maximumBindingCount: coordinates.count
+            ),
+            failureInjection: nil
+        )
+        try capability.testingMarkDirty(frame)
+        try capability.releaseFrameReservations(
+            authoritative: frame,
+            prediction: nil
+        )
+        let source = try #require(try capability.issueCommitMutationSource())
+
+        let result = try await context.commitStroke(
+            source,
+            compositeParameters: .opaqueDraw
+        )
+
+        #expect(result.dirtyCoordinates == coordinates.sorted())
+        #expect(result.canonicalIdentity.documentGeneration
+            == before.documentGeneration)
+        #expect(result.canonicalIdentity.geometryRevision
+            == before.geometryRevision)
+        #expect(result.canonicalIdentity.layerStackRevision
+            == before.layerStackRevision)
+        #expect(result.canonicalIdentity.compositeRevision
+            == before.compositeRevision + 1)
+        #expect(context.canonicalStateIdentity() == result.canonicalIdentity)
+        if let pair = result.historyPair {
+            try await context.releaseRevisions(pair.revisionIDs)
+        }
+    }
+
+    @Test
+    @MainActor
+    func opacityChangeAdvancesLayerAndCompositeWithoutTileDirties()
+        async throws
+    {
+        guard let fixture = try makeFixture(size: 64) else { return }
+        let before = fixture.context.canonicalStateIdentity()
+        var target = fixture.context.layerStack
+        try target.setOpacity(fixture.layerID, opacity: 0.5)
+
+        let result = try fixture.context.applyLayerStack(target)
+        let after = fixture.context.canonicalStateIdentity()
+
+        #expect(after.documentGeneration == before.documentGeneration)
+        #expect(after.geometryRevision == before.geometryRevision)
+        #expect(after.layerStackRevision == before.layerStackRevision + 1)
+        #expect(after.compositeRevision == before.compositeRevision + 1)
+        try await fixture.context.releaseRevisions([result.revision.id])
+    }
+
+    @Test
+    @MainActor
+    func canonicalRevisionOverflowRejectsPublicationAtomically() async throws {
+        guard let fixture = try makeFixture(
+            size: 64,
+            layerStackRevision: 41,
+            compositeRevision: .max
+        ) else { return }
+        let beforeIdentity = fixture.context.canonicalStateIdentity()
+        let beforeGeneration = await fixture.context.snapshot()
+            .documentGeneration
+        var target = fixture.context.layerStack
+        try target.setOpacity(fixture.layerID, opacity: 0.5)
+
+        #expect(throws: DocumentPaintRenderContextError
+            .canonicalIdentityOverflow) {
+            _ = try fixture.context.applyLayerStack(target)
+        }
+
+        #expect(fixture.context.canonicalStateIdentity() == beforeIdentity)
+        #expect(fixture.context.layerStack != target)
+        #expect(await fixture.context.snapshot().documentGeneration
+            == beforeGeneration)
+    }
+
+    @Test
+    @MainActor
+    func emptyClearDoesNotAdvanceCanonicalIdentity() async throws {
+        guard let fixture = try makeFixture(
+            size: 64,
+            compositeRevision: .max
+        ) else { return }
+        let before = fixture.context.canonicalStateIdentity()
+
+        let result = try await fixture.context.clear()
+
+        #expect(!result.didPublish)
+        #expect(result.dirtyCoordinates.isEmpty)
+        #expect(result.canonicalIdentity == before)
+        #expect(fixture.context.canonicalStateIdentity() == before)
+    }
+
+    @Test
+    @MainActor
+    func resizeAndHistoryRestorePublishFreshGeometryIdentities() async throws {
+        guard let fixture = try makeFixture(size: 512) else { return }
+        let context = fixture.context
+        let initial = context.canonicalStateIdentity()
+        let resizedGeometry = try DocumentPaintGeometry(
+            documentPixelSize: PixelSize(width: 256, height: 256),
+            storagePixelSize: PixelSize(width: 256, height: 256),
+            radialLayout: nil
+        )
+
+        let resized = try #require(try await context.resize(to: resizedGeometry))
+        let resizedIdentity = context.canonicalStateIdentity()
+        #expect(resizedIdentity.geometry == resizedGeometry)
+        #expect(resizedIdentity.geometryRevision == initial.geometryRevision + 1)
+        #expect(resizedIdentity.layerStackRevision
+            == initial.layerStackRevision + 1)
+        #expect(resizedIdentity.compositeRevision
+            == initial.compositeRevision + 1)
+        #expect(resizedIdentity.documentGeneration
+            == initial.documentGeneration)
+
+        _ = try context.restoreLayerStack(resized.revision, endpoint: .before)
+        let restored = context.canonicalStateIdentity()
+        #expect(restored.geometry == initial.geometry)
+        #expect(restored.geometryRevision == resizedIdentity.geometryRevision + 1)
+        #expect(restored.layerStackRevision
+            == resizedIdentity.layerStackRevision + 1)
+        #expect(restored.compositeRevision
+            == resizedIdentity.compositeRevision + 1)
+        #expect(restored != initial)
+        try await context.releaseRevisions([resized.revision.id])
+    }
+
+    @Test
+    @MainActor
+    func canonicalIdentityNeverMixesPublishedGeometryWithOldRevisions()
+        async throws
+    {
+        guard let fixture = try makeFixture(size: 2) else { return }
+        let context = fixture.context
+        let initial = context.canonicalStateIdentity()
+        let gate = DocumentPaintPreparationTestGate()
+        await context.testingSetAfterMutationPublicationHook {
+            await gate.wait()
+        }
+        let replacement = try DocumentPaintGeometry(
+            documentPixelSize: PixelSize(width: 1, height: 1),
+            storagePixelSize: PixelSize(width: 1, height: 1),
+            radialLayout: nil
+        )
+        let publication = Task { @MainActor in
+            try await context.importEncodedBGRA8(
+                candidateGeometry: replacement,
+                input: .singleRaster(.init(
+                    width: 1,
+                    height: 1,
+                    bytesPerRow: 4,
+                    bytes: Data([0, 0, 0, 0])
+                ))
+            )
+        }
+        for _ in 0..<1_000 where await gate.waitingCount == 0 {
+            await Task.yield()
+        }
+        #expect(await gate.waitingCount == 1)
+
+        let duringPublication = context.canonicalStateIdentity()
+        #expect(duringPublication.geometry == replacement)
+        #expect(duringPublication.geometryRevision
+            == initial.geometryRevision + 1)
+        #expect(duringPublication.layerStackRevision
+            == initial.layerStackRevision + 1)
+        #expect(duringPublication.compositeRevision
+            == initial.compositeRevision + 1)
+
+        await gate.open()
+        let result = try await publication.value
+        #expect(result.canonicalIdentity.geometry == replacement)
+        #expect(result.canonicalIdentity.geometryRevision
+            == initial.geometryRevision + 1)
+        await context.testingSetAfterMutationPublicationHook(nil)
+    }
+
+    @Test
+    @MainActor
     func lockedActiveLayerRejectsStrokeAndClearWithTypedError() async throws {
         guard let device = MTLCreateSystemDefaultDevice(),
               let queue = device.makeCommandQueue()
@@ -3484,6 +3680,9 @@ struct DocumentPaintRenderContextTests {
     private func makeFixture(
         size: Int = 16,
         snapshotPayloadLiabilityByteBudget: Int? = nil,
+        geometryRevision: UInt64 = 0,
+        layerStackRevision: UInt64 = 0,
+        compositeRevision: UInt64 = 0,
         configuration: DocumentPaintVisiblePlanControllerConfiguration =
             .production
     ) throws -> (
@@ -3514,6 +3713,9 @@ struct DocumentPaintRenderContextTests {
             transferByteCapacity: PaintTileDescriptor.residentByteCount * 16,
             maximumRevisionBytes: PaintTileDescriptor.residentByteCount * 16,
             generation: 7,
+            geometryRevision: geometryRevision,
+            layerStackRevision: layerStackRevision,
+            compositeRevision: compositeRevision,
             visiblePlanConfiguration: configuration
         )
         return (device, queue, layerID, byteBudget, context)

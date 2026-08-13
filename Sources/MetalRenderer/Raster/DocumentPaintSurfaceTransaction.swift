@@ -920,7 +920,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         _ request: DocumentPaintSurfaceEncodedImportRequest,
         failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
     ) throws -> DocumentPaintMutationPreparation {
-        try withLock {
+        return try withLock { () throws -> DocumentPaintMutationPreparation in
             guard live == nil, liveRestore == nil else {
                 throw DocumentPaintSurfaceTransactionError
                     .transactionAlreadyLive
@@ -991,7 +991,19 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         _ request: DocumentPaintSurfaceMutationRequest,
         failureInjection: DocumentPaintSurfaceTransactionFailureInjection?
     ) throws -> DocumentPaintMutationPreparation {
-        try withLock {
+        let request = DocumentPaintSurfaceMutationRequest(
+            kind: request.kind,
+            layerID: request.layerID,
+            baseGeometry: request.baseGeometry,
+            candidateGeometry: request.candidateGeometry,
+            targetRadialConfiguration: request.targetRadialConfiguration,
+            dirtyCoordinates: Array(Set(request.dirtyCoordinates)).sorted(),
+            explicitlyRemovedCoordinates: Array(
+                Set(request.explicitlyRemovedCoordinates)
+            ).sorted(),
+            requiresHistoryPair: request.requiresHistoryPair
+        )
+        return try withLock { () throws -> DocumentPaintMutationPreparation in
             guard live == nil, liveRestore == nil else {
                 throw DocumentPaintSurfaceTransactionError
                     .transactionAlreadyLive

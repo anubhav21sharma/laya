@@ -36,6 +36,8 @@ enum StrokeCommitter {
                 didPublish: false,
                 layerID: capability.layerID,
                 generation: capability.generation,
+                dirtyCoordinates: [],
+                canonicalIdentity: await context.canonicalStateIdentity(),
                 historyPair: nil
             )
         }

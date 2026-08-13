@@ -2130,6 +2130,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
     }
 
+    func paintCanonicalStateIdentityForTesting()
+        -> CanvasCanonicalStateIdentity
+    {
+        paintContext.canonicalStateIdentity()
+    }
+
     public func stageDAcceptanceEvidence() async
         -> StageDAcceptanceRendererEvidence
     {

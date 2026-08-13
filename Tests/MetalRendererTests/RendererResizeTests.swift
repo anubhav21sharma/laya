@@ -87,6 +87,7 @@ func currentResizeHistoryRestoresExactDimensionsAndBytes() async throws {
     guard let renderer = try makeResizeRenderer(pixelSize: oldSize) else { return }
     let original = deterministicResizePixels(oldSize)
     try await installResizePixels(original, into: renderer)
+    let initialIdentity = renderer.paintCanonicalStateIdentityForTesting()
     var receipt: LayerGeometryMutationReceipt?
     renderer.onOperationCompleted = {
         if case let .layerGeometrySuccess(value) = $0 { receipt = value }
@@ -98,14 +99,33 @@ func currentResizeHistoryRestoresExactDimensionsAndBytes() async throws {
     )
     let history = try #require(receipt)
     let resized = try await resizeSnapshotBytes(renderer)
+    let resizedIdentity = renderer.paintCanonicalStateIdentityForTesting()
+
+    #expect(resizedIdentity.geometry.documentPixelSize == newSize)
+    #expect(resizedIdentity.geometryRevision
+        == initialIdentity.geometryRevision + 1)
+    #expect(resizedIdentity.layerStackRevision
+        == initialIdentity.layerStackRevision + 1)
+    #expect(resizedIdentity.compositeRevision
+        == initialIdentity.compositeRevision + 1)
 
     #expect(try renderer.restoreLayerGeometryBefore(history.revision) == oldSize)
     #expect(renderer.pixelSize == oldSize)
     #expect(try await resizeSnapshotBytes(renderer) == original)
+    let beforeIdentity = renderer.paintCanonicalStateIdentityForTesting()
+    #expect(beforeIdentity.geometry == initialIdentity.geometry)
+    #expect(beforeIdentity.geometryRevision
+        == resizedIdentity.geometryRevision + 1)
+    #expect(beforeIdentity != initialIdentity)
 
     #expect(try renderer.restoreLayerGeometryAfter(history.revision) == newSize)
     #expect(renderer.pixelSize == newSize)
     #expect(try await resizeSnapshotBytes(renderer) == resized)
+    let afterIdentity = renderer.paintCanonicalStateIdentityForTesting()
+    #expect(afterIdentity.geometry == resizedIdentity.geometry)
+    #expect(afterIdentity.geometryRevision
+        == beforeIdentity.geometryRevision + 1)
+    #expect(afterIdentity != resizedIdentity)
     try await renderer.releasePaintRevisions([history.revision.id])
 }
 

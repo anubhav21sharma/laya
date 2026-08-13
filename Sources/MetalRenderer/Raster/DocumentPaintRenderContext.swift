@@ -14,6 +14,7 @@ enum DocumentPaintRenderContextError: Error, Equatable, Sendable {
     case layerHistoryBudgetExceeded(required: Int, available: Int)
     case layerHistoryIdentityOverflow
     case missingLayerHistoryRevision(StoredRasterRevisionID)
+    case canonicalIdentityOverflow
     case isShutdown
 }
 
@@ -21,7 +22,115 @@ struct DocumentPaintSurfaceApplicationResult: Equatable, Sendable {
     let didPublish: Bool
     let layerID: UUID
     let generation: UInt64
+    let dirtyCoordinates: [PaintTileCoordinate]
+    let canonicalIdentity: CanvasCanonicalStateIdentity
     let historyPair: PendingRasterRevisionPair?
+}
+
+private struct DocumentPaintSurfaceWorkerResult: Equatable, Sendable {
+    let didPublish: Bool
+    let layerID: UUID
+    let generation: UInt64
+    let dirtyCoordinates: [PaintTileCoordinate]
+    let historyPair: PendingRasterRevisionPair?
+}
+
+private struct DocumentPaintPreparedCanonicalRevisionAdvance: Sendable {
+    let geometryRevision: UInt64
+    let layerStackRevision: UInt64
+    let compositeRevision: UInt64
+}
+
+private final class DocumentPaintCanonicalRevisionReservation:
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private let currentGeometryRevision: UInt64
+    private let currentLayerStackRevision: UInt64
+    private let currentCompositeRevision: UInt64
+    private let advancesGeometry: Bool
+    private let advancesLayerStack: Bool
+    private let advancesComposite: Bool
+    private let documentGeneration: UInt64
+    private var prepared:
+        DocumentPaintPreparedCanonicalRevisionAdvance?
+    private var publishedIdentity: CanvasCanonicalStateIdentity?
+
+    init(
+        geometryRevision: UInt64,
+        layerStackRevision: UInt64,
+        compositeRevision: UInt64,
+        documentGeneration: UInt64,
+        advancesGeometry: Bool,
+        advancesLayerStack: Bool,
+        advancesComposite: Bool
+    ) {
+        currentGeometryRevision = geometryRevision
+        currentLayerStackRevision = layerStackRevision
+        currentCompositeRevision = compositeRevision
+        self.documentGeneration = documentGeneration
+        self.advancesGeometry = advancesGeometry
+        self.advancesLayerStack = advancesLayerStack
+        self.advancesComposite = advancesComposite
+    }
+
+    func prepare() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        if prepared != nil { return }
+        func advanced(_ value: UInt64, when shouldAdvance: Bool) throws
+            -> UInt64
+        {
+            guard shouldAdvance else { return value }
+            let (next, overflow) = value.addingReportingOverflow(1)
+            guard !overflow else {
+                throw DocumentPaintRenderContextError
+                    .canonicalIdentityOverflow
+            }
+            return next
+        }
+        prepared = try DocumentPaintPreparedCanonicalRevisionAdvance(
+            geometryRevision: advanced(
+                currentGeometryRevision,
+                when: advancesGeometry
+            ),
+            layerStackRevision: advanced(
+                currentLayerStackRevision,
+                when: advancesLayerStack
+            ),
+            compositeRevision: advanced(
+                currentCompositeRevision,
+                when: advancesComposite
+            )
+        )
+    }
+
+    func result() -> DocumentPaintPreparedCanonicalRevisionAdvance? {
+        lock.lock()
+        defer { lock.unlock() }
+        return prepared
+    }
+
+    func markPublished(geometry: DocumentPaintGeometry) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let prepared else {
+            preconditionFailure("Canonical publication was not preflighted")
+        }
+        publishedIdentity = CanvasCanonicalStateIdentity(
+            documentGeneration: documentGeneration,
+            geometry: geometry,
+            geometryRevision: prepared.geometryRevision,
+            layerStackRevision: prepared.layerStackRevision,
+            compositeRevision: prepared.compositeRevision
+        )
+    }
+
+    func publishedResult() -> CanvasCanonicalStateIdentity? {
+        lock.lock()
+        defer { lock.unlock() }
+        return publishedIdentity
+    }
 }
 
 struct DocumentPaintLayerApplicationResult: Equatable, Sendable {
@@ -179,6 +288,10 @@ private actor DocumentPaintTransactionWorker {
     private let mutationBackend: any DocumentPaintSurfaceMutationBackend
     private var dispatchSequence: UInt64 = 0
     private var isShutdown = false
+    #if DEBUG
+    private var afterMutationPublicationForTesting:
+        (@Sendable () async -> Void)?
+    #endif
 
     init(
         transaction: DocumentPaintSurfaceTransaction,
@@ -203,8 +316,9 @@ private actor DocumentPaintTransactionWorker {
 
     func commitStroke(
         _ source: StrokePreparedCommitMutationSource,
-        compositeParameters: DocumentPaintStrokeCompositeParameters
-    ) async throws -> DocumentPaintSurfaceApplicationResult {
+        compositeParameters: DocumentPaintStrokeCompositeParameters,
+        canonicalReservation: DocumentPaintCanonicalRevisionReservation
+    ) async throws -> DocumentPaintSurfaceWorkerResult {
         do {
             try beginCommand()
             let current = registry.snapshot()
@@ -217,11 +331,12 @@ private actor DocumentPaintTransactionWorker {
                 explicitlyRemovedCoordinates: [],
                 requiresHistoryPair: true
             )
-            return try executeMutation(
+            return try await executeMutation(
                 transaction.prepareMutation(request),
                 requiresHistory: true,
                 strokeSource: source,
-                compositeParameters: compositeParameters
+                compositeParameters: compositeParameters,
+                canonicalReservation: canonicalReservation
             )
         } catch {
             try? source.cancelUnclaimed()
@@ -231,8 +346,9 @@ private actor DocumentPaintTransactionWorker {
     }
 
     func clear(
-        layerID: UUID
-    ) async throws -> DocumentPaintSurfaceApplicationResult {
+        layerID: UUID,
+        canonicalReservation: DocumentPaintCanonicalRevisionReservation
+    ) async throws -> DocumentPaintSurfaceWorkerResult {
         try beginCommand()
         let current = registry.snapshot()
         let references = current.layers.first {
@@ -247,9 +363,10 @@ private actor DocumentPaintTransactionWorker {
             explicitlyRemovedCoordinates: references.map(\.coordinate),
             requiresHistoryPair: true
         )
-        return try executeMutation(
+        return try await executeMutation(
             transaction.prepareMutation(request),
-            requiresHistory: true
+            requiresHistory: true,
+            canonicalReservation: canonicalReservation
         )
     }
 
@@ -271,17 +388,20 @@ private actor DocumentPaintTransactionWorker {
     }
 
     func importEncoded(
-        _ request: DocumentPaintSurfaceEncodedImportRequest
-    ) async throws -> DocumentPaintSurfaceApplicationResult {
+        _ request: DocumentPaintSurfaceEncodedImportRequest,
+        canonicalReservation: DocumentPaintCanonicalRevisionReservation
+    ) async throws -> DocumentPaintSurfaceWorkerResult {
         try beginCommand()
-        return try executeMutation(
+        return try await executeMutation(
             transaction.prepareEncodedImport(request),
-            requiresHistory: false
+            requiresHistory: false,
+            canonicalReservation: canonicalReservation
         )
     }
 
     func restore(
-        _ request: DocumentPaintSurfaceRestoreRequest
+        _ request: DocumentPaintSurfaceRestoreRequest,
+        canonicalReservation: DocumentPaintCanonicalRevisionReservation
     ) async throws -> DocumentPaintSurfaceRestoreResult {
         try beginCommand()
         var owned: OwnedRestore?
@@ -307,7 +427,9 @@ private actor DocumentPaintTransactionWorker {
                 try settle(owned)
                 throw CancellationError()
             }
+            try canonicalReservation.prepare()
             let result = try transaction.publishRestore(terminal)
+            canonicalReservation.markPublished(geometry: registry.geometry)
             owned = nil
             return result
         } catch {
@@ -347,17 +469,19 @@ private actor DocumentPaintTransactionWorker {
             -> DocumentPaintMutationPreparation,
         requiresHistory: Bool,
         strokeSource: StrokePreparedCommitMutationSource? = nil,
-        compositeParameters: DocumentPaintStrokeCompositeParameters? = nil
-    ) throws -> DocumentPaintSurfaceApplicationResult {
+        compositeParameters: DocumentPaintStrokeCompositeParameters? = nil,
+        canonicalReservation: DocumentPaintCanonicalRevisionReservation
+    ) async throws -> DocumentPaintSurfaceWorkerResult {
         var owned: OwnedMutation?
         do {
             switch try preparation() {
             case let .noOp(result):
                 try? strokeSource?.cancelUnclaimed()
-                return DocumentPaintSurfaceApplicationResult(
+                return DocumentPaintSurfaceWorkerResult(
                     didPublish: false,
                     layerID: result.layerID,
                     generation: result.generation,
+                    dirtyCoordinates: [],
                     historyPair: nil
                 )
             case let .prepared(prepared):
@@ -413,12 +537,18 @@ private actor DocumentPaintTransactionWorker {
                     try settle(owned)
                     throw CancellationError()
                 }
+                try canonicalReservation.prepare()
                 let result = try transaction.publish(terminal)
+                canonicalReservation.markPublished(geometry: registry.geometry)
+                #if DEBUG
+                await afterMutationPublicationForTesting?()
+                #endif
                 owned = nil
-                return DocumentPaintSurfaceApplicationResult(
+                return DocumentPaintSurfaceWorkerResult(
                     didPublish: true,
                     layerID: result.layerID,
                     generation: result.afterGeneration,
+                    dirtyCoordinates: result.dirtyCoordinates,
                     historyPair: result.historyPair
                 )
             }
@@ -491,6 +621,14 @@ private actor DocumentPaintTransactionWorker {
         case let .terminal(handle): try transaction.discard(handle)
         }
     }
+
+    #if DEBUG
+    func testingSetAfterMutationPublicationHook(
+        _ hook: (@Sendable () async -> Void)?
+    ) {
+        afterMutationPublicationForTesting = hook
+    }
+    #endif
 }
 
 /// The single production ownership root for sparse document paint state.
@@ -507,6 +645,8 @@ final class DocumentPaintRenderContext {
     }
 
     private let identity = UUID()
+    private let canonicalDocumentGeneration: UInt64
+    private var canonicalGeometry: DocumentPaintGeometry
     var activeLayerID: UUID { registry.layerStack.activeLayerID }
     var layerStack: LayerStack { registry.layerStack }
 
@@ -522,6 +662,11 @@ final class DocumentPaintRenderContext {
     private let layerRevisionStoreIdentity =
         RasterRevisionStoreIdentitySource.shared.makeIdentity()
     private var nextLayerRevisionID: UInt64 = 1
+    private var geometryRevision: UInt64 = 0
+    private var layerStackRevision: UInt64 = 0
+    private var compositeRevision: UInt64 = 0
+    private var activeCanonicalReservation:
+        DocumentPaintCanonicalRevisionReservation?
     private var layerHistoryRevisions:
         [StoredRasterRevisionID: LayerSurfaceHistoryRevision] = [:]
     private var layerHistoryResidentBytes = 0
@@ -578,6 +723,9 @@ final class DocumentPaintRenderContext {
         transferByteCapacity: Int,
         maximumRevisionBytes: Int,
         generation: UInt64 = 0,
+        geometryRevision: UInt64 = 0,
+        layerStackRevision: UInt64 = 0,
+        compositeRevision: UInt64 = 0,
         visiblePlanConfiguration:
             DocumentPaintVisiblePlanControllerConfiguration = .production
     ) throws {
@@ -645,6 +793,11 @@ final class DocumentPaintRenderContext {
         self.registry = registry
         self.revisionStore = revisionStore
         self.maximumRevisionBytes = maximumRevisionBytes
+        canonicalDocumentGeneration = generation
+        canonicalGeometry = geometry
+        self.geometryRevision = geometryRevision
+        self.layerStackRevision = layerStackRevision
+        self.compositeRevision = compositeRevision
         transactionWorker = DocumentPaintTransactionWorker(
             transaction: transaction,
             registry: registry,
@@ -672,6 +825,68 @@ final class DocumentPaintRenderContext {
             library: library,
             limits: .production,
             planLimits: .documentProduction
+        )
+    }
+
+    func canonicalStateIdentity() -> CanvasCanonicalStateIdentity {
+        if let published = activeCanonicalReservation?.publishedResult() {
+            return published
+        }
+        return CanvasCanonicalStateIdentity(
+            documentGeneration: canonicalDocumentGeneration,
+            geometry: canonicalGeometry,
+            geometryRevision: geometryRevision,
+            layerStackRevision: layerStackRevision,
+            compositeRevision: compositeRevision
+        )
+    }
+
+    private func canonicalRevisionReservation(
+        geometry: Bool = false,
+        layerStack: Bool = false,
+        composite: Bool = true
+    ) -> DocumentPaintCanonicalRevisionReservation {
+        DocumentPaintCanonicalRevisionReservation(
+            geometryRevision: geometryRevision,
+            layerStackRevision: layerStackRevision,
+            compositeRevision: compositeRevision,
+            documentGeneration: canonicalDocumentGeneration,
+            advancesGeometry: geometry,
+            advancesLayerStack: layerStack,
+            advancesComposite: composite
+        )
+    }
+
+    private func publishCanonicalRevisionAdvance(
+        _ prepared: DocumentPaintPreparedCanonicalRevisionAdvance
+    ) -> CanvasCanonicalStateIdentity {
+        canonicalGeometry = registry.geometry
+        geometryRevision = prepared.geometryRevision
+        layerStackRevision = prepared.layerStackRevision
+        compositeRevision = prepared.compositeRevision
+        return canonicalStateIdentity()
+    }
+
+    private func applicationResult(
+        _ result: DocumentPaintSurfaceWorkerResult,
+        reservation: DocumentPaintCanonicalRevisionReservation
+    ) -> DocumentPaintSurfaceApplicationResult {
+        let identity: CanvasCanonicalStateIdentity
+        if result.didPublish {
+            guard let prepared = reservation.result() else {
+                preconditionFailure("Published mutation lost revision reservation")
+            }
+            identity = publishCanonicalRevisionAdvance(prepared)
+        } else {
+            identity = canonicalStateIdentity()
+        }
+        return DocumentPaintSurfaceApplicationResult(
+            didPublish: result.didPublish,
+            layerID: result.layerID,
+            generation: result.generation,
+            dirtyCoordinates: result.dirtyCoordinates,
+            canonicalIdentity: identity,
+            historyPair: result.historyPair
         )
     }
 
@@ -1006,12 +1221,26 @@ final class DocumentPaintRenderContext {
     ) async throws {
         let claim = try beginCommandOperation()
         defer { finishCommandOperation(claim) }
+        let canonicalReservation = canonicalRevisionReservation(
+            geometry: true,
+            layerStack: true
+        )
+        activeCanonicalReservation = canonicalReservation
+        defer { activeCanonicalReservation = nil }
+        try canonicalReservation.prepare()
         let writer = try registry.prepareNativeArchiveImport(manifest)
         do {
             try await Task.detached(priority: .utility) {
                 try consume(writer)
                 try writer.finish()
+                canonicalReservation.markPublished(
+                    geometry: manifest.geometry
+                )
             }.value
+            guard let prepared = canonicalReservation.result() else {
+                preconditionFailure("Native import lost revision reservation")
+            }
+            _ = publishCanonicalRevisionAdvance(prepared)
         } catch {
             do {
                 try writer.cancel()
@@ -1238,10 +1467,15 @@ final class DocumentPaintRenderContext {
         if let source = activeTransientDisplaySource {
             try await abandonTransientDisplaySource(source)
         }
-        return try await transactionWorker.commitStroke(
+        let reservation = canonicalRevisionReservation()
+        activeCanonicalReservation = reservation
+        defer { activeCanonicalReservation = nil }
+        let result = try await transactionWorker.commitStroke(
             source,
-            compositeParameters: compositeParameters
+            compositeParameters: compositeParameters,
+            canonicalReservation: reservation
         )
+        return applicationResult(result, reservation: reservation)
     }
 
     func clear() async throws -> DocumentPaintSurfaceApplicationResult {
@@ -1254,7 +1488,14 @@ final class DocumentPaintRenderContext {
         } catch LayerStackError.activeLayerLocked(let lockedID) {
             throw DocumentPaintRenderContextError.activeLayerLocked(lockedID)
         }
-        return try await transactionWorker.clear(layerID: layerID)
+        let reservation = canonicalRevisionReservation()
+        activeCanonicalReservation = reservation
+        defer { activeCanonicalReservation = nil }
+        let result = try await transactionWorker.clear(
+            layerID: layerID,
+            canonicalReservation: reservation
+        )
+        return applicationResult(result, reservation: reservation)
     }
 
     func applyLayerStack(
@@ -1265,12 +1506,21 @@ final class DocumentPaintRenderContext {
         let transaction = try registry.prepareLayerSurfaceTransaction(
             layerStack: target
         )
-        return try publishLayerTransaction(transaction)
+        return try publishLayerTransaction(
+            transaction,
+            geometryChanges: false
+        )
     }
 
     private func publishLayerTransaction(
-        _ transaction: LayerSurfaceTransaction
+        _ transaction: LayerSurfaceTransaction,
+        geometryChanges: Bool
     ) throws -> DocumentPaintLayerApplicationResult {
+        let canonicalReservation = canonicalRevisionReservation(
+            geometry: geometryChanges,
+            layerStack: true
+        )
+        try canonicalReservation.prepare()
         let retainedBytes = transaction.historyRetainedBytes
         let (usedBytes, usedOverflow) = revisionStore.residentBytes
             .addingReportingOverflow(layerHistoryResidentBytes)
@@ -1309,6 +1559,10 @@ final class DocumentPaintRenderContext {
             namespace: layerRevisionStoreIdentity
         )
         let receipt = transaction.commit()
+        guard let prepared = canonicalReservation.result() else {
+            preconditionFailure("Layer transaction lost revision reservation")
+        }
+        _ = publishCanonicalRevisionAdvance(prepared)
         nextLayerRevisionID += 1
         layerHistoryRevisions[id] = receipt.historyRevision
         layerHistoryResidentBytes = nextResidentBytes
@@ -1338,11 +1592,21 @@ final class DocumentPaintRenderContext {
             throw DocumentPaintRenderContextError
                 .missingLayerHistoryRevision(reference.id)
         }
+        let targetGeometry = revision.geometry(for: endpoint)
         let beforeGeometry = registry.geometry
+        let canonicalReservation = canonicalRevisionReservation(
+            geometry: targetGeometry != beforeGeometry,
+            layerStack: true
+        )
+        try canonicalReservation.prepare()
         let receipt = try registry.prepareLayerSurfaceRestore(
             revision,
             endpoint: endpoint
         ).commit()
+        guard let prepared = canonicalReservation.result() else {
+            preconditionFailure("Layer restore lost revision reservation")
+        }
+        _ = publishCanonicalRevisionAdvance(prepared)
         return DocumentPaintLayerApplicationResult(
             before: receipt.before,
             after: receipt.after,
@@ -1370,7 +1634,10 @@ final class DocumentPaintRenderContext {
         ) else { return nil }
         do {
             try Task.checkCancellation()
-            return try publishLayerTransaction(transaction)
+            return try publishLayerTransaction(
+                transaction,
+                geometryChanges: true
+            )
         } catch {
             transaction.cancel()
             throw error
@@ -1396,7 +1663,17 @@ final class DocumentPaintRenderContext {
             )
         }.value
         try Task.checkCancellation()
-        return try await transactionWorker.importEncoded(request)
+        let reservation = canonicalRevisionReservation(
+            geometry: true,
+            layerStack: true
+        )
+        activeCanonicalReservation = reservation
+        defer { activeCanonicalReservation = nil }
+        let result = try await transactionWorker.importEncoded(
+            request,
+            canonicalReservation: reservation
+        )
+        return applicationResult(result, reservation: reservation)
     }
 
     func restorePublishedRevision(
@@ -1410,8 +1687,33 @@ final class DocumentPaintRenderContext {
             reference: reference,
             targetGeometry: targetGeometry
         )
-        return try await transactionWorker.restore(request)
+        let geometryChanges = targetGeometry != registry.geometry
+        let canonicalReservation = canonicalRevisionReservation(
+            geometry: geometryChanges,
+            layerStack: geometryChanges
+        )
+        activeCanonicalReservation = canonicalReservation
+        defer { activeCanonicalReservation = nil }
+        let result = try await transactionWorker.restore(
+            request,
+            canonicalReservation: canonicalReservation
+        )
+        if result.afterGeneration != result.beforeGeneration {
+            guard let prepared = canonicalReservation.result() else {
+                preconditionFailure("Raster restore lost revision reservation")
+            }
+            _ = publishCanonicalRevisionAdvance(prepared)
+        }
+        return result
     }
+
+    #if DEBUG
+    func testingSetAfterMutationPublicationHook(
+        _ hook: (@Sendable () async -> Void)?
+    ) async {
+        await transactionWorker.testingSetAfterMutationPublicationHook(hook)
+    }
+    #endif
 
     func releaseRevisions(
         _ revisionIDs: Set<StoredRasterRevisionID>

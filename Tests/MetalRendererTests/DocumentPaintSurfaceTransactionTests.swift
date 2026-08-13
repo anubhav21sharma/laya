@@ -204,10 +204,9 @@ struct DocumentPaintSurfaceTransactionTests {
     }
 
     @Test
-    func requestValidationRejectsWrongLayerGeometryOrderDuplicatesAndBounds() throws {
+    func requestValidationRejectsWrongLayerGeometryAndBounds() throws {
         guard let fixture = try TransactionFixture.make() else { return }
         let zero = PaintTileCoordinate(x: 0, y: 0)
-        let one = PaintTileCoordinate(x: 1, y: 0)
         let wrongLayer = UUID()
         let wrongGeometry = try transactionGeometry(width: 768, height: 512)
         let baseline = fixture.registry.snapshot()
@@ -238,18 +237,6 @@ struct DocumentPaintSurfaceTransactionTests {
                 )
             )
         }
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .unsortedCoordinate(previous: one, current: zero)) {
-            _ = try fixture.coordinator.prepareMutation(
-                fixture.request(dirty: [one, zero])
-            )
-        }
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .duplicateCoordinate(zero)) {
-            _ = try fixture.coordinator.prepareMutation(
-                fixture.request(dirty: [zero, zero])
-            )
-        }
         let outside = PaintTileCoordinate(x: 2, y: 0)
         #expect(throws: DocumentPaintSurfaceTransactionError
             .coordinateOutsideCandidate(outside)) {
@@ -259,6 +246,25 @@ struct DocumentPaintSurfaceTransactionTests {
         }
         #expect(fixture.coordinator.snapshot().state == .idle)
         #expect(fixture.registry.snapshot() == baseline)
+    }
+
+    @Test
+    func transactionBoundarySortsAndDeduplicatesDirtyCoordinates() throws {
+        guard let fixture = try TransactionFixture.make() else { return }
+        let zero = PaintTileCoordinate(x: 0, y: 0)
+        let one = PaintTileCoordinate(x: 1, y: 0)
+
+        let result = try transactionCommitWithHistory(
+            fixture,
+            request: fixture.request(dirty: [one, zero, one])
+        )
+
+        #expect(result.dirtyCoordinates == [zero, one])
+        #expect(fixture.registry.snapshot().layers[0].references
+            .map(\.coordinate) == [zero, one])
+        if let pair = result.historyPair {
+            try fixture.revisions.release(pair.revisionIDs)
+        }
     }
 
     @Test

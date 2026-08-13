@@ -89,6 +89,14 @@ public struct DocumentPaintGeometry: Equatable, Sendable {
     }
 }
 
+struct CanvasCanonicalStateIdentity: Equatable, Sendable {
+    let documentGeneration: UInt64
+    let geometry: DocumentPaintGeometry
+    let geometryRevision: UInt64
+    let layerStackRevision: UInt64
+    let compositeRevision: UInt64
+}
+
 public struct DocumentPaintSurfaceNamespace: Hashable, Sendable {
     public let storeIdentity: PaintTileStoreIdentity
     public let surfaceID: UUID
@@ -1189,6 +1197,15 @@ final class LayerSurfaceHistoryRevision: @unchecked Sendable, Equatable {
         lhs: LayerSurfaceHistoryRevision,
         rhs: LayerSurfaceHistoryRevision
     ) -> Bool { lhs === rhs }
+
+    func geometry(for endpoint: LayerSurfaceRevisionEndpoint)
+        -> DocumentPaintGeometry
+    {
+        switch endpoint {
+        case .before: before.geometry
+        case .after: after.geometry
+        }
+    }
 
     func borrow() throws -> Borrow {
         lock.lock()
