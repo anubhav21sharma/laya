@@ -207,6 +207,79 @@ struct GridRendererSparseCutoverTests {
     #if DEBUG
     @Test
     @MainActor
+    func publishedRestoreInvalidatesBeforeRevisionReleaseFailure()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let renderer = try makeSparseCutoverRenderer(
+            device: device,
+            library: try makeSparseCutoverLibrary(device: device)
+        )
+        let first = CanvasPresentationRevision(sequence: 1)
+        let second = CanvasPresentationRevision(sequence: 2)
+        let gate = PresentationPreparationGate(blockedRevision: first)
+        renderer.installPresentationPreparationGateForTesting(gate)
+        renderer.installPaintRevisionReleaseFailureForTesting(
+            .commandFailed("injected revision release failure")
+        )
+        let view = sparseCutoverView(device: device)
+
+        renderer.draw(in: view)
+        await gate.waitUntilStarted(first)
+        let identityBefore = renderer.paintCanonicalStateIdentityForTesting()
+        let revisionBefore =
+            renderer.paintDisplayPreparationRevisionForTesting
+        var bytes = [UInt8](repeating: 0, count: 64 * 64 * 4)
+        bytes[0] = 29
+        bytes[1] = 61
+        bytes[2] = 113
+        bytes[3] = 255
+        let restored = CommittedDocumentSnapshot(
+            canvasSize: PixelSize(width: 64, height: 64),
+            documentConfiguration: .finite(.plain),
+            documentDomainLocked: true,
+            radialGeometryLocked: false,
+            storage: .singleRaster(bgra8PremultipliedBytes: bytes)
+        )
+
+        do {
+            try await renderer.restoreCommittedDocument(restored)
+            Issue.record("revision release failure must propagate")
+        } catch let error as MetalRendererError {
+            #expect(
+                error
+                    == .commandFailed("injected revision release failure")
+            )
+        }
+
+        let identityAfter = renderer.paintCanonicalStateIdentityForTesting()
+        #expect(identityAfter.compositeRevision > identityBefore.compositeRevision)
+        #expect(renderer.interactiveFrameHasDemandForTesting)
+        #expect(
+            renderer.paintDisplayPreparationRevisionForTesting
+                == revisionBefore + 1
+        )
+        let captured = try await renderer.captureCommittedDocument()
+        guard case let .singleRaster(actual) = captured.storage else {
+            Issue.record("plain restore must remain a single raster")
+            return
+        }
+        #expect(Array(actual.prefix(4)) == Array(bytes.prefix(4)))
+
+        await gate.releaseBlockedRevision()
+        await gate.waitUntilRetired(second)
+        let state = await gate.snapshot
+
+        #expect(state.started == [first, second])
+        #expect(state.published == [second])
+        #expect(renderer.paintDisplayPreparationOwnershipCountForTesting == 0)
+        #expect(renderer.lastError == nil)
+    }
+    #endif
+
+    #if DEBUG
+    @Test
+    @MainActor
     func failedTransientAcknowledgementSettlesOnceAndNewerDemandProgresses()
         async throws
     {

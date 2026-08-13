@@ -521,6 +521,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     #if DEBUG
     private var paintDisplayAcknowledgementStatusOverrideForTesting:
         StrokePreparedFrameAcknowledgementStatus?
+    private var paintRevisionReleaseFailureForTesting: MetalRendererError?
     #endif
     #if DEBUG
     private var paintDisplayPublishedRevisions:
@@ -596,6 +597,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
         )
         invalidatePaintDisplayPreparation()
+    }
+    package func installPaintRevisionReleaseFailureForTesting(
+        _ error: MetalRendererError
+    ) {
+        paintRevisionReleaseFailureForTesting = error
+    }
+    package var paintDisplayPreparationRevisionForTesting: UInt64 {
+        paintDisplayPreparationSequence
     }
     #endif
     package func installPaintDisplayPreparationTaskForTesting(
@@ -2984,6 +2993,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             candidateGeometry: geometry,
             input: input
         )
+        invalidatePaintDisplayPreparation()
+        #if DEBUG
+        if let paintRevisionReleaseFailureForTesting {
+            self.paintRevisionReleaseFailureForTesting = nil
+            throw paintRevisionReleaseFailureForTesting
+        }
+        #endif
         if let pair = result.historyPair {
             try await paintContext.releaseRevisions([
                 pair.before.id,
@@ -2993,7 +3009,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         await refreshPaintRevisionResidentBytes()
         documentDomainLocked = snapshot.documentDomainLocked
         radialGeometryLocked = snapshot.radialGeometryLocked
-        invalidatePaintDisplayPreparation()
     }
 
     func shutdown(
