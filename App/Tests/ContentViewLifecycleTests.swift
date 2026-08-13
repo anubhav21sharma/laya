@@ -122,6 +122,35 @@ func imageExportPolicyKeepsTheProductRouteAvailableWithoutAcceptanceInjection()
 }
 
 @Test
+func stagedFileExportDocumentsPreserveBytesAndExactTypes() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try FileManager.default.createDirectory(
+        at: directory,
+        withIntermediateDirectories: false
+    )
+    let projectURL = directory.appendingPathComponent("drawing.patternproj")
+    let pngURL = directory.appendingPathComponent("drawing.png")
+    let projectBytes = Data([1, 2, 3, 4])
+    let pngBytes = Data([137, 80, 78, 71, 13, 10, 26, 10])
+    try projectBytes.write(to: projectURL)
+    try pngBytes.write(to: pngURL)
+
+    let project = try StagedEditorExportDocument(
+        stagedFileURL: projectURL
+    )
+    let png = try StagedEditorExportDocument(stagedFileURL: pngURL)
+
+    #expect(StagedEditorExportDocument.readableContentTypes == [
+        .patternProject,
+        .png,
+    ])
+    #expect(project.data == projectBytes)
+    #expect(png.data == pngBytes)
+}
+
+@Test
 func stageDRouteConfigurationRequiresEveryDeterministicBoundary() throws {
     #expect(StageDAppRouteConfiguration(environment: [:]) == nil)
     let directory = FileManager.default.temporaryDirectory
@@ -337,7 +366,7 @@ func stageDRouteCaptureSerializesAnOverlappingAcceptanceExport() async throws {
     recorder.bind(controller)
     let gate = DocumentPaintPreparationTestGate()
     let export = Task { @MainActor in
-        try await recorder.withAcceptanceDisplayPreparationSuspended(
+        try await recorder.withDisplayPreparationSuspended(
             for: controller
         ) {
             await gate.wait()
@@ -361,6 +390,41 @@ func stageDRouteCaptureSerializesAnOverlappingAcceptanceExport() async throws {
     await gate.open()
     try await export.value
     try await capture.value
+    #expect(!renderer.paintDisplayPreparationIsSuspendedForTesting)
+}
+
+@Test
+@MainActor
+func productCaptureCoordinatesQuiescenceWithoutAcceptanceConfiguration()
+    async throws
+{
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    let recorder = StageDAppRouteEvidenceRecorder(environment: [:])
+    recorder.bind(controller)
+
+    controller.handleStrokeSample(.mouse(
+        position: ScreenPoint(x: 24, y: 24),
+        timestamp: 0,
+        phase: .began
+    ))
+    controller.handleStrokeSample(.mouse(
+        position: ScreenPoint(x: 40, y: 40),
+        timestamp: 1,
+        phase: .ended
+    ))
+
+    var observedSuspendedQuiescence = false
+    try await recorder.withDisplayPreparationSuspended(
+        for: controller
+    ) {
+        observedSuspendedQuiescence =
+            renderer.paintDisplayPreparationIsSuspendedForTesting
+                && renderer.isIdle
+                && !controller.model.isBusy
+    }
+
+    #expect(observedSuspendedQuiescence)
     #expect(!renderer.paintDisplayPreparationIsSuspendedForTesting)
 }
 

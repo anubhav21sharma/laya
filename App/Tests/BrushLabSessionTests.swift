@@ -431,7 +431,12 @@ struct BrushLabSessionTests {
         let supersededSelection = Task {
             try await runtime.session.selectReviewCard(superseded.cardID)
         }
-        await gate.waitUntilPaused()
+        guard await gate.waitUntilPaused() else {
+            supersededSelection.cancel()
+            gate.resume()
+            Issue.record("Professional compilation never reached its gate.")
+            return
+        }
         try await runtime.session.selectReviewCard(latest.cardID)
         gate.resume()
 
@@ -489,7 +494,12 @@ struct BrushLabSessionTests {
         let supersededSelection = Task {
             try await runtime.session.selectReviewCard(superseded.cardID)
         }
-        await gate.waitUntilPaused()
+        guard await gate.waitUntilPaused() else {
+            supersededSelection.cancel()
+            gate.resume()
+            Issue.record("Professional compilation never reached its gate.")
+            return
+        }
         runtime.session.selectReviewMatrix(.stageFourDiagnostic)
         try await runtime.session.selectReviewCard(winning.cardID)
         _ = try await runtime.session.replaySelectedReviewCard()
@@ -546,7 +556,12 @@ struct BrushLabSessionTests {
         let supersededSelection = Task {
             try await runtime.session.selectReviewCard(superseded.cardID)
         }
-        await gate.waitUntilPaused()
+        guard await gate.waitUntilPaused() else {
+            supersededSelection.cancel()
+            gate.resume()
+            Issue.record("Stage 4 compilation never reached its gate.")
+            return
+        }
         runtime.session.selectReviewMatrix(.stageFiveProfessional)
         try await runtime.session.selectReviewCard(winning.cardID)
         _ = try await runtime.session.replaySelectedReviewCard()
@@ -1344,6 +1359,163 @@ struct BrushLabSessionTests {
             runtime.session.compiledBrush?.renderIdentity.semanticHash
                 == runtime.session.packageContentHash
         )
+    }
+
+    @Test
+    func firstStageFourReplayPublishesLoadingUntilRendererIsIdle()
+        async throws
+    {
+        guard let runtime = try makeRuntime() else { return }
+        let card = try #require(runtime.session.manualCards.first)
+        try await runtime.session.selectManualCard(card.cardID)
+
+        var replayResult: Result<BrushLabCompletedReplay, Error>?
+        let replayTask = Task {
+            do {
+                replayResult = .success(
+                    try await runtime.session.replaySelectedManualCard()
+                )
+            } catch {
+                replayResult = .failure(error)
+            }
+        }
+        let clock = ContinuousClock()
+        let loadingDeadline = clock.now.advanced(by: .seconds(2))
+        while !runtime.session.isLoading, clock.now < loadingDeadline
+        {
+            await Task.yield()
+        }
+
+        #expect(runtime.session.isLoading)
+        let resultDeadline = clock.now.advanced(by: .seconds(10))
+        while replayResult == nil, clock.now < resultDeadline {
+            #expect(
+                runtime.session.isLoading,
+                "Replay loading ended before evidence was published."
+            )
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        guard let replayResult else {
+            replayTask.cancel()
+            Issue.record("Stage 4 replay exceeded its bounded test wait.")
+            return
+        }
+        let replay = try replayResult.get()
+        #expect(replay.cardID == card.cardID)
+        #expect(runtime.session.completedReplay?.generationID == replay.generationID)
+        #expect(runtime.controller.renderer.isIdle)
+        #expect(!runtime.session.isLoading)
+    }
+
+    @Test
+    func stageFourReplayDeadlineFailsClosedAndReleasesLoading()
+        async throws
+    {
+        let card = try #require(BrushLabManualCard.fixedMatrix.first)
+        let gate = ProfessionalCompilationGate(
+            definitionID: card.brushID,
+            matchingOccurrence: 2
+        )
+        guard let runtime = try makeRuntime(
+            compilerHooks: BrushCompilerTestHooks(
+                onPackageHash: { definitionID in
+                    await gate.pauseMatching(definitionID: definitionID)
+                }
+            ),
+            replayTimeoutNanoseconds: 50_000_000
+        ) else { return }
+        try await runtime.session.selectManualCard(card.cardID)
+
+        var replayResult: Result<BrushLabCompletedReplay, Error>?
+        let replayTask = Task {
+            do {
+                replayResult = .success(
+                    try await runtime.session.replaySelectedManualCard()
+                )
+            } catch {
+                replayResult = .failure(error)
+            }
+        }
+        guard await gate.waitUntilPaused() else {
+            replayTask.cancel()
+            gate.resume()
+            Issue.record("Replay compilation never reached its gate.")
+            return
+        }
+        #expect(runtime.session.isLoading)
+
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(2))
+        while replayResult == nil, clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        guard let replayResult else {
+            gate.resume()
+            replayTask.cancel()
+            Issue.record("Replay deadline did not bound the stalled compiler.")
+            return
+        }
+        #expect(throws: BrushLabEvidenceError.replayTimedOut) {
+            try replayResult.get()
+        }
+        #expect(!runtime.session.isLoading)
+        #expect(runtime.session.completedReplay == nil)
+        gate.resume()
+    }
+
+    @Test
+    func stageFourReplayCancellationInvalidatesBeforeCompilerResumes()
+        async throws
+    {
+        let card = try #require(BrushLabManualCard.fixedMatrix.first)
+        let gate = ProfessionalCompilationGate(
+            definitionID: card.brushID,
+            matchingOccurrence: 2
+        )
+        guard let runtime = try makeRuntime(
+            compilerHooks: BrushCompilerTestHooks(
+                onPackageHash: { definitionID in
+                    await gate.pauseMatching(definitionID: definitionID)
+                }
+            )
+        ) else { return }
+        try await runtime.session.selectManualCard(card.cardID)
+
+        var replayResult: Result<BrushLabCompletedReplay, Error>?
+        let replayTask = Task {
+            do {
+                replayResult = .success(
+                    try await runtime.session.replaySelectedManualCard()
+                )
+            } catch {
+                replayResult = .failure(error)
+            }
+        }
+        guard await gate.waitUntilPaused() else {
+            replayTask.cancel()
+            gate.resume()
+            Issue.record("Replay compilation never reached its gate.")
+            return
+        }
+        #expect(runtime.session.isLoading)
+        replayTask.cancel()
+
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(2))
+        while replayResult == nil, clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        guard let replayResult else {
+            gate.resume()
+            Issue.record("Replay cancellation did not resolve the caller.")
+            return
+        }
+        #expect(throws: CancellationError.self) {
+            try replayResult.get()
+        }
+        #expect(!runtime.session.isLoading)
+        #expect(runtime.session.completedReplay == nil)
+        gate.resume()
     }
 
     @Test
@@ -2294,7 +2466,8 @@ struct BrushLabSessionTests {
 
     private func makeRuntime(
         brushCacheBudgetBytes: Int = 128 * 1_024 * 1_024,
-        compilerHooks: BrushCompilerTestHooks = .none
+        compilerHooks: BrushCompilerTestHooks = .none,
+        replayTimeoutNanoseconds: UInt64 = 30_000_000_000
     ) throws -> (
         controller: EditorSessionController,
         session: BrushLabSession
@@ -2324,43 +2497,54 @@ struct BrushLabSessionTests {
         )
         return (
             controller,
-            BrushLabSession(controller: controller, compiler: compiler)
+            BrushLabSession(
+                controller: controller,
+                compiler: compiler,
+                replayTimeoutNanoseconds: replayTimeoutNanoseconds
+            )
         )
     }
 
     @MainActor
     private final class ProfessionalCompilationGate {
         private let definitionID: String
+        private let matchingOccurrence: Int
+        private var matchCount = 0
         private var hasPaused = false
+        private var resumeRequested = false
         private var pauseContinuation: CheckedContinuation<Void, Never>?
-        private var arrivalContinuation: CheckedContinuation<Void, Never>?
 
-        init(definitionID: String) {
+        init(definitionID: String, matchingOccurrence: Int = 1) {
             self.definitionID = definitionID
+            self.matchingOccurrence = matchingOccurrence
         }
 
         func pauseFirstMatching(definitionID: String) async {
-            guard !hasPaused,
-                  definitionID == self.definitionID
-            else {
-                return
-            }
+            await pauseMatching(definitionID: definitionID)
+        }
+
+        func pauseMatching(definitionID: String) async {
+            guard !hasPaused, definitionID == self.definitionID else { return }
+            matchCount += 1
+            guard matchCount == matchingOccurrence else { return }
             hasPaused = true
-            arrivalContinuation?.resume()
-            arrivalContinuation = nil
+            guard !resumeRequested else { return }
             await withCheckedContinuation {
                 pauseContinuation = $0
             }
         }
 
-        func waitUntilPaused() async {
-            guard !hasPaused else { return }
-            await withCheckedContinuation {
-                arrivalContinuation = $0
+        func waitUntilPaused() async -> Bool {
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(5))
+            while !hasPaused, clock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(1))
             }
+            return hasPaused
         }
 
         func resume() {
+            resumeRequested = true
             pauseContinuation?.resume()
             pauseContinuation = nil
         }

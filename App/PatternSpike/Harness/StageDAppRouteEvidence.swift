@@ -553,20 +553,30 @@ final class StageDAppRouteEvidenceRecorder {
         }
     }
 
-    func withAcceptanceDisplayPreparationSuspended<Result>(
+    func withDisplayPreparationSuspended<Result>(
         for controller: EditorSessionController,
         operation: () async throws -> Result
     ) async throws -> Result {
-        guard configuration != nil, self.controller === controller else {
-            return try await operation()
+        guard self.controller === controller else {
+            throw StageDAppRouteEvidenceError.captureControllerUnavailable
         }
-        try await acquireCaptureOrExportOperation(deadline: nil)
+        let started = DispatchTime.now().uptimeNanoseconds
+        let (deadline, overflow) = started.addingReportingOverflow(
+            quiescenceTimeoutNanoseconds
+        )
+        guard !overflow else {
+            throw StageDAppRouteEvidenceError.quiescenceTimedOut
+        }
+        try await acquireCaptureOrExportOperation(deadline: deadline)
         defer { releaseCaptureOrExportOperation() }
         try await controller.renderer
-            .suspendPaintDisplayPreparationForCapture()
+            .suspendPaintDisplayPreparationForCapture(
+                deadlineUptimeNanoseconds: deadline
+            )
         defer {
             try? controller.renderer.resumePaintDisplayPreparationAfterCapture()
         }
+        try await awaitQuiescence(controller, deadline: deadline)
         return try await operation()
     }
 
@@ -1063,6 +1073,7 @@ private enum StageDAppRouteEvidenceError: LocalizedError {
     case routeSequenceExhausted
     case noRouteToRerecord
     case quiescenceTimedOut
+    case captureControllerUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -1072,6 +1083,8 @@ private enum StageDAppRouteEvidenceError: LocalizedError {
             "no Stage D route has been recorded yet"
         case .quiescenceTimedOut:
             "Stage D evidence could not reach controller/renderer quiescence"
+        case .captureControllerUnavailable:
+            "The editor is not ready for capture or export."
         }
     }
 }

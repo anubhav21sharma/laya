@@ -265,10 +265,19 @@ final class BrushLabSession {
     private var cpuEncodeSamples: [Double] = []
     private var gpuSamples: [Double] = []
     private var sessionOperationGeneration: UInt64 = 0
+    private var loadingOperationGeneration: UInt64?
+    private var loadingOperationDepth = 0
+    private let replayTimeoutNanoseconds: UInt64
 
-    init(controller: EditorSessionController, compiler: BrushCompiler) {
+    init(
+        controller: EditorSessionController,
+        compiler: BrushCompiler,
+        replayTimeoutNanoseconds: UInt64 = 30_000_000_000
+    ) {
+        precondition(replayTimeoutNanoseconds > 0)
         self.controller = controller
         self.compiler = compiler
+        self.replayTimeoutNanoseconds = replayTimeoutNanoseconds
         try? controller.setDiagnosticFixedStrokeSeed(deterministicSeed)
         controller.onNormalizedInput = { [weak self] sample in
             self?.record(sample)
@@ -451,12 +460,10 @@ final class BrushLabSession {
             return
         }
         let operation = nextSessionOperationGeneration()
-        isLoading = true
+        beginLoading(operation: operation)
         errorMessage = nil
         defer {
-            if isCurrentSessionOperation(operation) {
-                isLoading = false
-            }
+            endLoading(operation: operation)
         }
         do {
             let package = try await Task.detached(
@@ -513,11 +520,9 @@ final class BrushLabSession {
         operation: UInt64
     ) async throws {
         try requireCurrentSessionOperation(operation)
-        isLoading = true
+        beginLoading(operation: operation)
         defer {
-            if isCurrentSessionOperation(operation) {
-                isLoading = false
-            }
+            endLoading(operation: operation)
         }
         errorMessage = nil
         prepareInspectionState()
@@ -595,7 +600,6 @@ final class BrushLabSession {
         _ = nextSessionOperationGeneration()
         reviewMatrix = matrix
         completedReplay = nil
-        isLoading = false
         clearTrace()
     }
 
@@ -720,12 +724,12 @@ final class BrushLabSession {
         resetProfessionalPassNavigation()
         clearTrace()
         errorMessage = nil
-        isLoading = false
     }
 
     private func prepareManualCard(
         _ card: BrushLabManualCard,
-        operation: UInt64
+        operation: UInt64,
+        deadlineUptimeNanoseconds: UInt64? = nil
     ) async throws {
         try requireCurrentSessionOperation(operation)
         guard let anchor = AnchorBrushCatalog.entry(
@@ -745,8 +749,11 @@ final class BrushLabSession {
             != card.documentConfiguration
         {
             try await controller.resetReviewDocument(
-                to: card.documentConfiguration
+                to: card.documentConfiguration,
+                deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
             )
+            try requireCurrentSessionOperation(operation)
+            try Task.checkCancellation()
         }
         let package = try Self.manualPackage(
             anchor: anchor,
@@ -848,14 +855,56 @@ final class BrushLabSession {
             throw BrushLabEvidenceError.manualCardNotSelected
         }
         let operation = nextSessionOperationGeneration()
+        beginLoading(operation: operation)
+        defer {
+            endLoading(operation: operation)
+        }
+        let started = DispatchTime.now().uptimeNanoseconds
+        let (deadline, overflow) = started.addingReportingOverflow(
+            replayTimeoutNanoseconds
+        )
+        guard !overflow else {
+            throw BrushLabEvidenceError.replayTimedOut
+        }
+        do {
+            return try await withReplayDeadline(deadline) { [self] in
+                try await performSelectedManualCardReplay(
+                    card,
+                    operation: operation,
+                    deadlineUptimeNanoseconds: deadline
+                )
+            }
+        } catch {
+            if error is CancellationError
+                || error as? BrushLabEvidenceError == .replayTimedOut
+            {
+                invalidateSessionOperation(operation)
+            }
+            throw error
+        }
+    }
+
+    private func performSelectedManualCardReplay(
+        _ card: BrushLabManualCard,
+        operation: UInt64,
+        deadlineUptimeNanoseconds: UInt64
+    ) async throws -> BrushLabCompletedReplay {
         completedReplay = nil
-        try await controller.clearAndAwaitCompletion()
+        try await controller.clearAndAwaitCompletion(
+            deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+        )
         try requireCurrentSessionOperation(operation)
+        try Task.checkCancellation()
         guard controller.renderer.isIdle else {
             throw BrushLabEvidenceError.rendererBusy
         }
-        try await prepareManualCard(card, operation: operation)
+        try await prepareManualCard(
+            card,
+            operation: operation,
+            deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+        )
         try requireCurrentSessionOperation(operation)
+        try Task.checkCancellation()
         clearTrace()
         let substrateInputCount: Int
         if card.substrate == .recordedOpaqueStroke {
@@ -866,7 +915,11 @@ final class BrushLabSession {
             )
             controller.handleStrokeSamples(card.substrateTraceSamples())
             _ = try await controller.renderer
-                .completePendingInteractiveStrokeAndAwaitIdle()
+                .completePendingInteractiveStrokeAndAwaitIdle(
+                    deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+                )
+            try requireCurrentSessionOperation(operation)
+            try Task.checkCancellation()
             substrateInputCount = inputRecords.count
             try applyAndValidateStrokeProperties(card)
         } else {
@@ -875,11 +928,17 @@ final class BrushLabSession {
         }
         controller.handleStrokeSamples(card.traceSamples())
         _ = try await controller.renderer
-            .completePendingInteractiveStrokeAndAwaitIdle()
+            .completePendingInteractiveStrokeAndAwaitIdle(
+                deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+            )
+        try requireCurrentSessionOperation(operation)
+        try Task.checkCancellation()
         guard controller.renderer.isIdle else {
             throw BrushLabEvidenceError.rendererBusy
         }
         let snapshot = try await controller.renderer.captureCommittedDocument()
+        try requireCurrentSessionOperation(operation)
+        try Task.checkCancellation()
         let canvasHash = Self.canvasHash(snapshot)
         let traceHash = try Self.traceHash(
             input: inputRecords,
@@ -920,6 +979,8 @@ final class BrushLabSession {
             diagnostics: makeDiagnostics(),
             professionalPasses: []
         )
+        try requireCurrentSessionOperation(operation)
+        try Task.checkCancellation()
         completedReplay = replay
         return replay
     }
@@ -937,6 +998,10 @@ final class BrushLabSession {
             throw BrushLabEvidenceError.professionalPassUnavailable
         }
         let operation = nextSessionOperationGeneration()
+        beginLoading(operation: operation)
+        defer {
+            endLoading(operation: operation)
+        }
         if nextProfessionalPassIndex == 0 {
             completedReplay = nil
             try await resetPreparedProfessionalReview(card)
@@ -965,6 +1030,10 @@ final class BrushLabSession {
             throw BrushLabEvidenceError.professionalCardNotSelected
         }
         let operation = nextSessionOperationGeneration()
+        beginLoading(operation: operation)
+        defer {
+            endLoading(operation: operation)
+        }
         completedReplay = nil
         try await resetPreparedProfessionalReview(card)
         try requireCurrentSessionOperation(operation)
@@ -1103,7 +1172,6 @@ final class BrushLabSession {
         _ = nextSessionOperationGeneration()
         controller.clear()
         completedReplay = nil
-        isLoading = false
         resetProfessionalPassNavigation()
         clearTrace()
     }
@@ -1214,7 +1282,97 @@ final class BrushLabSession {
 
     private func nextSessionOperationGeneration() -> UInt64 {
         sessionOperationGeneration &+= 1
+        loadingOperationGeneration = nil
+        loadingOperationDepth = 0
+        isLoading = false
         return sessionOperationGeneration
+    }
+
+    private func beginLoading(operation: UInt64) {
+        guard isCurrentSessionOperation(operation) else { return }
+        if loadingOperationGeneration != operation {
+            loadingOperationGeneration = operation
+            loadingOperationDepth = 0
+        }
+        loadingOperationDepth += 1
+        isLoading = true
+    }
+
+    private func endLoading(operation: UInt64) {
+        guard loadingOperationGeneration == operation,
+              loadingOperationDepth > 0
+        else { return }
+        loadingOperationDepth -= 1
+        if loadingOperationDepth == 0 {
+            loadingOperationGeneration = nil
+            isLoading = false
+        }
+    }
+
+    private func invalidateSessionOperation(_ operation: UInt64) {
+        guard isCurrentSessionOperation(operation) else { return }
+        _ = nextSessionOperationGeneration()
+        completedReplay = nil
+    }
+
+    private func withReplayDeadline<Value: Sendable>(
+        _ deadlineUptimeNanoseconds: UInt64,
+        operation: @escaping @MainActor () async throws -> Value
+    ) async throws -> Value {
+        let resolution = BrushLabReplayDeadlineResolution<Value>()
+        let operationTask = Task { @MainActor in
+            do {
+                let value = try await operation()
+                if DispatchTime.now().uptimeNanoseconds
+                    >= deadlineUptimeNanoseconds
+                {
+                    _ = resolution.resolve(
+                        .failure(BrushLabEvidenceError.replayTimedOut)
+                    )
+                } else {
+                    _ = resolution.resolve(.success(value))
+                }
+            } catch {
+                let result: Result<Value, Error> =
+                    if DispatchTime.now().uptimeNanoseconds
+                        >= deadlineUptimeNanoseconds
+                    {
+                        .failure(BrushLabEvidenceError.replayTimedOut)
+                    } else {
+                        .failure(error)
+                    }
+                _ = resolution.resolve(result)
+            }
+        }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                resolution.install(continuation)
+                let timeoutTask = Task { @MainActor in
+                    let now = DispatchTime.now().uptimeNanoseconds
+                    if now < deadlineUptimeNanoseconds {
+                        try? await Task.sleep(
+                            nanoseconds: deadlineUptimeNanoseconds - now
+                        )
+                    }
+                    guard !Task.isCancelled,
+                          DispatchTime.now().uptimeNanoseconds
+                            >= deadlineUptimeNanoseconds
+                    else { return }
+                    if resolution.resolve(
+                        .failure(BrushLabEvidenceError.replayTimedOut)
+                    ) {
+                        operationTask.cancel()
+                    }
+                }
+                resolution.installTimeoutTask(timeoutTask)
+            }
+        } onCancel: {
+            Task { @MainActor in
+                if resolution.resolve(.failure(CancellationError())) {
+                    operationTask.cancel()
+                }
+            }
+        }
     }
 
     private func isCurrentSessionOperation(_ operation: UInt64) -> Bool {
@@ -2080,6 +2238,46 @@ struct BrushLabProfessionalMatrixExportCoordinator: Sendable {
     }
 }
 
+@MainActor
+private final class BrushLabReplayDeadlineResolution<Value: Sendable> {
+    private var continuation: CheckedContinuation<Value, Error>?
+    private var pendingResult: Result<Value, Error>?
+    private var timeoutTask: Task<Void, Never>?
+    private var isResolved = false
+
+    func install(_ continuation: CheckedContinuation<Value, Error>) {
+        if let pendingResult {
+            self.pendingResult = nil
+            continuation.resume(with: pendingResult)
+        } else {
+            self.continuation = continuation
+        }
+    }
+
+    func installTimeoutTask(_ task: Task<Void, Never>) {
+        guard !isResolved else {
+            task.cancel()
+            return
+        }
+        timeoutTask = task
+    }
+
+    @discardableResult
+    func resolve(_ result: Result<Value, Error>) -> Bool {
+        guard !isResolved else { return false }
+        isResolved = true
+        timeoutTask?.cancel()
+        timeoutTask = nil
+        if let continuation {
+            self.continuation = nil
+            continuation.resume(with: result)
+            return true
+        }
+        pendingResult = result
+        return true
+    }
+}
+
 enum BrushLabEvidenceError: Error, Equatable, LocalizedError {
     case packageUnavailable
     case rendererBusy
@@ -2093,6 +2291,7 @@ enum BrushLabEvidenceError: Error, Equatable, LocalizedError {
     case manualDiameterUnavailable(Float)
     case manualCardStateMismatch(String)
     case documentConfigurationUnavailable
+    case replayTimedOut
     case archiveParentUnavailable
     case invalidArchivePath
 
@@ -2122,6 +2321,8 @@ enum BrushLabEvidenceError: Error, Equatable, LocalizedError {
             "Brush Lab card '\(cardID)' no longer matches renderer state."
         case .documentConfigurationUnavailable:
             "Clear the document before changing the manual-card projection."
+        case .replayTimedOut:
+            "Brush Lab replay exceeded its 30-second completion deadline."
         case .archiveParentUnavailable:
             "The Brush Lab evidence destination parent is unavailable."
         case .invalidArchivePath:

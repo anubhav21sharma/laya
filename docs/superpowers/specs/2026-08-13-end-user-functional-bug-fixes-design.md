@@ -23,25 +23,35 @@ all success and failure cases. The normal product route uses this coordinator;
 acceptance injection only chooses a direct destination and no longer controls
 whether the safety boundary exists.
 
-Temporary project and PNG files are exposed to SwiftUI through explicit
-`Transferable` file representations with their actual UTTypes. This keeps the
-existing staged-file, bounded-memory workflow while avoiding the raw-`URL`
-representation mismatch that silently prevents Save As from presenting.
+Temporary project and PNG files use one exporter state instead of two stacked
+SwiftUI exporters. On iPadOS, a UTType-aware `FileDocument` owns the staged
+bytes until SwiftUI finishes the export. On macOS, an `NSSavePanel` provides
+the native synchronous destination workflow before the staged file is written
+atomically to the selected URL. This avoids both the raw-`URL` representation
+mismatch and the competing exporter modifiers that prevented Save As from
+presenting reliably.
 
 Stroke admission distinguishes a locked active layer from an unavailable
 layer. A locked layer rejects the begin event, keeps the transaction idle, and
 does not report a renderer error.
 
 The Stage 4 replay repair targets the exact first periodic Airbrush card that
-reproduces the UI stall. Replay remains deterministic and evidence-complete;
-the fix must release or finish the renderer operation that prevents idle rather
-than weakening the UI's idle gates.
+reproduces the UI stall. The renderer was already reaching idle; the stale
+controls came from reading a non-observable renderer property directly. The
+session now publishes replay loading for the whole operation and the view
+derives its gates from observable session/controller state. Replay remains
+deterministic and evidence-complete. One 30-second monotonic deadline covers
+clear, preparation, stroke completion, capture, hashing, and evidence
+publication. Deadline expiry or caller cancellation wins through one
+single-resolution arbiter, cancels the in-flight work, invalidates the session
+generation, and releases loading without publishing a stale replay.
 
 ## Error Handling
 
 Capture/export coordination is fail-closed with a monotonic timeout. Errors
 remain visible through the existing file error banner. Temporary files are
-removed on completion, cancellation, and presentation failure. Locked-layer
+removed on completion, cancellation, encoding/read failure, and presentation
+failure. Canceling the native save panel is a normal completion. Locked-layer
 input is an expected rejected gesture, not an error.
 
 ## Verification

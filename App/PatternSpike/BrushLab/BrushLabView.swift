@@ -378,9 +378,10 @@ struct BrushLabView: View {
                 )
             }
             .disabled(
-                runtime.session.reviewMatrix != .stageFourDiagnostic
+                runtime.session.isLoading
+                    || runtime.session.reviewMatrix != .stageFourDiagnostic
                     || runtime.session.selectedManualCard == nil
-                    || !runtime.controller.renderer.isIdle
+                    || runtime.controller.model.isBusy
             )
 
             Button {
@@ -466,8 +467,9 @@ struct BrushLabView: View {
             }
             .accessibilityIdentifier("Brush Lab Replay All Passes")
             .disabled(
-                runtime.session.selectedReviewCardID == nil
-                    || !runtime.controller.renderer.isIdle
+                runtime.session.isLoading
+                    || runtime.session.selectedReviewCardID == nil
+                    || runtime.controller.model.isBusy
             )
 
             if runtime.session.reviewMatrix == .stageFiveProfessional {
@@ -483,8 +485,9 @@ struct BrushLabView: View {
                     }
                 }
                 .disabled(
-                    runtime.session.nextProfessionalPass == nil
-                        || !runtime.controller.renderer.isIdle
+                    runtime.session.isLoading
+                        || runtime.session.nextProfessionalPass == nil
+                        || runtime.controller.model.isBusy
                 )
             }
 
@@ -492,7 +495,10 @@ struct BrushLabView: View {
                 runtime.session.clearManualCard()
                 resetDiagnosticsTracking()
             }
-            .disabled(!runtime.controller.renderer.isIdle)
+            .disabled(
+                runtime.session.isLoading
+                    || runtime.controller.model.isBusy
+            )
 
             Spacer()
             if runtime.session.isLoading {

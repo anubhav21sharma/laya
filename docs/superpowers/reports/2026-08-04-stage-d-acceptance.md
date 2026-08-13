@@ -31,10 +31,12 @@ remain:
 3. physical iPad/Pencil/Wacom/ProMotion/thermal/memory-pressure evidence is not
    available.
 
-The user approved the one required macOS UI Automation prompt. No sudo was
-needed and no further XCTest authorization is pending. Unavailable qualifying
-hardware remains nonblocking for implementation and local verification, but it
-does not weaken the fail-closed acceptance contract.
+The user approved the one required macOS UI Automation prompt for the Stage D
+route, and those exact acceptance replays passed without sudo. A later
+standalone functional-regression runner timed out while enabling automation as
+recorded below, so its runner failure is not counted as evidence. Unavailable
+qualifying hardware remains nonblocking for implementation and local
+verification, but it does not weaken the fail-closed acceptance contract.
 
 ## Implemented Task 8 evidence boundary
 
@@ -135,9 +137,13 @@ application allocation.
 The corrective-program completion added ten suites and resolved the five
 remaining Stage D brush-quality records without relaxing their graphite,
 charcoal, or chisel thresholds. Independent review approved their explicit
-removal. The current oracle is therefore exactly **2,206 tests in 120 suites**
-with **0 known issues**, and the tracked Stage D baseline is intentionally
-empty rather than regenerated from current output.
+removal. The checkpoint oracle was therefore exactly **2,206 tests in 120
+suites** with **0 known issues**, and the tracked Stage D baseline is
+intentionally empty rather than regenerated from current output. The later
+initial end-user functional repair below raised its pre-review broad inventory
+to 2,210 tests without changing the known-issue baseline. Its final inventory,
+including review-added timeout and cancellation regressions, is recorded after
+the final broad rerun below.
 
 The first current-source measurement completed the full 2,206/120 inventory in
 1,982.791 seconds, but correctly failed closed on one unreviewed, host-sensitive
@@ -328,6 +334,79 @@ it is not the final acceptance aggregate. The acceptance script must still run
 twice from clean fresh roots and combine this route with the package, broad,
 runtime, allocation, build, review, and cross-run comparison gates.
 
+The exact pushed `fdfcdd3` replay subsequently passed one test with zero
+failures or skips in **145.630 seconds**. Its three rows all passed with zero
+pending ownership; the decoded and flattened 320 x 192 hashes were identical.
+
+## Post-checkpoint end-user functional repair
+
+A direct 2026-08-13 end-user pass found four product-route defects outside the
+already passing deterministic acceptance destination route:
+
+1. the normal Save Project action could fail to present a destination;
+2. normal PNG export could leave a zero-byte file after racing display
+   preparation;
+3. drawing on a locked active layer surfaced an internal layer-stack error;
+   and
+4. the first periodic Airbrush Brush Lab replay completed its renderer work
+   but left Export, Replay, and Clear disabled.
+
+Save and PNG capture now share the recorder's serialized, monotonic-timeout
+quiescence boundary even without acceptance configuration. The two competing
+SwiftUI exporter modifiers are replaced by one typed presentation state;
+macOS uses its native save panel and iPadOS uses a UTType-aware
+`FileDocument`. Locked-layer admission is an expected typed rejection before
+renderer work. Brush Lab publishes loading across the complete replay and
+derives its control gates from observable session/controller state rather than
+the renderer's non-observable idle property. One 30-second monotonic deadline
+covers the Stage 4 clear, preparation, stroke completion, capture, hashing,
+and replay publication boundary. Timeout and caller cancellation share one
+single-resolution arbiter, cancel in-flight work, invalidate the operation
+generation, and release loading without publishing stale evidence.
+
+Pre-review verification on the initial repair source produced these results:
+
+- the focused functional selection passed **7 tests in 3 suites** in **1.550
+  seconds**;
+- the complete package run passed **2,210 tests in 120 suites** in **1,975.207
+  seconds** with zero failures;
+- fresh macOS Debug `build-for-testing`, including the locally signed XCTest UI
+  runner, passed;
+- fresh iOS Simulator Debug compilation passed, including the iPadOS document
+  exporter path;
+- Save Project wrote a valid 527,211-byte schema-4 archive whose five entries
+  passed system ZIP integrity validation; and
+- Export PNG wrote a decodable 256 x 256 RGBA image with 10,237 nonzero-alpha
+  pixels. Its SHA-256 was
+  `d27ee6b405cc7e381b3e20c348a23b42fa953115c7715eaaedb4c1445020ba9b`.
+
+The exact first-card UI workflow returned all three controls to enabled in
+approximately 3.3 seconds. A direct locked-layer attempt produced no error and
+changed only the transient cursor rectangle, not document pixels. The new
+XCTest UI regression compiled into the signed runner, but its standalone
+final-source test method never began because XCTest timed out while enabling
+automation mode after 60 seconds. The result bundle reports zero passed tests
+and one runner-initialization failure. This host authorization failure does
+not substitute for a passed UI test; the app workflow and package regression
+are recorded separately and the result remains fail-closed.
+
+Independent review then found that the replay result itself needed a bounded
+deadline, nested package loading could release the UI's loading state early,
+caller cancellation did not reach the unstructured replay task, and staged
+temporary directories needed cleanup on encoding/read failure. Those findings
+are repaired. Loading uses operation-generation ownership with nesting depth;
+deadline, success, failure, and cancellation use one MainActor-serialized
+single-resolution result; and both temporary export failure paths clean their
+staging directories. The final-source broad run, including the added deadline
+and cancellation regressions, passed **2,212 tests in 120 suites** in
+**1,711.875 seconds** with zero failures. Its log SHA-256 is
+`fe3eeea98194d98e4efcd2b074c001bc428405adfd5d56f273bdff35082ab943`.
+The final-source focused selection passed **9 tests in 3 suites** in **1.428
+seconds** with zero failures. Fresh final-source macOS Debug
+`build-for-testing` and iPadOS Simulator Debug builds also passed. The exact
+first periodic Airbrush card replay was repeated in the final-source app and
+returned Replay and Clear Card to enabled in approximately 2.2 seconds.
+
 ## Environment and physical-evidence boundary
 
 ```text
@@ -438,6 +517,39 @@ and 13-test selections, shell parse, and diff check all passed.
 - Final iPad Simulator Release build log:
   `.build/brush-corrective-verification/stage-d-final-pad-release.log`
   (`b0484d94851fd2904eafc667ada215aac776ad5f900dbc4ba6aec46fe76a4b37`)
+- Pre-review end-user functional focused log:
+  `.build/functional-fixes/focused-regressions.log`
+  (`c33ad0cd3b0264cee98287f293844790dd86e02385c62515d54580a9da3d4468`;
+  7 tests / 3 suites / 0 failures / 1.550 seconds)
+- Pre-review end-user functional macOS test-build log:
+  `.build/functional-fixes/mac-build-for-testing.log`
+  (`86686fc4dc8bd070d4e4ac9321b7557a30b06d4888c68825cb2621e3df7cc242`;
+  `TEST BUILD SUCCEEDED`)
+- Pre-review end-user functional iPadOS Simulator build log:
+  `.build/functional-fixes/pad-debug-build.log`
+  (`3309234550e3b91150cef1397800381eb8a7db772ab6508eb21d5b59a33a73f8`;
+  `BUILD SUCCEEDED`)
+- End-user functional XCTest authorization diagnostic:
+  `.build/functional-fixes/first-stage-four-ui-test.log` and
+  `.build/functional-fixes/FirstStageFourReplay.xcresult`
+  (`566a02d25ecb6f69d658f2a8360e7190f3d62a445d4fd645888ee71c46e3220d`;
+  0 passed / 1 runner-initialization failure)
+- Final end-user functional broad log:
+  `.build/functional-fixes/full-final.log`
+  (`fe3eeea98194d98e4efcd2b074c001bc428405adfd5d56f273bdff35082ab943`;
+  2,212 tests / 120 suites / 0 failures / 1,711.875 seconds)
+- Final-source end-user functional focused log:
+  `.build/functional-fixes/focused-final.log`
+  (`43e8622c0a4f816f06a719587917378606c6e889a55150026b3792f8c9d71b1c`;
+  9 tests / 3 suites / 0 failures / 1.428 seconds)
+- Final-source end-user functional macOS test-build log:
+  `.build/functional-fixes/mac-final-build-for-testing.log`
+  (`e046e48274b3897f9895662bdc2e52600d8468a3bc09d7b4e89470429bafc024`;
+  `TEST BUILD SUCCEEDED`)
+- Final-source end-user functional iPadOS Simulator build log:
+  `.build/functional-fixes/pad-final-debug-build.log`
+  (`a96ca156230f6401c4e138354b8f65c4ff53e30cfe406dfba2d2fd35b6995bab`;
+  `BUILD SUCCEEDED`)
 
 These execution artifacts are local and intentionally uncommitted.
 

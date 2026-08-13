@@ -2,6 +2,43 @@ import XCTest
 
 @MainActor
 final class BrushCorrectiveUITests: XCTestCase {
+    func testFirstStageFourAirbrushReplayReturnsControlsToIdle() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-ApplePersistenceIgnoreState", "YES",
+            "-NSQuitAlwaysKeepsWindows", "NO",
+        ]
+        app.launch()
+
+        app.typeKey("l", modifierFlags: [.command, .option])
+        let canvas = app.descendants(matching: .any)["Brush Lab Canvas"]
+        XCTAssertTrue(canvas.waitForExistence(timeout: 10))
+        selectCard(
+            "builtin.native-airbrush.draw.curve.d40000000.high.none."
+                + "periodic-p0-w43800000-h43800000-o0.transparent."
+                + "prediction-on.cc43a52ff.none.fbuiltin",
+            app: app
+        )
+
+        let replay = app.buttons["Brush Lab Replay All Passes"]
+        XCTAssertTrue(waitUntilEnabled(replay, timeout: 10))
+        replay.click()
+
+        XCTAssertTrue(
+            waitUntilEnabled(replay, timeout: 15),
+            "Stage 4 replay never returned the renderer to idle."
+        )
+        XCTAssertTrue(
+            waitUntilEnabled(app.buttons["Clear Card"], timeout: 2)
+        )
+        XCTAssertTrue(
+            waitUntilEnabled(
+                app.buttons["Export Card Evidence"],
+                timeout: 2
+            )
+        )
+    }
+
     func testEveryProfessionalCandidateRunsThroughProductionBrushLab()
         throws
     {

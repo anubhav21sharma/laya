@@ -187,10 +187,10 @@ struct ContentView: View {
     @State private var fileOperationBusy = false
     @State private var fileOperationCompletionGeneration: UInt64 = 0
     @State private var importPresented = false
-    @State private var projectExportPresented = false
-    @State private var projectExportURL: URL?
-    @State private var imageExportPresented = false
-    @State private var imageExportURL: URL?
+    @State private var exportPresented = false
+    @State private var exportDocument: StagedEditorExportDocument?
+    @State private var exportContentType = UTType.patternProject
+    @State private var exportFilename = "Untitled Pattern.patternproj"
     @State private var stageDRouteEvidence = StageDAppRouteEvidenceRecorder()
     @State private var pointerCancellationGeneration: UInt = 0
     @State private var editorFocusCompletionGeneration: UInt64 = 0
@@ -235,40 +235,19 @@ struct ContentView: View {
         ) {
             handleImportResult($0)
         }
+        #if !os(macOS)
         .fileExporter(
-            isPresented: $projectExportPresented,
-            item: projectExportURL,
-            contentTypes: [.patternProject],
-            defaultFilename: defaultProjectFilename
+            isPresented: $exportPresented,
+            document: exportDocument,
+            contentType: exportContentType,
+            defaultFilename: exportFilename
         ) { result in
-            let temporaryURL = projectExportURL
-            projectExportURL = nil
-            if let temporaryURL {
-                try? FileManager.default.removeItem(
-                    at: temporaryURL.deletingLastPathComponent()
-                )
-            }
+            finishExportPresentation()
             if case let .failure(error) = result {
                 fileErrorMessage = error.localizedDescription
             }
         }
-        .fileExporter(
-            isPresented: $imageExportPresented,
-            item: imageExportURL,
-            contentTypes: [.png],
-            defaultFilename: "Pattern.png"
-        ) { result in
-            let temporaryURL = imageExportURL
-            imageExportURL = nil
-            if let temporaryURL {
-                try? FileManager.default.removeItem(
-                    at: temporaryURL.deletingLastPathComponent()
-                )
-            }
-            if case let .failure(error) = result {
-                fileErrorMessage = error.localizedDescription
-            }
-        }
+        #endif
     }
 
     private func initializeRendererIfNeeded() async {
@@ -492,13 +471,17 @@ struct ContentView: View {
         Task {
             defer { completeFileOperation() }
             do {
-                let captured = try await PatternProjectBridge.capture(
-                    renderer: controller.renderer,
-                    identity: projectIdentity,
-                    appVersion: Bundle.main.object(
-                        forInfoDictionaryKey: "CFBundleShortVersionString"
-                    ) as? String ?? "0.1.0"
-                )
+                let captured = try await stageDRouteEvidence
+                    .withDisplayPreparationSuspended(for: controller) {
+                        try await PatternProjectBridge.capture(
+                            renderer: controller.renderer,
+                            identity: projectIdentity,
+                            appVersion: Bundle.main.object(
+                                forInfoDictionaryKey:
+                                    "CFBundleShortVersionString"
+                            ) as? String ?? "0.1.0"
+                        )
+                    }
                 let requestedDestination = stageDRouteEvidence.projectURL
                 let filename = defaultProjectFilename
                 let writtenURL = try await Task.detached(
@@ -546,8 +529,20 @@ struct ContentView: View {
                     }
                 }.value
                 if requestedDestination == nil {
-                    projectExportURL = writtenURL
-                    projectExportPresented = true
+                    #if os(macOS)
+                    try await presentMacExport(
+                        stagedFileURL: writtenURL,
+                        contentType: .patternProject,
+                        defaultFilename: defaultProjectFilename
+                    )
+                    #else
+                    exportDocument = try consumeStagedExportDocument(
+                        at: writtenURL
+                    )
+                    exportContentType = .patternProject
+                    exportFilename = defaultProjectFilename
+                    exportPresented = true
+                    #endif
                 }
             } catch {
                 fileErrorMessage = error.localizedDescription
@@ -647,7 +642,7 @@ struct ContentView: View {
             defer { completeFileOperation() }
             do {
                 let output = try await stageDRouteEvidence
-                    .withAcceptanceDisplayPreparationSuspended(
+                    .withDisplayPreparationSuspended(
                         for: controller
                     ) {
                         try await controller.renderer.exportFlattenedScene(
@@ -658,6 +653,7 @@ struct ContentView: View {
                 let written = try await Task.detached(priority: .utility) {
                     let destination: URL
                     let presentsExporter: Bool
+                    var temporaryDirectory: URL?
                     switch disposition {
                     case let .direct(requested):
                         destination = requested
@@ -672,6 +668,7 @@ struct ContentView: View {
                             at: temporary,
                             withIntermediateDirectories: false
                         )
+                        temporaryDirectory = temporary
                         destination = temporary.appendingPathComponent(
                             "Pattern.png",
                             isDirectory: false
@@ -684,16 +681,37 @@ struct ContentView: View {
                         withIntermediateDirectories: true
                     )
                     try? FileManager.default.removeItem(at: destination)
-                    try EncodedPNGWriter.writeBGRA(
-                        output.bgra8Bytes,
-                        pixelSize: output.pixelSize,
-                        to: destination
-                    )
+                    do {
+                        try EncodedPNGWriter.writeBGRA(
+                            output.bgra8Bytes,
+                            pixelSize: output.pixelSize,
+                            to: destination
+                        )
+                    } catch {
+                        if let temporaryDirectory {
+                            try? FileManager.default.removeItem(
+                                at: temporaryDirectory
+                            )
+                        }
+                        throw error
+                    }
                     return (destination, presentsExporter)
                 }.value
                 if written.1 {
-                    imageExportURL = written.0
-                    imageExportPresented = true
+                    #if os(macOS)
+                    try await presentMacExport(
+                        stagedFileURL: written.0,
+                        contentType: .png,
+                        defaultFilename: "Pattern.png"
+                    )
+                    #else
+                    exportDocument = try consumeStagedExportDocument(
+                        at: written.0
+                    )
+                    exportContentType = .png
+                    exportFilename = "Pattern.png"
+                    exportPresented = true
+                    #endif
                 }
             } catch {
                 fileErrorMessage = error.localizedDescription
@@ -704,6 +722,52 @@ struct ContentView: View {
     private func completeFileOperation() {
         fileOperationBusy = false
         fileOperationCompletionGeneration &+= 1
+    }
+
+    private func finishExportPresentation() {
+        exportDocument = nil
+    }
+
+    private func consumeStagedExportDocument(
+        at stagedFileURL: URL
+    ) throws -> StagedEditorExportDocument {
+        defer {
+            removeStagedExportDirectory(containing: stagedFileURL)
+        }
+        return try StagedEditorExportDocument(
+            stagedFileURL: stagedFileURL
+        )
+    }
+
+    #if os(macOS)
+    private func presentMacExport(
+        stagedFileURL: URL,
+        contentType: UTType,
+        defaultFilename: String
+    ) async throws {
+        defer {
+            removeStagedExportDirectory(containing: stagedFileURL)
+        }
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.allowedContentTypes = [contentType]
+        panel.nameFieldStringValue = defaultFilename
+        guard panel.runModal() == .OK,
+              let destination = panel.url
+        else { return }
+        try await Task.detached(priority: .utility) {
+            let data = try Data(contentsOf: stagedFileURL)
+            try data.write(to: destination, options: .atomic)
+        }.value
+    }
+    #endif
+
+    private func removeStagedExportDirectory(containing sourceURL: URL?) {
+        guard let sourceURL else { return }
+        try? FileManager.default.removeItem(
+            at: sourceURL.deletingLastPathComponent()
+        )
     }
 
     private var stageDDebugHUDVisible: Bool {

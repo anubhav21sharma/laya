@@ -747,6 +747,26 @@ func layerMutationIsRejectedWhileDrawingWithoutChangingTheStack() throws {
 
 @Test
 @MainActor
+func lockedActiveLayerRejectsStrokeWithoutReportingRendererError() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    try controller.setLayerLock(
+        LayerStack.initialLayerID,
+        isLocked: true
+    )
+    var errors: [MetalRendererError] = []
+    controller.onError = { errors.append($0) }
+
+    controller.handleStrokeSample(controllerSample(.began))
+
+    #expect(controller.lastStrokeBeginAdmissionResult == .activeLayerLocked)
+    #expect(controller.transactionStateForTesting == .idle)
+    #expect(errors.isEmpty)
+    #expect(renderer.isIdle)
+}
+
+@Test
+@MainActor
 func layerDeletionCapturesBeforeRemovalAndUndoRedoStayAtomic() throws {
     let compatibility = try LayerDescriptor(
         id: LayerStack.initialLayerID,

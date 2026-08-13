@@ -18,6 +18,7 @@ enum StrokeBeginAdmissionResult: String, Equatable, Sendable {
     case toolUnavailable
     case transactionNotIdle
     case transactionOperationPending
+    case activeLayerLocked
     case activeLayerUnavailable
     case compiledBrushUnavailable
 }
@@ -121,6 +122,7 @@ final class EditorSessionController {
     private struct AwaitedClear {
         let token: EditorTransactionToken
         let continuation: CheckedContinuation<Void, Error>
+        var deadlineTask: Task<Void, Never>?
     }
 
     init(
@@ -305,6 +307,9 @@ final class EditorSessionController {
             let layerID: UUID
             do {
                 layerID = try activeRasterLayerID()
+            } catch LayerStackError.activeLayerLocked {
+                lastStrokeBeginAdmissionResult = .activeLayerLocked
+                return
             } catch {
                 lastStrokeBeginAdmissionResult = .activeLayerUnavailable
                 report(.commandFailed(error.localizedDescription))
@@ -800,12 +805,22 @@ final class EditorSessionController {
         apply(.command(.clear))
     }
 
-    func clearAndAwaitCompletion() async throws {
+    func clearAndAwaitCompletion(
+        deadlineUptimeNanoseconds: UInt64? = nil
+    ) async throws {
         guard transaction.state == .idle,
               transaction.pendingOperation == nil,
               awaitedClear == nil
         else {
             throw MetalRendererError.commitPendingInput
+        }
+        if let deadlineUptimeNanoseconds,
+           DispatchTime.now().uptimeNanoseconds
+            >= deadlineUptimeNanoseconds
+        {
+            throw MetalRendererError.commandFailed(
+                "clear exceeded its absolute deadline"
+            )
         }
         let effects = transaction.apply(.command(.clear))
         guard effects.count == 1,
@@ -818,8 +833,28 @@ final class EditorSessionController {
         try await withCheckedThrowingContinuation { continuation in
             awaitedClear = AwaitedClear(
                 token: token,
-                continuation: continuation
+                continuation: continuation,
+                deadlineTask: nil
             )
+            if let deadlineUptimeNanoseconds {
+                awaitedClear?.deadlineTask = Task { @MainActor [weak self] in
+                    let now = DispatchTime.now().uptimeNanoseconds
+                    if now < deadlineUptimeNanoseconds {
+                        try? await Task.sleep(
+                            nanoseconds: deadlineUptimeNanoseconds - now
+                        )
+                    }
+                    guard !Task.isCancelled else { return }
+                    self?.finishAwaitedClear(
+                        token: token,
+                        result: .failure(
+                            .commandFailed(
+                                "clear exceeded its absolute deadline"
+                            )
+                        )
+                    )
+                }
+            }
             do {
                 try execute(effects[0])
             } catch {
@@ -841,9 +876,12 @@ final class EditorSessionController {
     /// operation. Successful replacement removes the clear/setup history so a
     /// review card always starts from an empty, non-undoable configuration.
     func resetReviewDocument(
-        to configuration: SymmetryDocumentConfiguration
+        to configuration: SymmetryDocumentConfiguration,
+        deadlineUptimeNanoseconds: UInt64? = nil
     ) async throws {
-        try await clearAndAwaitCompletion()
+        try await clearAndAwaitCompletion(
+            deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+        )
         guard transaction.state == .idle,
               transaction.pendingOperation == nil,
               awaitedClear == nil,
@@ -860,6 +898,7 @@ final class EditorSessionController {
             refreshDerivedModelState()
         }
         do {
+            try checkDeadline(deadlineUptimeNanoseconds)
             try await renderer.replaceEmptyDocumentConfiguration(
                 configuration,
                 pixelSize: targetPixelSize(for: configuration)
@@ -1863,11 +1902,23 @@ final class EditorSessionController {
             return
         }
         self.awaitedClear = nil
+        awaitedClear.deadlineTask?.cancel()
         switch result {
         case .success:
             awaitedClear.continuation.resume()
         case let .failure(error):
             awaitedClear.continuation.resume(throwing: error)
+        }
+    }
+
+    private func checkDeadline(_ deadlineUptimeNanoseconds: UInt64?) throws {
+        guard let deadlineUptimeNanoseconds else { return }
+        guard DispatchTime.now().uptimeNanoseconds
+                < deadlineUptimeNanoseconds
+        else {
+            throw MetalRendererError.commandFailed(
+                "editor operation exceeded its absolute deadline"
+            )
         }
     }
 
