@@ -67,4 +67,87 @@ func interactiveFrameDemandRequiresAtLeastOneLiveReason() {
         )
     )
 }
+
+@Test
+func activeUnpresentedRevisionRequestsAnotherPausedViewFrame() {
+    var pump = InteractiveFramePump()
+    let revision = CanvasPresentationRevision(sequence: 7)
+
+    pump.signal(.cachePublished(revision))
+
+    let begun = pump.beginFrame()
+    let shouldContinue = pump.finishFrame(.submitted(revision))
+    #expect(begun == revision)
+    #expect(shouldContinue)
+    #expect(pump.hasDemand)
+    let afterPresentation = pump.markPresented(revision)
+    #expect(!afterPresentation)
+    #expect(!pump.hasDemand)
+}
+
+@Test
+func missingDrawableRetainsTheActiveRevisionDemand() {
+    var pump = InteractiveFramePump()
+    let revision = CanvasPresentationRevision(sequence: 11)
+    pump.signal(.drawableChanged(revision))
+
+    let begun = pump.beginFrame()
+    let shouldContinue = pump.finishFrame(.drawableUnavailable(revision))
+    #expect(begun == revision)
+    #expect(shouldContinue)
+    #expect(pump.hasDemand)
+    let retried = pump.beginFrame()
+    #expect(retried == revision)
+}
+
+@Test
+func presentingAnOlderRevisionDoesNotSettleTheNewestDemand() {
+    var pump = InteractiveFramePump()
+    let older = CanvasPresentationRevision(sequence: 2)
+    let newest = CanvasPresentationRevision(sequence: 3)
+    pump.signal(.cachePublished(older))
+    pump.signal(.viewportChanged(newest))
+
+    let begun = pump.beginFrame()
+    let afterSubmission = pump.finishFrame(.submitted(newest))
+    let afterOlderPresentation = pump.markPresented(older)
+    #expect(begun == newest)
+    #expect(afterSubmission)
+    #expect(afterOlderPresentation)
+    #expect(pump.hasDemand)
+    let afterNewestPresentation = pump.markPresented(newest)
+    #expect(!afterNewestPresentation)
+    #expect(!pump.hasDemand)
+}
+
+@Test
+func terminalFailureSettlesDemandWhenNoNewerRevisionExists() {
+    var pump = InteractiveFramePump()
+    let revision = CanvasPresentationRevision(sequence: 19)
+    pump.signal(.cachePublished(revision))
+
+    let begun = pump.beginFrame()
+    let afterFailure = pump.finishFrame(.failed(revision, "encode failed"))
+    #expect(begun == revision)
+    #expect(!afterFailure)
+    #expect(!pump.hasDemand)
+    let idle = pump.beginFrame()
+    #expect(idle == nil)
+}
+
+@Test
+func demandSignalledDuringAFrameSurvivesItsSubmissionAndPresentation() {
+    var pump = InteractiveFramePump()
+    let revision = CanvasPresentationRevision(sequence: 23)
+    pump.signal(.cachePublished(revision))
+    _ = pump.beginFrame()
+
+    pump.signal(.input)
+
+    let afterSubmission = pump.finishFrame(.submitted(revision))
+    let afterPresentation = pump.markPresented(revision)
+    #expect(afterSubmission)
+    #expect(afterPresentation)
+    #expect(pump.hasDemand)
+}
 #endif

@@ -52,6 +52,41 @@ func identicalRendererLayerStackApplicationIsSuccessfulNoOp() throws {
 
 @Test
 @MainActor
+func presentationSnapshotRejectsACanonicalCacheFromAnotherRevision() throws {
+    guard let renderer = try makeResizeRenderer(
+        pixelSize: PixelSize(width: 64, height: 64)
+    ) else { return }
+    let identity = renderer.paintCanonicalStateIdentityForTesting()
+    let incompatibleRevision = identity.compositeRevision + 1
+    let snapshot = CanvasPresentationSnapshot(
+        revision: CanvasPresentationRevision(sequence: 1),
+        canonicalIdentity: identity,
+        canonicalCacheRevision: incompatibleRevision,
+        transientGeneration: nil,
+        transientRevision: nil,
+        outputMappingRevision: 1,
+        viewportRevision: 1,
+        viewport: renderer.viewport,
+        drawablePixelSize: PixelSize(width: 320, height: 240),
+        backingScaleRevision: 1,
+        showGridLines: false,
+        showCanvasBoundary: true
+    )
+
+    #expect(
+        throws: CanvasPresentationSnapshotCompatibilityError
+            .revisionConflict(
+                component: "canonical cache",
+                prepared: incompatibleRevision,
+                current: identity.compositeRevision
+            )
+    ) {
+        try snapshot.validateCompatibility()
+    }
+}
+
+@Test
+@MainActor
 func currentResizeShrinkCropsOnlyRightAndBottomBytes() async throws {
     let oldSize = PixelSize(width: 96, height: 80)
     let newSize = PixelSize(width: 64, height: 64)

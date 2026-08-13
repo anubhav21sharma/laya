@@ -5,30 +5,48 @@ import PatternEngine
 /// Owns the policy and preparation step for presenting canonical paint plus
 /// the active transient stroke. `GridRenderer` retains only MTKView scheduling
 /// and the final drawable submission.
+package protocol PresentationPreparationGating: Sendable {
+    func preparationDidBegin(
+        revision: CanvasPresentationRevision
+    ) async
+    func preparationDidPublish(
+        revision: CanvasPresentationRevision
+    ) async
+    func preparationDidRetire(
+        revision: CanvasPresentationRevision
+    ) async
+}
+
+@MainActor
+package protocol DrawablePresentationRegistering: Sendable {
+    func register(
+        revision: CanvasPresentationRevision,
+        handler: @escaping @MainActor @Sendable () -> Void
+    )
+}
+
 enum CanvasDisplayCompositor {
     static func prepare(
         context: DocumentPaintRenderContext,
-        outputPixelSize: PixelSize,
-        viewport: ViewportTransform,
+        snapshot: CanvasPresentationSnapshot,
         tilingStrategy: TilingStrategy,
         storagePixelSize: PixelSize,
-        geometryRevision: UInt64,
         transient: DocumentPaintTransientDisplaySource?,
         transientMode: StrokeCompositeMode?,
         strokeOpacity: Float,
-        eraserStrength: Float,
-        showGridLines: Bool
+        eraserStrength: Float
     ) async throws -> PreparedLayerCompositeDisplaySubmission {
+        try snapshot.validateCompatibility()
         let outputRegion = try SparseTileOutputRegion(
             minX: 0,
             minY: 0,
-            maxX: outputPixelSize.width,
-            maxY: outputPixelSize.height
+            maxX: snapshot.drawablePixelSize.width,
+            maxY: snapshot.drawablePixelSize.height
         )
         let outputMapping = try outputMapping(
-            viewport: viewport,
+            viewport: snapshot.viewport,
             tilingStrategy: tilingStrategy,
-            outputPixelSize: outputPixelSize
+            outputPixelSize: snapshot.drawablePixelSize
         )
         return try await context.prepareLayerDisplaySubmission(
             transient: transient,
@@ -36,16 +54,17 @@ enum CanvasDisplayCompositor {
                 tilingStrategy: tilingStrategy,
                 storagePixelSize: storagePixelSize
             ),
-            addressingRevision: geometryRevision,
+            addressingRevision: snapshot.outputMappingRevision,
             outputRegion: outputRegion,
-            outputGeometryRevision: geometryRevision,
+            outputGeometryRevision: snapshot.outputMappingRevision,
             outputMapping: outputMapping,
             parameters: parameters(
                 outputMapping: outputMapping,
                 transientMode: transientMode,
                 strokeOpacity: strokeOpacity,
                 eraserStrength: eraserStrength,
-                showGridLines: showGridLines
+                showGridLines: snapshot.showGridLines,
+                showCanvasBoundary: snapshot.showCanvasBoundary
             )
         )
     }
@@ -55,7 +74,8 @@ enum CanvasDisplayCompositor {
         transientMode: StrokeCompositeMode?,
         strokeOpacity: Float,
         eraserStrength: Float,
-        showGridLines: Bool
+        showGridLines: Bool,
+        showCanvasBoundary: Bool = true
     ) -> SparseTileSamplingEncodeParameters {
         guard let transientMode else {
             return SparseTileSamplingEncodeParameters(
@@ -66,7 +86,7 @@ enum CanvasDisplayCompositor {
                 accumulationLimit: 1,
                 eraserStrength: 1,
                 showGridLines: showGridLines,
-                showCanvasBoundary: true
+                showCanvasBoundary: showCanvasBoundary
             )
         }
         return SparseTileSamplingEncodeParameters(
@@ -79,7 +99,7 @@ enum CanvasDisplayCompositor {
             accumulationLimit: 1,
             eraserStrength: transientMode == .erase ? eraserStrength : 1,
             showGridLines: showGridLines,
-            showCanvasBoundary: true
+            showCanvasBoundary: showCanvasBoundary
         )
     }
 

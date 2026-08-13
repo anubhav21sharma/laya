@@ -1,6 +1,7 @@
 import Foundation
 import EditorCore
 @preconcurrency import Metal
+import MetalKit
 @testable import MetalRenderer
 import PatternEngine
 import Testing
@@ -60,6 +61,146 @@ struct GridRendererSparseCutoverTests {
                 < 0.000_001
         )
         #expect(timestamp == 10)
+    }
+
+    @Test
+    @MainActor
+    func supersededPreparationRetiresBeforeOnlyTheLatestRevisionPublishes()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let library = device.makeDefaultLibrary()
+        else { return }
+        let size = PixelSize(width: 64, height: 64)
+        let renderer = try GridRenderer(
+            device: device,
+            library: library,
+            drawableSize: PatternSize(width: 64, height: 64),
+            configuration: try TilingCanvasConfiguration(
+                pixelSize: size,
+                finiteConfiguration: .plain
+            )
+        )
+        let gate = PresentationPreparationGate(
+            blockedRevision: CanvasPresentationRevision(sequence: 1)
+        )
+        renderer.installPresentationPreparationGateForTesting(gate)
+        let view = MTKView(
+            frame: CGRect(x: 0, y: 0, width: 64, height: 64),
+            device: device
+        )
+        view.drawableSize = CGSize(width: 64, height: 64)
+
+        renderer.draw(in: view)
+        await gate.waitUntilStarted(
+            CanvasPresentationRevision(sequence: 1)
+        )
+        renderer.pan(byScreenDelta: SIMD2(1, 0))
+        renderer.pan(byScreenDelta: SIMD2(1, 0))
+
+        var state = await gate.snapshot
+        #expect(state.started == [CanvasPresentationRevision(sequence: 1)])
+        #expect(state.maximumConcurrentPreparationCount == 1)
+        #expect(state.activePreparationCount == 1)
+        #expect(renderer.paintDisplayPreparationOwnershipCountForTesting == 1)
+        #expect(renderer.paintDisplayPreparationScheduleCountForTesting == 1)
+
+        await gate.releaseBlockedRevision()
+        await gate.waitUntilPublished(
+            CanvasPresentationRevision(sequence: 3)
+        )
+        await gate.waitUntilRetired(
+            CanvasPresentationRevision(sequence: 3)
+        )
+        state = await gate.snapshot
+
+        #expect(state.maximumConcurrentPreparationCount == 1)
+        #expect(state.activePreparationCount == 0)
+        #expect(
+            state.published == [CanvasPresentationRevision(sequence: 3)]
+        )
+        #expect(
+            renderer.paintDisplayPublishedRevisionsForTesting
+                == [CanvasPresentationRevision(sequence: 3)]
+        )
+        #expect(renderer.paintDisplayPreparationOwnershipCountForTesting == 0)
+        #expect(renderer.lastError == nil)
+    }
+
+    @Test
+    @MainActor
+    func exactDrawablePresentationSettlesOnlyTheNewestSubmittedRevision()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let library = device.makeDefaultLibrary()
+        else { return }
+        let renderer = try GridRenderer(
+            device: device,
+            library: library,
+            drawableSize: PatternSize(width: 64, height: 64),
+            configuration: try TilingCanvasConfiguration(
+                pixelSize: PixelSize(width: 64, height: 64),
+                finiteConfiguration: .plain
+            )
+        )
+        let registrar = TestDrawablePresentationRegistrar()
+        renderer.installDrawablePresentationRegistrarForTesting(registrar)
+        let view = MTKView(
+            frame: CGRect(x: 0, y: 0, width: 64, height: 64),
+            device: device
+        )
+        let first = CanvasPresentationRevision(sequence: 1)
+        let newest = CanvasPresentationRevision(sequence: 2)
+
+        renderer.submitInteractivePresentationForTesting(first, in: view)
+        #expect(renderer.interactiveFrameHasDemandForTesting)
+        #expect(registrar.registeredRevisions == [first])
+
+        renderer.signalInteractivePresentationDemandForTesting(newest)
+        registrar.present(first)
+        #expect(renderer.interactiveFrameHasDemandForTesting)
+
+        renderer.submitInteractivePresentationForTesting(newest, in: view)
+        let requestsBeforeNewestPresentation =
+            renderer.presentationContinuationRequestCountForTesting
+        registrar.present(newest)
+
+        #expect(!renderer.interactiveFrameHasDemandForTesting)
+        #expect(
+            renderer.presentationContinuationRequestCountForTesting
+                == requestsBeforeNewestPresentation
+        )
+        #expect(renderer.paintDisplayPreparationScheduleCountForTesting == 0)
+    }
+
+    @Test
+    @MainActor
+    func debugFrameCallbacksDoNotCreateCompletionTelemetryDemand() throws {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let library = device.makeDefaultLibrary()
+        else { return }
+        let renderer = try GridRenderer(
+            device: device,
+            library: library,
+            drawableSize: PatternSize(width: 64, height: 64),
+            configuration: try TilingCanvasConfiguration(
+                pixelSize: PixelSize(width: 64, height: 64),
+                finiteConfiguration: .plain
+            )
+        )
+        let view = MTKView(
+            frame: CGRect(x: 0, y: 0, width: 64, height: 64),
+            device: device
+        )
+        renderer.onInteractiveFramePresented = { _, _ in }
+        renderer.onInteractiveFrameMetrics = { _ in }
+
+        renderer.handleInteractiveCommandCompletionForTesting(in: view)
+
+        #expect(!renderer.interactiveFrameHasDemandForTesting)
+        #expect(renderer.presentationContinuationRequestCountForTesting == 0)
+        #expect(renderer.paintDisplayPreparationScheduleCountForTesting == 0)
     }
 
     @Test
@@ -125,5 +266,125 @@ struct GridRendererSparseCutoverTests {
         #expect(final.revisionResidentBytes == 0)
         #expect(final.activeStrokeSurfaceCount == 0)
         #expect(final.activeCommandOperationCount == 0)
+    }
+}
+
+@MainActor
+private final class TestDrawablePresentationRegistrar:
+    DrawablePresentationRegistering
+{
+    private var handlers:
+        [CanvasPresentationRevision: @MainActor @Sendable () -> Void] = [:]
+
+    var registeredRevisions: [CanvasPresentationRevision] {
+        handlers.keys.sorted()
+    }
+
+    func register(
+        revision: CanvasPresentationRevision,
+        handler: @escaping @MainActor @Sendable () -> Void
+    ) {
+        handlers[revision] = handler
+    }
+
+    func present(_ revision: CanvasPresentationRevision) {
+        handlers.removeValue(forKey: revision)?()
+    }
+}
+
+private actor PresentationPreparationGate:
+    PresentationPreparationGating
+{
+    struct Snapshot: Sendable {
+        let started: [CanvasPresentationRevision]
+        let published: [CanvasPresentationRevision]
+        let activePreparationCount: Int
+        let maximumConcurrentPreparationCount: Int
+    }
+
+    private let blockedRevision: CanvasPresentationRevision
+    private var blockedContinuation: CheckedContinuation<Void, Never>?
+    private var started: [CanvasPresentationRevision] = []
+    private var published: [CanvasPresentationRevision] = []
+    private var retired: [CanvasPresentationRevision] = []
+    private var activePreparationCount = 0
+    private var maximumConcurrentPreparationCount = 0
+    private var startWaiters:
+        [CanvasPresentationRevision: [CheckedContinuation<Void, Never>]] = [:]
+    private var publishWaiters:
+        [CanvasPresentationRevision: [CheckedContinuation<Void, Never>]] = [:]
+    private var retirementWaiters:
+        [CanvasPresentationRevision: [CheckedContinuation<Void, Never>]] = [:]
+
+    init(blockedRevision: CanvasPresentationRevision) {
+        self.blockedRevision = blockedRevision
+    }
+
+    func preparationDidBegin(
+        revision: CanvasPresentationRevision
+    ) async {
+        activePreparationCount += 1
+        maximumConcurrentPreparationCount = max(
+            maximumConcurrentPreparationCount,
+            activePreparationCount
+        )
+        started.append(revision)
+        startWaiters.removeValue(forKey: revision)?.forEach { $0.resume() }
+        if revision == blockedRevision {
+            await withCheckedContinuation { continuation in
+                blockedContinuation = continuation
+            }
+        }
+    }
+
+    func preparationDidPublish(
+        revision: CanvasPresentationRevision
+    ) {
+        published.append(revision)
+        publishWaiters.removeValue(forKey: revision)?.forEach { $0.resume() }
+    }
+
+    func preparationDidRetire(revision: CanvasPresentationRevision) {
+        activePreparationCount -= 1
+        retired.append(revision)
+        retirementWaiters.removeValue(forKey: revision)?.forEach {
+            $0.resume()
+        }
+    }
+
+    func waitUntilStarted(_ revision: CanvasPresentationRevision) async {
+        if started.contains(revision) { return }
+        await withCheckedContinuation { continuation in
+            startWaiters[revision, default: []].append(continuation)
+        }
+    }
+
+    func waitUntilPublished(_ revision: CanvasPresentationRevision) async {
+        if published.contains(revision) { return }
+        await withCheckedContinuation { continuation in
+            publishWaiters[revision, default: []].append(continuation)
+        }
+    }
+
+    func waitUntilRetired(_ revision: CanvasPresentationRevision) async {
+        if retired.contains(revision) { return }
+        await withCheckedContinuation { continuation in
+            retirementWaiters[revision, default: []].append(continuation)
+        }
+    }
+
+    func releaseBlockedRevision() {
+        blockedContinuation?.resume()
+        blockedContinuation = nil
+    }
+
+    var snapshot: Snapshot {
+        Snapshot(
+            started: started,
+            published: published,
+            activePreparationCount: activePreparationCount,
+            maximumConcurrentPreparationCount:
+                maximumConcurrentPreparationCount
+        )
     }
 }
