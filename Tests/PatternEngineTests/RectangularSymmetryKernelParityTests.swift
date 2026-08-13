@@ -75,6 +75,188 @@ private let foldFixtures: [FoldFixture] = [
 ]
 
 @Test
+func compiledRectangularDisplayFoldMatchesIndependentFixtures() throws {
+    let rasterSize = PixelSize(width: 192, height: 128)
+    let axisAlignedCases: [(
+        SymmetryPresetID,
+        PatternSize,
+        [(WorldPoint, CanonicalPoint)]
+    )] = [
+        (
+            .grid,
+            PatternSize(width: 128, height: 96),
+            [
+                (.init(x: -1, y: -1), .init(x: 190.5, y: 126.666_664)),
+                (.init(x: 128, y: 96), .init(x: 0, y: 0)),
+            ]
+        ),
+        (
+            .halfDrop,
+            PatternSize(width: 128, height: 96),
+            [
+                (.init(x: 129, y: 49), .init(x: 1.5, y: 1.333_333_4)),
+                (.init(x: -127, y: -47), .init(x: 1.5, y: 1.333_333_4)),
+                (.init(x: 128, y: 48), .init(x: 0, y: 0)),
+            ]
+        ),
+        (
+            .brick,
+            PatternSize(width: 128, height: 96),
+            [
+                (.init(x: 65, y: 97), .init(x: 1.5, y: 1.333_333_4)),
+                (.init(x: -63, y: -95), .init(x: 1.5, y: 1.333_333_4)),
+                (.init(x: 64, y: 96), .init(x: 0, y: 0)),
+            ]
+        ),
+        (
+            .mirrorX,
+            PatternSize(width: 128, height: 96),
+            [
+                (.init(x: 129, y: 24), .init(x: 190.5, y: 32)),
+                (.init(x: -1, y: 24), .init(x: 1.5, y: 32)),
+                (.init(x: 128, y: 96), .init(x: 0, y: 0)),
+            ]
+        ),
+        (
+            .mirrorY,
+            PatternSize(width: 128, height: 96),
+            [
+                (.init(x: 32, y: 97), .init(x: 48, y: 126.666_664)),
+                (.init(x: 32, y: -1), .init(x: 48, y: 1.333_335_9)),
+                (.init(x: 128, y: 96), .init(x: 0, y: 0)),
+            ]
+        ),
+        (
+            .mirrorXY,
+            PatternSize(width: 128, height: 96),
+            [
+                (.init(x: 129, y: 97), .init(x: 190.5, y: 126.666_664)),
+                (.init(x: -1, y: -1), .init(x: 1.5, y: 1.333_335_9)),
+                (.init(x: 128, y: 96), .init(x: 0, y: 0)),
+            ]
+        ),
+        (
+            .rotational,
+            PatternSize(width: 128, height: 96),
+            [
+                (.init(x: -1, y: -1), .init(x: 190.5, y: 126.666_664)),
+                (.init(x: 128, y: 96), .init(x: 0, y: 0)),
+            ]
+        ),
+        (
+            .squareRotation,
+            PatternSize(width: 128, height: 128),
+            [
+                (.init(x: 32, y: 64), .init(x: 48, y: 64)),
+                (.init(x: -32, y: -32), .init(x: 144, y: 96)),
+                (.init(x: 128, y: 128), .init(x: 0, y: 0)),
+            ]
+        ),
+    ]
+
+    for (presetID, repeatSize, probes) in axisAlignedCases {
+        let strategy = try TilingStrategy(
+            configuration: PeriodicSymmetryConfiguration(
+                presetID: presetID,
+                repeatSize: repeatSize
+            ),
+            canonicalRasterSize: rasterSize
+        )
+        let fold = try #require(
+            strategy.compiledSymmetry.domain.periodic?.displayFold
+        )
+        #expect(fold.family == .rectangular)
+        #expect(fold.coordinateSpace == .axisAlignedRepeat)
+        for (world, expected) in probes {
+            expectApproximatelyEqual(fold.applying(to: world), expected)
+        }
+    }
+
+    for presetID in [
+        SymmetryPresetID.squareRotation,
+        .squareKaleidoscope,
+    ] {
+        let strategy = try TilingStrategy(
+            configuration: PeriodicSymmetryConfiguration(
+                presetID: presetID,
+                repeatSize: PatternSize(width: 128, height: 128),
+                orientationRadians: .pi / 5
+            ),
+            canonicalRasterSize: rasterSize
+        )
+        let periodic = try #require(strategy.compiledSymmetry.domain.periodic)
+        let fold = periodic.displayFold
+        #expect(fold.family == .rectangular)
+        #expect(fold.coordinateSpace == .unitLattice)
+        let probes: [(SIMD2<Float>, CanonicalPoint)] = [
+            (.init(0.25, 0.5), .init(x: 48, y: 64)),
+            (.init(-0.25, -0.25), .init(x: 144, y: 96)),
+            (.zero, .init(x: 0, y: 0)),
+        ]
+        for (lattice, expected) in probes {
+            let world = periodic.translationBasis.u * lattice.x
+                + periodic.translationBasis.v * lattice.y
+            expectApproximatelyEqual(
+                fold.applying(to: WorldPoint(world)),
+                expected
+            )
+        }
+    }
+}
+
+@Test
+func compiledOrientedRectangularFoldKeepsNonOriginSeamsHalfOpen() throws {
+    let strategy = try TilingStrategy(
+        configuration: PeriodicSymmetryConfiguration(
+            presetID: .squareRotation,
+            repeatSize: PatternSize(width: 128, height: 128),
+            orientationRadians: .pi / 4
+        ),
+        canonicalRasterSize: PixelSize(width: 192, height: 128)
+    )
+    let periodic = try #require(strategy.compiledSymmetry.domain.periodic)
+    let epsilon: Float = 1 / 1_024
+
+    let probes: [(SIMD2<Float>, CanonicalPoint)] = [
+        (.init(1, 0.375), .init(x: 0, y: 48)),
+        (.init(0.375, 1), .init(x: 72, y: 0)),
+        (.init(1, 1), .init(x: 0, y: 0)),
+        (.init(-1, 0.375), .init(x: 0, y: 48)),
+        (.init(1 - epsilon, 0.375), .init(x: 191.812_5, y: 48)),
+        (.init(1 + epsilon, 0.375), .init(x: 0.187_5, y: 48)),
+        (.init(-1 - epsilon, 0.375), .init(x: 191.812_5, y: 48)),
+        (.init(-1 + epsilon, 0.375), .init(x: 0.187_5, y: 48)),
+        (.init(0.375, 1 - epsilon), .init(x: 72, y: 127.875)),
+        (.init(0.375, 1 + epsilon), .init(x: 72, y: 0.125)),
+        (.init(0.375, -1), .init(x: 72, y: 0)),
+        (.init(0.375, -1 - epsilon), .init(x: 72, y: 127.875)),
+        (.init(0.375, -1 + epsilon), .init(x: 72, y: 0.125)),
+    ]
+
+    for (targetLattice, expected) in probes {
+        let world = periodic.translationBasis.u * targetLattice.x
+            + periodic.translationBasis.v * targetLattice.y
+        let actualLattice = periodic.worldToLattice.applying(to: world)
+        #expect(abs(actualLattice.x - targetLattice.x) < 0.000_001)
+        #expect(abs(actualLattice.y - targetLattice.y) < 0.000_001)
+        expectRectangularLatticeSide(
+            actual: actualLattice.x,
+            target: targetLattice.x,
+            epsilon: epsilon
+        )
+        expectRectangularLatticeSide(
+            actual: actualLattice.y,
+            target: targetLattice.y,
+            epsilon: epsilon
+        )
+        expectApproximatelyEqual(
+            periodic.displayFold.applying(to: WorldPoint(world)),
+            expected
+        )
+    }
+}
+
+@Test
 func legacyRectangularFoldFixturesRemainExact() {
     for fixture in foldFixtures {
         let strategy = TilingStrategy(
@@ -272,6 +454,28 @@ private func imagePrecedes(_ lhs: TilingImage, _ rhs: TilingImage) -> Bool {
 
 private func probe(at point: SIMD2<Float>) -> AxisAlignedRect {
     rect(minimum: point, maximum: point + SIMD2(repeating: 0.5))
+}
+
+private func expectApproximatelyEqual(
+    _ actual: CanonicalPoint,
+    _ expected: CanonicalPoint,
+    tolerance: Float = 0.001
+) {
+    #expect(abs(actual.x - expected.x) < tolerance)
+    #expect(abs(actual.y - expected.y) < tolerance)
+}
+
+private func expectRectangularLatticeSide(
+    actual: Float,
+    target: Float,
+    epsilon: Float
+) {
+    let seam = target.rounded()
+    if target == seam {
+        #expect(actual >= seam && actual <= seam.nextUp)
+    } else if abs(target - seam) == epsilon {
+        #expect(target < seam ? actual < seam : actual > seam)
+    }
 }
 
 private func rect(

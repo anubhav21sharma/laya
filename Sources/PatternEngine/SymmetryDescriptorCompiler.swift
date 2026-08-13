@@ -202,6 +202,22 @@ public enum SymmetryDescriptorCompiler {
             )
         }
 
+        let foldCoordinateSpace: CompiledPeriodicFoldCoordinateSpace =
+            program.family == .triangular
+                || basis.u.y != 0
+                || basis.v.x != 0
+                ? .unitLattice
+                : .axisAlignedRepeat
+        let displayFold = CompiledPeriodicDisplayFold(
+            family: program.family,
+            coordinateSpace: foldCoordinateSpace,
+            worldToLattice: worldToLattice,
+            canonicalSize: canonicalSize,
+            repeatSize: normalizedConfiguration.repeatSize,
+            phase: program.phase,
+            alternatingReflections: program.reflections
+        )
+
         return CompiledSymmetry(
             presetID: normalizedConfiguration.presetID,
             domain: .periodic(CompiledPeriodicDomain(
@@ -211,6 +227,7 @@ public enum SymmetryDescriptorCompiler {
                 worldToLattice: worldToLattice,
                 phase: program.phase,
                 alternatingReflections: program.reflections,
+                displayFold: displayFold,
                 coincidentImagePolicy: program.coincidentPolicy
             )),
             family: program.family,

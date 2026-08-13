@@ -136,6 +136,7 @@ public struct CompiledPeriodicDomain: Equatable, Sendable {
     public let worldToLattice: Affine2D
     public let phase: PeriodicPhaseProgram?
     public let alternatingReflections: SymmetryReflectionAxes
+    public let displayFold: CompiledPeriodicDisplayFold
     public let coincidentImagePolicy: CoincidentImagePolicy
 }
 

@@ -23,6 +23,13 @@ struct SymmetryDescriptorCompilerTests {
         #expect(SymmetryKernelFamily.triangular.rawValue == 1)
         #expect(SymmetryKernelFamily.radial.rawValue == 2)
         #expect(
+            CompiledPeriodicFoldCoordinateSpace.axisAlignedRepeat.rawValue
+                == 0
+        )
+        #expect(
+            CompiledPeriodicFoldCoordinateSpace.unitLattice.rawValue == 1
+        )
+        #expect(
             legacySymmetryPresetIDs.map(\.rawValue)
                 == Array(0...6).map(UInt32.init)
         )

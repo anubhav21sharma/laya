@@ -25,15 +25,7 @@ struct TriangularSymmetryKernel: Equatable, Sendable {
     }
 
     func displayFold(_ point: WorldPoint) -> CanonicalPoint {
-        let lattice = periodic.worldToLattice.applying(to: point.simd)
-        let local = SIMD2(
-            triangularPositiveModulo(lattice.x, extent: 1),
-            triangularPositiveModulo(lattice.y, extent: 1)
-        )
-        return CanonicalPoint(
-            x: local.x * periodic.tileSize.width,
-            y: local.y * periodic.tileSize.height
-        )
+        periodic.displayFold.applying(to: point)
     }
 
     func images(
@@ -208,21 +200,6 @@ private func checkedTriangularCellIndex(
         "Triangular \(axis) cell index must convert to Float"
     )
     return result
-}
-
-private func triangularPositiveModulo(
-    _ value: Float,
-    extent: Float
-) -> Float {
-    let normalized = abs(value) < Float.leastNormalMagnitude ? 0 : value
-    let remainder = normalized.truncatingRemainder(dividingBy: extent)
-    if remainder == 0 || abs(remainder) < Float.leastNormalMagnitude {
-        return 0
-    }
-    if remainder < 0 {
-        return min(remainder + extent, extent.nextDown)
-    }
-    return remainder
 }
 
 private func triangularBounds(

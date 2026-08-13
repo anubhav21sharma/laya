@@ -101,6 +101,100 @@ struct TriangularSymmetryKernelTests {
     }
 
     @Test
+    func compiledDisplayFoldMatchesIndependentTriangularLatticeFixtures()
+        throws
+    {
+        for presetID in [
+            SymmetryPresetID.hexagons,
+            .rotation3,
+            .rotation6,
+            .kaleidoscope60,
+            .kaleidoscope30,
+        ] {
+            let strategy = try triangularStrategy(presetID)
+            let periodic = try #require(
+                strategy.compiledSymmetry.domain.periodic
+            )
+            let fold = periodic.displayFold
+            #expect(fold.family == .triangular)
+            #expect(fold.coordinateSpace == .unitLattice)
+            let probes: [(SIMD2<Float>, CanonicalPoint)] = [
+                (.init(0.31, 0.47), .init(x: 59.52, y: 60.16)),
+                (.init(1.31, -0.53), .init(x: 59.52, y: 60.16)),
+                (.init(-0.25, -0.25), .init(x: 144, y: 96)),
+                (.zero, .init(x: 0, y: 0)),
+            ]
+            for (lattice, expected) in probes {
+                let world = periodic.translationBasis.u * lattice.x
+                    + periodic.translationBasis.v * lattice.y
+                let actual = fold.applying(to: WorldPoint(world))
+                #expect(abs(actual.x - expected.x) < 0.001)
+                #expect(abs(actual.y - expected.y) < 0.001)
+            }
+        }
+    }
+
+    @Test
+    func compiledTriangularFoldKeepsNonOriginSeamsHalfOpen() throws {
+        let strategy = try TilingStrategy(
+            configuration: PeriodicSymmetryConfiguration(
+                presetID: .rotation6,
+                repeatSize: PatternSize(width: 256, height: 256)
+            ),
+            canonicalRasterSize: PixelSize(width: 192, height: 128)
+        )
+        let periodic = try #require(
+            strategy.compiledSymmetry.domain.periodic
+        )
+        let epsilon: Float = 1 / 1_024
+        let probes: [(SIMD2<Float>, CanonicalPoint)] = [
+            (.init(1, 0.375), .init(x: 0, y: 48)),
+            (.init(0.375, 1), .init(x: 72, y: 0)),
+            (.init(1, 1), .init(x: 0, y: 0)),
+            (.init(-1, 0.375), .init(x: 0, y: 48)),
+            (.init(1 - epsilon, 0.375), .init(x: 191.812_5, y: 48)),
+            (.init(1 + epsilon, 0.375), .init(x: 0.187_5, y: 48)),
+            (.init(-1 - epsilon, 0.375), .init(x: 191.812_5, y: 48)),
+            (.init(-1 + epsilon, 0.375), .init(x: 0.187_5, y: 48)),
+            (.init(0.375, 1 - epsilon), .init(x: 72, y: 127.875)),
+            (.init(0.375, 1 + epsilon), .init(x: 72, y: 0.125)),
+            (.init(0.375, -1), .init(x: 72, y: 0)),
+            (.init(0.375, -1 - epsilon), .init(x: 72, y: 127.875)),
+            (.init(0.375, -1 + epsilon), .init(x: 72, y: 0.125)),
+        ]
+
+        for (targetLattice, expected) in probes {
+            var world = periodic.translationBasis.u * targetLattice.x
+                + periodic.translationBasis.v * targetLattice.y
+            var actualLattice = periodic.worldToLattice.applying(to: world)
+            if targetLattice.y.rounded() == targetLattice.y {
+                if actualLattice.y < targetLattice.y {
+                    world.y = world.y.nextUp
+                } else if actualLattice.y > targetLattice.y {
+                    world.y = world.y.nextDown
+                }
+                actualLattice = periodic.worldToLattice.applying(to: world)
+                #expect(actualLattice.y == targetLattice.y)
+            }
+            #expect(abs(actualLattice.x - targetLattice.x) < 0.000_001)
+            #expect(abs(actualLattice.y - targetLattice.y) < 0.000_001)
+            expectTriangularLatticeSide(
+                actual: actualLattice.x,
+                target: targetLattice.x,
+                epsilon: epsilon
+            )
+            expectTriangularLatticeSide(
+                actual: actualLattice.y,
+                target: targetLattice.y,
+                epsilon: epsilon
+            )
+            let actual = periodic.displayFold.applying(to: WorldPoint(world))
+            #expect(abs(actual.x - expected.x) < 0.001)
+            #expect(abs(actual.y - expected.y) < 0.001)
+        }
+    }
+
+    @Test
     func fixedPointDeduplicationUsesExactTriangularOperations() throws {
         let expectations: [(SymmetryPresetID, Int, Int)] = [
             (.rotation3, 6, 2),
@@ -195,6 +289,19 @@ struct TriangularSymmetryKernelTests {
 
         #expect(exactOrdinals.count < 24)
         #expect(nearOrdinals.count == 24)
+    }
+}
+
+private func expectTriangularLatticeSide(
+    actual: Float,
+    target: Float,
+    epsilon: Float
+) {
+    let seam = target.rounded()
+    if target == seam {
+        #expect(actual == seam)
+    } else if abs(target - seam) == epsilon {
+        #expect(target < seam ? actual < seam : actual > seam)
     }
 }
 

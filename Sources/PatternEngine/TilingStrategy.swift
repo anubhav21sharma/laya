@@ -375,16 +375,15 @@ public struct TilingStrategy: Equatable, Sendable {
 
     public func displayFold(_ point: WorldPoint) -> CanonicalPoint {
         switch compiledSymmetry.family {
-        case .rectangular:
-            RectangularSymmetryKernel(
-                compiled: compiledSymmetry
-            ).displayFold(point)
-        case .triangular:
-            TriangularSymmetryKernel(
-                compiled: compiledSymmetry
-            ).displayFold(point)
+        case .rectangular, .triangular:
+            guard case let .periodic(periodic) = compiledSymmetry.domain else {
+                preconditionFailure(
+                    "Periodic display fold requires a periodic descriptor"
+                )
+            }
+            return periodic.displayFold.applying(to: point)
         case .radial:
-            RadialSymmetryKernel(
+            return RadialSymmetryKernel(
                 compiled: compiledSymmetry
             ).displayFold(point)
         }

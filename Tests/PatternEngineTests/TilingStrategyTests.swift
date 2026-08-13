@@ -16,6 +16,31 @@ private let legacyTilingKinds: [TilingKind] = [
 private let standardTileSize = PatternSize(width: 288, height: 192)
 
 @Test
+func everyPeriodicStrategyDelegatesDisplayFoldToCompiledAuthority() throws {
+    for presetID in SymmetryPresetID.periodicCases {
+        let rasterSize = PixelSize(width: 192, height: 128)
+        let configuration = PeriodicSymmetryConfiguration.defaultConfiguration(
+            presetID: presetID,
+            canonicalRasterSize: rasterSize
+        )
+        let strategy = try TilingStrategy(
+            configuration: configuration,
+            canonicalRasterSize: rasterSize
+        )
+        let fold = try #require(
+            strategy.compiledSymmetry.domain.periodic?.displayFold
+        )
+        for point in [
+            WorldPoint(x: 0, y: 0),
+            WorldPoint(x: 37.25, y: 51.5),
+            WorldPoint(x: -193.75, y: -129.5),
+        ] {
+            #expect(strategy.displayFold(point) == fold.applying(to: point))
+        }
+    }
+}
+
+@Test
 func migratedGridFoldUsesPositiveHalfOpenModulo() {
     let strategy = TilingStrategy(
         kind: .grid,
