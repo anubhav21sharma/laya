@@ -127,7 +127,7 @@ identity to resize tests; it derives and owns no revision counter.
 
 ## Commit
 
-Commit SHA: recorded after commit below.
+Commit SHA: `0222c88293de7d2ffd1ccdea08ae30c4cdddc7cc`
 
 ## Concerns
 
