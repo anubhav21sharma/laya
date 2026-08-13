@@ -11,6 +11,7 @@ final class InteractiveBrushTraceRecorder: @unchecked Sendable {
     private let state = OSAllocatedUnfairLock(
         initialState: State(sink: nil)
     )
+    private let activeSinkCalls = DispatchGroup()
 
     var isEnabled: Bool {
         state.withLock { $0.sink != nil }
@@ -20,6 +21,9 @@ final class InteractiveBrushTraceRecorder: @unchecked Sendable {
         state.withLock { state in
             state.sink = sink
             state.lastTimestampByIdentity.removeAll(keepingCapacity: true)
+        }
+        if sink == nil {
+            activeSinkCalls.wait()
         }
     }
 
@@ -38,6 +42,7 @@ final class InteractiveBrushTraceRecorder: @unchecked Sendable {
             any InteractiveBrushTraceSink
         )? = state.withLock { state in
             guard let sink = state.sink else { return nil }
+            activeSinkCalls.enter()
             var timestamp = monotonicNanoseconds
                 ?? DispatchTime.now().uptimeNanoseconds
             if let identity = lineage.identity,
@@ -63,6 +68,7 @@ final class InteractiveBrushTraceRecorder: @unchecked Sendable {
             )
         }
         guard let value else { return }
+        defer { activeSinkCalls.leave() }
         value.1.record(value.0)
     }
 }

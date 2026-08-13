@@ -40,11 +40,14 @@ final class InteractiveBrushTraceLogger:
 
     private let writerCapacity: Int
     private let clock: any InteractiveBrushTraceClock
+    private let recordAdmissionHook: (@Sendable () -> Void)?
     private let fileHandle: FileHandle
     private let writerQueue = DispatchQueue(
         label: "app.laya.interactive-brush-trace-writer"
     )
     private let stateLock = NSLock()
+    private let heartbeatEmissionLock = NSLock()
+    private let admittedEnqueues = DispatchGroup()
     private var state = State()
     private var heartbeatTask: Task<Void, Never>?
 
@@ -52,11 +55,13 @@ final class InteractiveBrushTraceLogger:
         logURL: URL,
         writerCapacity: Int = 256,
         clock: any InteractiveBrushTraceClock =
-            ContinuousInteractiveBrushTraceClock()
+            ContinuousInteractiveBrushTraceClock(),
+        recordAdmissionHook: (@Sendable () -> Void)? = nil
     ) throws {
         precondition(writerCapacity >= 0)
         self.writerCapacity = writerCapacity
         self.clock = clock
+        self.recordAdmissionHook = recordAdmissionHook
         let directory = logURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(
             at: directory,
@@ -101,16 +106,24 @@ final class InteractiveBrushTraceLogger:
                     return .rejected
                 }
                 state.failureRecordWasScheduled = true
+                admittedEnqueues.enter()
                 return .overflowFailure
             }
             state.pendingRecordCount += 1
+            admittedEnqueues.enter()
             return .record
+        }
+        if case .record = admission {
+            recordAdmissionHook?()
+        } else if case .overflowFailure = admission {
+            recordAdmissionHook?()
         }
         switch admission {
         case .rejected:
             return
         case .record:
             enqueueWrite(record, decrementsPendingCount: true)
+            admittedEnqueues.leave()
         case .overflowFailure:
             enqueueWrite(
                 InteractiveBrushTraceRecord(
@@ -120,6 +133,7 @@ final class InteractiveBrushTraceLogger:
                 ),
                 decrementsPendingCount: false
             )
+            admittedEnqueues.leave()
         }
     }
 
@@ -133,7 +147,7 @@ final class InteractiveBrushTraceLogger:
         stateLock.withLock { state.acceptsRecords = false }
         heartbeatTask?.cancel()
         heartbeatTask = nil
-        await drainWriter()
+        await drainAdmittedWrites()
         try? fileHandle.close()
         if let error = stateLock.withLock({ state.terminalError }) {
             throw error
@@ -148,6 +162,14 @@ final class InteractiveBrushTraceLogger:
     private func drainWriter() async {
         await withCheckedContinuation { continuation in
             writerQueue.async { continuation.resume() }
+        }
+    }
+
+    private func drainAdmittedWrites() async {
+        await withCheckedContinuation { continuation in
+            admittedEnqueues.notify(queue: writerQueue) {
+                continuation.resume()
+            }
         }
     }
 
@@ -180,28 +202,30 @@ final class InteractiveBrushTraceLogger:
     }
 
     private func emitElapsedHeartbeats() {
-        let now = clock.nowNanoseconds()
-        let deadlines: [UInt64] = stateLock.withLock {
-            guard state.acceptsRecords else { return [] }
-            var deadlines: [UInt64] = []
-            while state.nextHeartbeatNanoseconds <= now {
-                deadlines.append(state.nextHeartbeatNanoseconds)
-                let (next, overflow) = state.nextHeartbeatNanoseconds
-                    .addingReportingOverflow(1_000_000_000)
-                if overflow {
-                    state.nextHeartbeatNanoseconds = .max
-                    break
+        heartbeatEmissionLock.withLock {
+            let now = clock.nowNanoseconds()
+            let deadlines: [UInt64] = stateLock.withLock {
+                guard state.acceptsRecords else { return [] }
+                var deadlines: [UInt64] = []
+                while state.nextHeartbeatNanoseconds <= now {
+                    deadlines.append(state.nextHeartbeatNanoseconds)
+                    let (next, overflow) = state.nextHeartbeatNanoseconds
+                        .addingReportingOverflow(1_000_000_000)
+                    if overflow {
+                        state.nextHeartbeatNanoseconds = .max
+                        break
+                    }
+                    state.nextHeartbeatNanoseconds = next
                 }
-                state.nextHeartbeatNanoseconds = next
+                return deadlines
             }
-            return deadlines
-        }
-        for deadline in deadlines {
-            record(InteractiveBrushTraceRecord(
-                stage: .progress,
-                monotonicNanoseconds: deadline,
-                message: "heartbeat"
-            ))
+            for deadline in deadlines {
+                record(InteractiveBrushTraceRecord(
+                    stage: .progress,
+                    monotonicNanoseconds: deadline,
+                    message: "heartbeat"
+                ))
+            }
         }
     }
 }

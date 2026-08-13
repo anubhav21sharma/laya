@@ -818,6 +818,8 @@ actor StrokeFrameScheduler {
     private var outstandingFrame: StrokeScheduledFrame?
     private var outstandingZeroWorkContinuationToken: UInt64?
     private var outstandingPreparedOutputPageToken: UInt64?
+    private var outstandingPreparedTraceLineage:
+        [InteractiveBrushInputTrace] = []
     private var nextFrameToken: UInt64 = 1
     private var authoritativeScratch: [ProjectedDepositionRecord] = []
     private var predictedScratch: [ProjectedDepositionRecord] = []
@@ -1016,13 +1018,13 @@ actor StrokeFrameScheduler {
         }
         let tracedResult: StrokePreparationResult
         if case let .prepared(batch) = result {
-            tracedResult = .prepared(
-                batch.installingTraceLineage(input.traceLineage)
-            )
             for lineage in input.traceLineage {
                 traceRecorder?.record(stage: .dabPrepared, lineage: lineage)
-                traceRecorder?.record(stage: .settled, lineage: lineage)
             }
+            tracedResult = .prepared(installTraceLineage(
+                input.traceLineage,
+                on: batch
+            ))
         } else {
             tracedResult = result
         }
@@ -1282,6 +1284,9 @@ actor StrokeFrameScheduler {
                     preparedOutputPage.reclaim(token: frameToken)
                     outstandingPreparedOutputPageToken = nil
                 }
+                outstandingPreparedTraceLineage.removeAll(
+                    keepingCapacity: true
+                )
                 privateSurfaceEncoder = nil
                 return nil
             } catch let error as StrokeTileSurfaceError {
@@ -1344,6 +1349,7 @@ actor StrokeFrameScheduler {
                 outstandingPreparedOutputPageToken = nil
             }
             projectedCarry.removeFirst(consumedCount)
+            let acknowledgedLineage = outstandingPreparedTraceLineage
             if let next = try await makePreparedOutputBatch(
                 generation: generation,
                 predictionProvenanceBoundary:
@@ -1357,7 +1363,9 @@ actor StrokeFrameScheduler {
                 emitEmpty: false,
                 predictionAdmission: nil
             ) {
-                return .prepared(next)
+                return .prepared(
+                    installTraceLineage(acknowledgedLineage, on: next)
+                )
             }
             candidatePageForcedSurfaceLayer = nil
             if resumeAuthoritativeContinuation,
@@ -1375,8 +1383,11 @@ actor StrokeFrameScheduler {
                     .afterAcknowledgementResume,
                     generation: generation
                 )
-                return .prepared(resumed)
+                return .prepared(
+                    installTraceLineage(acknowledgedLineage, on: resumed)
+                )
             }
+            settleOutstandingPreparedTraceLineage()
             if pendingCommitBarrierGeneration == generation {
                 pendingCommitBarrierGeneration = nil
                 let mutation = try privateSurfaceEncoder?
@@ -1489,6 +1500,7 @@ actor StrokeFrameScheduler {
         outstandingFrame = nil
         outstandingZeroWorkContinuationToken = nil
         outstandingPreparedOutputPageToken = nil
+        outstandingPreparedTraceLineage.removeAll(keepingCapacity: true)
         outstandingSurfaceLease = nil
         pendingCommitBarrierGeneration = nil
         maximumPreparationWorkUnitsPerFrame = 0
@@ -4508,6 +4520,7 @@ actor StrokeFrameScheduler {
             outstandingSurfaceLease = nil
         }
         outstandingZeroWorkContinuationToken = nil
+        outstandingPreparedTraceLineage.removeAll(keepingCapacity: true)
         if !preserveMainOwnedSurfaceLease {
             outstandingPreparedOutputPageToken = nil
             preparedOutputPage.cancelBorrow()
@@ -4545,6 +4558,7 @@ actor StrokeFrameScheduler {
             outstandingSurfaceLease = nil
         }
         outstandingZeroWorkContinuationToken = nil
+        outstandingPreparedTraceLineage.removeAll(keepingCapacity: true)
         if !preserveMainOwnedSurfaceLease {
             outstandingPreparedOutputPageToken = nil
         }
@@ -4553,6 +4567,32 @@ actor StrokeFrameScheduler {
         commitRequested = false
         activeGeneration = nil
         cancelledGeneration = generation
+    }
+
+    private func settleOutstandingPreparedTraceLineage() {
+        let lineage = outstandingPreparedTraceLineage
+        outstandingPreparedTraceLineage.removeAll(keepingCapacity: true)
+        recordSettled(lineage: lineage)
+    }
+
+    private func installTraceLineage(
+        _ lineage: [InteractiveBrushInputTrace],
+        on batch: StrokePreparedDepositionBatch
+    ) -> StrokePreparedDepositionBatch {
+        let tracedBatch = batch.installingTraceLineage(lineage)
+        if tracedBatch.frameToken == nil {
+            outstandingPreparedTraceLineage.removeAll(keepingCapacity: true)
+            recordSettled(lineage: lineage)
+        } else {
+            outstandingPreparedTraceLineage = lineage
+        }
+        return tracedBatch
+    }
+
+    private func recordSettled(lineage: [InteractiveBrushInputTrace]) {
+        for inputTrace in lineage {
+            traceRecorder?.record(stage: .settled, lineage: inputTrace)
+        }
     }
 }
 

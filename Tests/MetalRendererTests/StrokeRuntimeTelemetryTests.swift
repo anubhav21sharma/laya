@@ -1,4 +1,5 @@
 import Foundation
+import EditorCore
 import Metal
 @testable import MetalRenderer
 import PatternEngine
@@ -119,7 +120,135 @@ func shippingTracePreservesPerInputIdentityAndMonotonicStageOrder() async throws
                 == records.map(\.monotonicNanoseconds).sorted()
         )
     }
+    let predicted = tracedInputs[2].1
+    let predictedRecords = sink.records(for: predicted)
+    #expect(predictedRecords.map(\.stage).starts(with: [
+        .eventReceived, .workerDequeued, .dabPrepared,
+    ]))
+    #expect(predictedRecords.last?.stage == .settled)
+    #expect(predictedRecords.allSatisfy {
+        $0.identity?.provenance == .predicted
+    })
     #expect(Set(tracedInputs.map(\.1)).count == tracedInputs.count)
+}
+
+@MainActor
+@Test
+func budgetSplitTracePersistsLineageAndSettlesOnlyOnAcknowledgement()
+    async throws
+{
+    let sink = InteractiveBrushTraceTestSink()
+    let recorder = InteractiveBrushTraceRecorder()
+    recorder.configure(sink: sink)
+    let scheduler = StrokeFrameScheduler(
+        budget: try DepositionFrameBudget(
+            cpuPreparationNanoseconds: 1_500_000,
+            maximumAuthoritativeInstances: 1,
+            maximumPredictedInstances: 1,
+            maximumPendingAuthoritativeInstances: 4_096,
+            maximumPendingPredictedInstances: 64,
+            inFlightUploadBufferCount: 3
+        ),
+        targetFramesPerSecond: 120,
+        preparationClock: { 1_000 },
+        traceRecorder: recorder
+    )
+    let generation: UInt64 = 0x5452_4144
+    let configuration = StrokePreparationConfiguration(
+        program: try BrushProgramCompiler.compile(
+            StageFourAnchorDefinitions.ink
+        ),
+        nominalDiameter: 10,
+        color: .black,
+        seed: 7,
+        viewport: ViewportTransform(
+            drawableSize: PatternSize(width: 512, height: 512),
+            worldCenter: WorldPoint(x: 256, y: 256)
+        ),
+        tilingStrategy: TilingStrategy(
+            kind: .grid,
+            tileSize: PatternSize(width: 512, height: 512)
+        )
+    )
+    let began = try #require(await scheduler.process(.begin(
+        generation: generation,
+        configuration: configuration,
+        samples: [runtimeStrokeSample(
+            x: 32,
+            phase: .began,
+            timestamp: 0
+        )]
+    )))
+    try await acknowledgeTraceTestResult(
+        began,
+        scheduler: scheduler,
+        generation: generation
+    )
+
+    let identity = StrokeTraceIdentity(
+        strokeGeneration: 9,
+        authoritativeSequence: 2,
+        sampleSequence: 2,
+        provenance: .coalesced
+    )
+    let lineage = InteractiveBrushInputTrace(
+        identity: identity,
+        eventReceiptMonotonicNanoseconds: 900
+    )
+    let result = try #require(await scheduler.process(StrokeInputEnvelope(
+        message: .appendAuthoritative(
+            generation: generation,
+            samples: [StrokeSample(
+                position: ScreenPoint(x: 40, y: 32),
+                pressure: 1,
+                timestamp: 1,
+                phase: .moved,
+                source: .mouse,
+                kind: .coalesced
+            )]
+        ),
+        traceLineage: [lineage]
+    )))
+    guard case let .prepared(first) = result else {
+        Issue.record("Expected traced prepared batch")
+        return
+    }
+    #expect(sink.records(for: identity).map(\.stage) == [
+        .workerDequeued, .dabPrepared,
+    ])
+
+    var batchCount = 0
+    var current: StrokePreparedDepositionBatch? = first
+    while let batch = current, let token = batch.frameToken {
+        #expect(batch.traceLineage == [lineage])
+        #expect(
+            sink.records(for: identity).filter { $0.stage == .settled }.count
+                == 0
+        )
+        let next = await scheduler.acknowledgePreparedFrame(
+            generation: generation,
+            frameToken: token
+        )
+        batchCount += 1
+        if case let .prepared(prepared)? = next {
+            #expect(
+                sink.records(for: identity).filter {
+                    $0.stage == .settled
+                }.count == (prepared.frameToken == nil ? 1 : 0)
+            )
+            current = prepared
+        } else if case let .failed(_, failure)? = next {
+            Issue.record("Trace continuation failed: \(failure)")
+            current = nil
+        } else {
+            current = nil
+        }
+    }
+    #expect(batchCount > 1)
+    #expect(
+        sink.records(for: identity).filter { $0.stage == .settled }.count == 1
+    )
+    await scheduler.cancel(generation: generation)
 }
 }
 
@@ -250,6 +379,32 @@ private final class InteractiveBrushTraceTestSink:
         for identity: StrokeTraceIdentity
     ) -> [InteractiveBrushTraceRecord] {
         lock.withLock { storage.filter { $0.identity == identity } }
+    }
+}
+
+private func acknowledgeTraceTestResult(
+    _ result: StrokePreparationResult,
+    scheduler: StrokeFrameScheduler,
+    generation: UInt64
+) async throws {
+    guard case let .prepared(first) = result else {
+        throw StrokeFrameSchedulerError.invalidLifecycle
+    }
+    var current: StrokePreparedDepositionBatch? = first
+    while let batch = current, let token = batch.frameToken {
+        let next = await scheduler.acknowledgePreparedFrame(
+            generation: generation,
+            frameToken: token
+        )
+        if case let .prepared(prepared)? = next {
+            current = prepared
+        } else if case let .failed(_, failure)? = next {
+            throw StrokePreparationFailure.unexpected(
+                "Trace setup acknowledgement failed: \(failure)"
+            )
+        } else {
+            current = nil
+        }
     }
 }
 
