@@ -15,6 +15,17 @@ package protocol PresentationPreparationGating: Sendable {
     func preparationDidRetire(
         revision: CanvasPresentationRevision
     ) async
+    func injectedPreparationFailure(
+        revision: CanvasPresentationRevision
+    ) async -> MetalRendererError?
+}
+
+package extension PresentationPreparationGating {
+    func injectedPreparationFailure(
+        revision: CanvasPresentationRevision
+    ) async -> MetalRendererError? {
+        nil
+    }
 }
 
 @MainActor

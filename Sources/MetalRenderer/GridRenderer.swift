@@ -518,8 +518,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private var preparedPaintDisplay: PreparedPaintDisplay?
     private var presentationPreparationGate:
         (any PresentationPreparationGating)?
+    #if DEBUG
+    private var paintDisplayAcknowledgementStatusOverrideForTesting:
+        StrokePreparedFrameAcknowledgementStatus?
+    #endif
+    #if DEBUG
     private var paintDisplayPublishedRevisions:
         [CanvasPresentationRevision] = []
+    #endif
     private var paintDisplayPreparationIsSuspended = false
     package var paintDisplayPreparationIsSuspendedForTesting: Bool {
         paintDisplayPreparationIsSuspended
@@ -530,11 +536,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     package var paintDisplayPreparationScheduleCountForTesting: UInt64 {
         paintDisplayPreparationScheduleCount
     }
+    #if DEBUG
     package var paintDisplayPublishedRevisionsForTesting:
         [CanvasPresentationRevision]
     {
         paintDisplayPublishedRevisions
     }
+    #endif
     package var paintDisplayPreparationOwnershipCountForTesting: Int {
         (paintDisplayPreparationTask == nil ? 0 : 1)
             + (retiringPaintDisplayPreparationTask == nil ? 0 : 1)
@@ -580,6 +588,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         precondition(retiringPaintDisplayPreparationTask == nil)
         presentationPreparationGate = gate
     }
+    #if DEBUG
+    package func installFailedTransientAcknowledgementForTesting() {
+        paintDisplayAcknowledgementStatusOverrideForTesting = .failed(
+            .schedulerReleaseFailed(
+                .unexpected("injected acknowledgement failure")
+            )
+        )
+        invalidatePaintDisplayPreparation()
+    }
+    #endif
     package func installPaintDisplayPreparationTaskForTesting(
         _ task: Task<Void, Never>
     ) {
@@ -1997,16 +2015,25 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     private func schedulePaintDisplayPreparation(in view: MTKView) {
         paintDisplayView = view
-        guard !paintDisplayPreparationIsSuspended,
+        guard interactiveFramePump.hasDemand,
+              !paintDisplayPreparationIsSuspended,
               retiringPaintDisplayPreparationTask == nil,
               !exclusiveInteractiveCompletionDrainInProgress,
               paintDisplayPreparationTask == nil,
               preparedPaintDisplay == nil
         else { return }
+        let demandCheckpoint = interactiveFramePump.demandCheckpoint
         let source = activePaintTransientSource
         let transient: DocumentPaintTransientDisplaySource?
+        #if DEBUG
+        let acknowledgementStatus =
+            paintDisplayAcknowledgementStatusOverrideForTesting
+                ?? source?.acknowledgementStatus
+        #else
+        let acknowledgementStatus = source?.acknowledgementStatus
+        #endif
         switch Self.paintDisplayPreparationAction(
-            for: source?.acknowledgementStatus
+            for: acknowledgementStatus
         ) {
         case .stable:
             if source?.acknowledgementStatus == .fulfilled {
@@ -2018,11 +2045,26 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         case .wait:
             return
         case let .fail(error):
+            #if DEBUG
+            paintDisplayAcknowledgementStatusOverrideForTesting = nil
+            #endif
+            activePaintTransientSource = nil
             let rendererError = MetalRendererError.commandFailed(
                 "transient display acknowledgement failed: \(error)"
             )
             paintCommandError = rendererError
+            let failedRevision = CanvasPresentationRevision(
+                sequence: max(paintDisplayPreparationSequence, 1)
+            )
+            let shouldContinue = interactiveFramePump
+                .settleTerminalFailure(
+                    upTo: failedRevision,
+                    since: demandCheckpoint
+                )
             failActiveOperationIfNeeded(rendererError)
+            if shouldContinue {
+                requestPaintDisplay(in: view)
+            }
             return
         }
         let width = Int(view.drawableSize.width)
@@ -2068,11 +2110,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         pendingLatestPaintDisplaySnapshot = nil
         paintDisplayPreparationScheduleCount &+= 1
         activePaintDisplayPreparationRevision = revision
+        let preparationDemandCheckpoint = interactiveFramePump.demandCheckpoint
         paintDisplayPreparationTask = Task { @MainActor [weak self] in
             guard let self else { return }
             let gate = self.presentationPreparationGate
             await gate?.preparationDidBegin(revision: revision)
             do {
+                if let injectedFailure = await gate?
+                    .injectedPreparationFailure(revision: revision)
+                {
+                    throw injectedFailure
+                }
                 let submission = try await self.makePaintDisplaySubmission(
                     snapshot: snapshot,
                     transient: transient
@@ -2093,19 +2141,24 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     snapshot: snapshot,
                     submission: submission
                 )
-                self.paintDisplayPreparationTask = nil
-                self.activePaintDisplayPreparationRevision = nil
+                #if DEBUG
                 self.paintDisplayPublishedRevisions.append(revision)
+                #endif
                 self.interactiveFramePump.signal(.cachePublished(revision))
                 await gate?.preparationDidPublish(revision: revision)
                 await gate?.preparationDidRetire(revision: revision)
+                guard !Task.isCancelled,
+                      self.activePaintDisplayPreparationRevision == revision
+                else { return }
+                self.paintDisplayPreparationTask = nil
+                self.activePaintDisplayPreparationRevision = nil
                 self.requestPaintDisplay(in: view)
             } catch is CancellationError {
-                if self.activePaintDisplayPreparationRevision == revision {
-                    self.paintDisplayPreparationTask = nil
-                    self.activePaintDisplayPreparationRevision = nil
-                }
                 await gate?.preparationDidRetire(revision: revision)
+                guard self.activePaintDisplayPreparationRevision == revision
+                else { return }
+                self.paintDisplayPreparationTask = nil
+                self.activePaintDisplayPreparationRevision = nil
             } catch {
                 guard self.paintDisplayPreparationSequence
                         == revision.sequence,
@@ -2117,9 +2170,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     await gate?.preparationDidRetire(revision: revision)
                     return
                 }
+                await gate?.preparationDidRetire(revision: revision)
+                guard !Task.isCancelled,
+                      self.paintDisplayPreparationSequence
+                        == revision.sequence,
+                      self.activePaintDisplayPreparationRevision == revision
+                else { return }
                 self.paintDisplayPreparationTask = nil
                 self.activePaintDisplayPreparationRevision = nil
-                await gate?.preparationDidRetire(revision: revision)
                 if Self.isDeferredPaintDisplayPreparationFailure(error) {
                     self.pendingLatestPaintDisplaySnapshot = snapshot
                     if self.activePaintTransientSource?
@@ -2132,9 +2190,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 }
                 self.paintCommandError = (error as? MetalRendererError)
                     ?? .commandFailed(error.localizedDescription)
+                let shouldContinue = self.interactiveFramePump
+                    .settleTerminalFailure(
+                        upTo: revision,
+                        since: preparationDemandCheckpoint
+                    )
                 self.failActiveOperationIfNeeded(
                     self.paintCommandError!
                 )
+                if shouldContinue {
+                    self.requestPaintDisplay(in: view)
+                }
             }
         }
     }
@@ -2927,6 +2993,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         await refreshPaintRevisionResidentBytes()
         documentDomainLocked = snapshot.documentDomainLocked
         radialGeometryLocked = snapshot.radialGeometryLocked
+        invalidatePaintDisplayPreparation()
     }
 
     func shutdown(

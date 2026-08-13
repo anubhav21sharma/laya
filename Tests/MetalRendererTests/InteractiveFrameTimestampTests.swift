@@ -150,4 +150,33 @@ func demandSignalledDuringAFrameSurvivesItsSubmissionAndPresentation() {
     #expect(afterPresentation)
     #expect(pump.hasDemand)
 }
+
+@Test
+func terminalPreparationFailureSettlesOnlyDemandObservedAtItsStart() {
+    var pump = InteractiveFramePump()
+    let failed = CanvasPresentationRevision(sequence: 29)
+    let newer = CanvasPresentationRevision(sequence: 30)
+    pump.signal(.cachePublished(failed))
+    let checkpoint = pump.demandCheckpoint
+
+    let afterExactFailure = pump.settleTerminalFailure(
+        upTo: failed,
+        since: checkpoint
+    )
+    #expect(!afterExactFailure)
+    #expect(!pump.hasDemand)
+
+    pump.signal(.cachePublished(failed))
+    let olderCheckpoint = pump.demandCheckpoint
+    pump.signal(.viewportChanged(newer))
+    pump.signal(.input)
+
+    let afterSupersededFailure = pump.settleTerminalFailure(
+        upTo: failed,
+        since: olderCheckpoint
+    )
+    #expect(afterSupersededFailure)
+    #expect(pump.hasDemand)
+    #expect(pump.beginFrame() == newer)
+}
 #endif

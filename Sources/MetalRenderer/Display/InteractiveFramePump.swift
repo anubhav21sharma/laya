@@ -46,6 +46,8 @@ struct InteractiveFramePump: Sendable {
         hasUnrevisionedDemand || latestDemandedRevision != nil
     }
 
+    var demandCheckpoint: UInt64 { demandEpoch }
+
     mutating func signal(_ demand: InteractiveFrameDemand) {
         demandEpoch &+= 1
         switch demand {
@@ -97,6 +99,21 @@ struct InteractiveFramePump: Sendable {
            latestDemandedRevision <= revision
         {
             self.latestDemandedRevision = nil
+        }
+        return hasDemand
+    }
+
+    mutating func settleTerminalFailure(
+        upTo revision: CanvasPresentationRevision,
+        since checkpoint: UInt64
+    ) -> Bool {
+        if let latestDemandedRevision,
+           latestDemandedRevision <= revision
+        {
+            self.latestDemandedRevision = nil
+        }
+        if demandEpoch == checkpoint {
+            hasUnrevisionedDemand = false
         }
         return hasDemand
     }
