@@ -9,6 +9,99 @@ struct TiledRasterSurfaceTests {
     private let bytes = PaintTileDescriptor.residentByteCount
 
     @Test
+    func committedProvisionalRollbackRestoresLogicalSurfaceAndAccounting()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let coverageBytes = try #require(
+            DepositionComponentCoverage.residentByteCount(
+                width: PaintTileDescriptor.side,
+                height: PaintTileDescriptor.side
+            )
+        )
+        let store = PaintTileStore(device: device, byteBudget: bytes * 5)
+        let surface = TiledRasterSurface(
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 256, height: 256)
+        )
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        var lease = try surface.reserveSortedUniqueTiles(
+            at: [coordinate],
+            pinReasons: [.inFlight]
+        )
+        let first = try surface.makeProvisionalBindings(
+            for: lease,
+            coordinates: [coordinate],
+            modifiedCoordinates: [coordinate],
+            workspace: .init(maximumBindingCount: 1)
+        )
+        lease = try surface.commitProvisionalBindings(
+            first,
+            for: lease,
+            modifiedCoordinates: [coordinate],
+            knownClearCoordinates: []
+        )
+        surface.completeProvisionalBindings(first)
+        let priorTexture = try #require(lease.bindings.first?.texture)
+        let priorRevision = surface.revision
+        let priorDirtyCoordinates = surface.dirtyTileCoordinates
+        let priorProvider = try surface.makeExactReferenceProvider()
+        let priorStore = store.snapshot()
+
+        let clearing = try surface.makeProvisionalBindings(
+            for: lease,
+            coordinates: [coordinate],
+            modifiedCoordinates: [],
+            workspace: .init(maximumBindingCount: 1)
+        )
+        lease = try surface.commitProvisionalBindings(
+            clearing,
+            for: lease,
+            modifiedCoordinates: [],
+            knownClearCoordinates: [coordinate]
+        )
+        #expect(surface.dirtyTileCoordinates.isEmpty)
+        #expect(store.snapshot().componentCoverageByteCount == 0)
+
+        try surface.rollbackCommittedProvisionalBindings(
+            clearing,
+            for: lease,
+            restoringRevision: priorRevision,
+            dirtyCoordinates: priorDirtyCoordinates
+        )
+
+        #expect(surface.revision == priorRevision)
+        #expect(surface.dirtyTileCoordinates == priorDirtyCoordinates)
+        #expect(try surface.makeExactReferenceProvider().references
+            == priorProvider.references)
+        let restoredStore = store.snapshot()
+        #expect(restoredStore.componentCoverageByteCount == coverageBytes)
+        #expect(restoredStore.residentByteCount == priorStore.residentByteCount)
+        let restoredEntry = try #require(restoredStore.entries.first)
+        #expect(restoredEntry.hasComponentCoverageTexture)
+        #expect(restoredEntry.pinCounts[.active] == 1)
+        #expect(restoredEntry.backing == priorStore.entries.first?.backing)
+        #expect(restoredStore.provisionalReservationCount == 1)
+
+        let restoredLease = try surface.leaseExistingTiles(
+            at: [coordinate],
+            pinReasons: [.visible]
+        )
+        let restoredTexture = try #require(
+            restoredLease.bindings.first?.texture
+        )
+        let restoredExactTexture = (restoredTexture as AnyObject)
+            === (priorTexture as AnyObject)
+        #expect(restoredExactTexture)
+        try surface.returnLease(restoredLease)
+
+        try surface.cancelProvisionalBindings(clearing)
+        try surface.returnLease(lease)
+        #expect(store.snapshot().provisionalReservationCount == 0)
+    }
+
+    @Test
     func exactCaptureUsesOneAggregateTokenForEveryProviderOnOneStore()
         throws
     {

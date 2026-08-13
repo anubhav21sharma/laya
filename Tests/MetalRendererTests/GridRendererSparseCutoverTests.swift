@@ -9,6 +9,186 @@ import Testing
 @Suite("Grid renderer sparse cutover", .serialized)
 struct GridRendererSparseCutoverTests {
     @Test
+    @MainActor
+    func productionLifecycleTurnsRetryACKUntilThirdAttemptSucceeds()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let queue = device.makeCommandQueue()
+        else { return }
+        let library = try makeSparseCutoverLibrary(device: device)
+        let renderer = try makeSparseCutoverRenderer(
+            device: device,
+            library: library
+        )
+        let layerID = UUID()
+        let context = try DocumentPaintRenderContext(
+            device: device,
+            commandQueue: queue,
+            library: library,
+            geometry: try DocumentPaintGeometry(
+                documentPixelSize: PixelSize(width: 256, height: 256),
+                storagePixelSize: PixelSize(width: 256, height: 256),
+                radialLayout: nil
+            ),
+            initialLayerStack: try .single(id: layerID),
+            byteBudget: PaintTileDescriptor.residentByteCount * 8,
+            transferByteCapacity: PaintTileDescriptor.residentByteCount * 16,
+            maximumRevisionBytes: PaintTileDescriptor.residentByteCount * 8
+        )
+        let capability = try context.beginStrokeSurface()
+        let failure = StrokePreparationFailure.unexpected(
+            "production lifecycle ACK retry"
+        )
+        let frame = StrokePreparedDisplayFrame.testing(
+            capability: capability,
+            acknowledgementIsAvailable: true,
+            acknowledgementReleaseFailures: [failure, failure]
+        )
+        let update = try context.makeTransientCacheUpdate(
+            frame: frame,
+            sequence: 1
+        )
+        await renderer.installFailedInteractiveStrokeCacheUpdateForTesting(
+            update,
+            parameters: .init(blendMode: .normal, opacity: 1)
+        )
+        #expect(update.acknowledgement.testingRequestCount == 1)
+
+        try renderer.drainCompletedInteractiveOperations()
+        await renderer
+            .awaitInteractiveStrokeCacheAcknowledgementRetryForHarness()
+        #expect(update.acknowledgement.testingRequestCount == 2)
+        #expect(update.acknowledgement.status
+            == .failed(.schedulerReleaseFailed(failure)))
+
+        try renderer.drainCompletedInteractiveOperations()
+        await renderer
+            .awaitInteractiveStrokeCacheAcknowledgementRetryForHarness()
+        #expect(update.acknowledgement.testingRequestCount == 3)
+        #expect(update.acknowledgement.status == .fulfilled)
+        let diagnostic = await renderer
+            .interactiveStrokeCacheSnapshotForTesting()
+        #expect(diagnostic.submittedUpdateCount == 1)
+        #expect(diagnostic.completedUpdateCount == 1)
+        #expect(diagnostic.acknowledgementSettlementCount == 1)
+        #expect(diagnostic.pendingPreparedAcknowledgementCount == 0)
+    }
+
+    @Test
+    @MainActor
+    func cacheRetirementFailureAutomaticallyRetriesBeforeIdle()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let renderer = try GridRenderer(
+            device: device,
+            library: try makeSparseCutoverLibrary(device: device),
+            drawableSize: PatternSize(width: 64, height: 64),
+            configuration: try TilingCanvasConfiguration(
+                pixelSize: PixelSize(width: 64, height: 64),
+                tiling: .grid
+            )
+        )
+        try renderer.installNativeHarnessBrushes()
+        renderer.configureStrokeRuntimeTelemetry(profile: .syntheticTest)
+        await renderer.installInteractiveStrokeCacheFailureInjectionForTesting(
+            .init(retirementFailureCount: 1)
+        )
+        var errors: [MetalRendererError] = []
+        renderer.onError = { errors.append($0) }
+        let token = RendererOperationToken(rawValue: 0xCA_C4_E0_01)
+        let style = try renderer.nativeHarnessStrokeStyle(
+            diameter: 12,
+            seed: token.rawValue
+        )
+        let sample = StrokeSample(
+            position: ScreenPoint(x: 16, y: 16),
+            pressure: 0.75,
+            timestamp: 0,
+            phase: .began,
+            source: .mouse,
+            capabilities: [.pressure]
+        )
+
+        try renderer.beginStroke(token: token, sample: sample, style: style)
+        try renderer.cancelStroke(token: token)
+        await renderer.awaitInteractiveStrokeCacheRetirementForHarness()
+        try renderer.drainStrokeWorkspaceRetirementForHarness()
+
+        #expect(renderer.isIdle)
+        #expect(errors.count == 1)
+        #expect(renderer.lastError == errors.first)
+        let diagnostic = await renderer
+            .interactiveStrokeCacheSnapshotForTesting()
+        #expect(diagnostic.retirementFailureCount == 1)
+        #expect(diagnostic.retirementState == .idle)
+        #expect(diagnostic.retirementErrorDescription == nil)
+        #expect(diagnostic.activeStrokeEpochCount == 0)
+        #expect(diagnostic.activeUpdateOwnerCount == 0)
+        #expect(diagnostic.retirementWaiterCount == 0)
+        #expect(diagnostic.provisionalBytes == 0)
+    }
+
+    @Test
+    @MainActor
+    func repeatedCacheRetirementFailureTerminallyDropsCacheResources()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let renderer = try GridRenderer(
+            device: device,
+            library: try makeSparseCutoverLibrary(device: device),
+            drawableSize: PatternSize(width: 64, height: 64),
+            configuration: try TilingCanvasConfiguration(
+                pixelSize: PixelSize(width: 64, height: 64),
+                tiling: .grid
+            )
+        )
+        try renderer.installNativeHarnessBrushes()
+        renderer.configureStrokeRuntimeTelemetry(profile: .syntheticTest)
+        await renderer.installInteractiveStrokeCacheFailureInjectionForTesting(
+            .init(retirementFailureCount: 2)
+        )
+        var errors: [MetalRendererError] = []
+        renderer.onError = { errors.append($0) }
+        let token = RendererOperationToken(rawValue: 0xCA_C4_E0_02)
+        let style = try renderer.nativeHarnessStrokeStyle(
+            diameter: 12,
+            seed: token.rawValue
+        )
+        let sample = StrokeSample(
+            position: ScreenPoint(x: 16, y: 16),
+            pressure: 0.75,
+            timestamp: 0,
+            phase: .began,
+            source: .mouse,
+            capabilities: [.pressure]
+        )
+
+        try renderer.beginStroke(token: token, sample: sample, style: style)
+        try renderer.cancelStroke(token: token)
+        await renderer.awaitInteractiveStrokeCacheRetirementForHarness()
+        try renderer.drainStrokeWorkspaceRetirementForHarness()
+
+        #expect(!renderer.isIdle)
+        #expect(errors.count == 2)
+        let diagnostic = await renderer
+            .interactiveStrokeCacheSnapshotForTesting()
+        #expect(diagnostic.retirementFailureCount == 2)
+        #expect(diagnostic.retirementState == .idle)
+        #expect(diagnostic.activeStrokeEpochCount == 0)
+        #expect(diagnostic.activeUpdateOwnerCount == 0)
+        #expect(diagnostic.retirementWaiterCount == 0)
+        #expect(diagnostic.provisionalBytes == 0)
+        #expect(diagnostic.pendingPreparedAcknowledgementCount == 0)
+        #expect(diagnostic.residentBytes == 0)
+        #expect(diagnostic.totalPhysicalResidentBytes == 0)
+        #expect(diagnostic.componentCoverageBytes == 0)
+        #expect(diagnostic.backingBytes == 0)
+    }
+
+    @Test
     func displayPreparationDoesNotOwnPendingPreparedPageCredit() {
         #expect(
             GridRenderer.paintDisplayPreparationAction(for: nil) == .stable

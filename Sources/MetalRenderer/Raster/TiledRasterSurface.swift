@@ -1060,6 +1060,30 @@ public final class TiledRasterSurface: RasterSurface, @unchecked Sendable {
         try store.cancelProvisionalBindings(provisional)
     }
 
+    func rollbackCommittedProvisionalBindings(
+        _ provisional: PaintTileProvisionalReservation,
+        for lease: PaintTileLease,
+        restoringRevision: RasterRevision,
+        dirtyCoordinates restoredDirtyCoordinates: [PaintTileCoordinate]
+    ) throws {
+        guard referenceView == nil else {
+            throw TiledRasterSurfaceError.immutableReferenceView
+        }
+        try withLock {
+            guard currentRevision.rawValue
+                    == restoringRevision.rawValue + 1
+            else { throw PaintTileStoreError.leaseBindingMismatch }
+            try store.rollbackCommittedProvisionalBindings(
+                provisional,
+                for: lease,
+                surfaceID: surfaceID,
+                currentGeneration: currentGeneration
+            )
+            currentRevision = restoringRevision
+            dirtyCoordinates = Set(restoredDirtyCoordinates)
+        }
+    }
+
     func completeProvisionalBindings(
         _ provisional: PaintTileProvisionalReservation
     ) {

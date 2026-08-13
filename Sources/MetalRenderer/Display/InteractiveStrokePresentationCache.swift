@@ -4,7 +4,6 @@ import Foundation
 import PatternEngine
 
 enum InteractiveStrokePresentationCacheError: Error, Equatable, Sendable {
-    case invalidCapacity
     case foreignUpdate
     case staleRevision(
         current: InteractiveStrokePresentationRevision,
@@ -12,11 +11,47 @@ enum InteractiveStrokePresentationCacheError: Error, Equatable, Sendable {
     )
     case updateSlotCapacityExceeded(maximum: Int)
     case tileCapacityExceeded(required: Int, maximum: Int)
+    case physicalCapacityExceeded(
+        requested: Int,
+        current: Int,
+        highWater: Int,
+        maximum: Int
+    )
     case commandBufferUnavailable
     case blitEncoderUnavailable
     case clearEncoderUnavailable
     case commandFailed(String)
-    case generationIsUpdating(UInt64)
+    case injectedRolePreparationFailure(StrokePrivateSurfaceLayer)
+    case injectedRetirementFailure(UUID)
+}
+
+final class InteractiveStrokePresentationCacheFailureInjection:
+    @unchecked Sendable
+{
+    let sequence: UInt64?
+    let role: StrokePrivateSurfaceLayer?
+    private let lock = NSLock()
+    private var retirementFailuresRemaining: Int
+
+    init(
+        sequence: UInt64? = nil,
+        role: StrokePrivateSurfaceLayer? = nil,
+        retirementFailureCount: Int = 0
+    ) {
+        precondition((sequence == nil) == (role == nil))
+        precondition(retirementFailureCount >= 0)
+        self.sequence = sequence
+        self.role = role
+        retirementFailuresRemaining = retirementFailureCount
+    }
+
+    func consumeRetirementFailure() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard retirementFailuresRemaining > 0 else { return false }
+        retirementFailuresRemaining -= 1
+        return true
+    }
 }
 
 struct InteractiveStrokeCompositeParameters: Equatable, Sendable {
@@ -28,15 +63,20 @@ struct InteractiveStrokePresentationRevision:
     Equatable, Hashable, Comparable, Sendable
 {
     let generation: UInt64
+    let strokeEpoch: UUID
     let sequence: UInt64
 
     static func < (
         lhs: InteractiveStrokePresentationRevision,
         rhs: InteractiveStrokePresentationRevision
     ) -> Bool {
-        lhs.generation == rhs.generation
-            ? lhs.sequence < rhs.sequence
-            : lhs.generation < rhs.generation
+        if lhs.generation != rhs.generation {
+            return lhs.generation < rhs.generation
+        }
+        if lhs.strokeEpoch != rhs.strokeEpoch {
+            return lhs.strokeEpoch.uuidString < rhs.strokeEpoch.uuidString
+        }
+        return lhs.sequence < rhs.sequence
     }
 }
 
@@ -48,12 +88,23 @@ struct InteractiveStrokePresentationSnapshot: @unchecked Sendable {
     let parameters: InteractiveStrokeCompositeParameters
 }
 
+enum InteractiveStrokePresentationCacheRetirementState:
+    Equatable, Sendable
+{
+    case idle
+    case waiting(strokeEpoch: UUID)
+    case failed(strokeEpoch: UUID)
+}
+
 struct InteractiveStrokePresentationCacheSnapshot: Equatable, Sendable {
     let maximumUpdateSlotCount: Int
     let activeUpdateSlotCount: Int
     let updateSlotHighWater: Int
     let residentBytes: Int
     let residentByteHighWater: Int
+    let residentByteBudget: Int
+    let totalPhysicalResidentBytes: Int
+    let totalPhysicalResidentByteHighWater: Int
     let provisionalBytes: Int
     let componentCoverageBytes: Int
     let backingBytes: Int
@@ -63,13 +114,25 @@ struct InteractiveStrokePresentationCacheSnapshot: Equatable, Sendable {
     let failedUpdateCount: UInt64
     let cancelledUpdateCount: UInt64
     let acknowledgementSettlementCount: UInt64
+    let activeStrokeEpochCount: Int
+    let activeUpdateOwnerCount: Int
     let retirementWaiterCount: Int
     let retirementResumeCount: UInt64
+    let rolledBackRoleCommitCount: UInt64
+    let retirementState: InteractiveStrokePresentationCacheRetirementState
+    let retirementFailureCount: UInt64
+    let retirementErrorDescription: String?
+    let pendingPreparedAcknowledgementCount: Int
+    let isIdle: Bool
 }
 
 protocol InteractiveStrokePresentationCacheCompletionGating: Sendable {
     func cacheCommandDidSubmit() async
     func waitAfterGPUCompletion() async
+    func cacheRetirementDidWait() async
+    func cacheRetirementDidFail() async
+    func cacheAcknowledgementDidFail() async
+    func waitForLifecycleRetry(attempt: Int) async throws
 }
 
 actor InteractiveStrokePresentationCache {
@@ -77,6 +140,7 @@ actor InteractiveStrokePresentationCache {
 
     private final class GenerationState: @unchecked Sendable {
         let generation: UInt64
+        let strokeEpoch: UUID
         let layerID: UUID
         let pixelSize: PixelSize
         let authoritative: TiledRasterSurface
@@ -85,10 +149,12 @@ actor InteractiveStrokePresentationCache {
         init(
             store: PaintTileStore,
             generation: UInt64,
+            strokeEpoch: UUID,
             layerID: UUID,
             pixelSize: PixelSize
         ) {
             self.generation = generation
+            self.strokeEpoch = strokeEpoch
             self.layerID = layerID
             self.pixelSize = pixelSize
             authoritative = TiledRasterSurface(
@@ -109,6 +175,13 @@ actor InteractiveStrokePresentationCache {
     private struct GPUCompletion: Sendable {
         let succeeded: Bool
         let message: String?
+    }
+
+    private struct PendingPreparedAcknowledgement: Sendable {
+        let acknowledgement: StrokePreparedFrameAcknowledgement
+        let settlement:
+            DocumentPaintTransientCacheAcknowledgementSettlement
+        let ownerID: UUID
     }
 
     private final class GPUCompletionSignal: @unchecked Sendable {
@@ -144,21 +217,30 @@ actor InteractiveStrokePresentationCache {
     }
 
     private final class DestinationUpdate: @unchecked Sendable {
+        let role: StrokePrivateSurfaceLayer
         let surface: TiledRasterSurface
         let targetCoordinates: [PaintTileCoordinate]
         let modifiedCoordinates: [PaintTileCoordinate]
         var lease: PaintTileLease?
         var provisional: PaintTileProvisionalReservation?
+        let initialRevision: RasterRevision
+        let initialDirtyCoordinates: [PaintTileCoordinate]
         var wasCommitted = false
+        var wasFinalized = false
+        var wasSettled = false
 
         init(
+            role: StrokePrivateSurfaceLayer,
             surface: TiledRasterSurface,
             targetCoordinates: [PaintTileCoordinate],
             modifiedCoordinates: [PaintTileCoordinate]
         ) {
+            self.role = role
             self.surface = surface
             self.targetCoordinates = targetCoordinates
             self.modifiedCoordinates = modifiedCoordinates
+            initialRevision = surface.revision
+            initialDirtyCoordinates = surface.dirtyTileCoordinates
         }
 
         func reserve() throws {
@@ -189,27 +271,53 @@ actor InteractiveStrokePresentationCache {
                 }
             )
             wasCommitted = true
+        }
+
+        func rollback() throws {
+            guard wasCommitted, !wasFinalized,
+                  let provisional, let lease
+            else { return }
+            try surface.rollbackCommittedProvisionalBindings(
+                provisional,
+                for: lease,
+                restoringRevision: initialRevision,
+                dirtyCoordinates: initialDirtyCoordinates
+            )
+            wasCommitted = false
+        }
+
+        func finalize() {
+            guard wasCommitted, !wasFinalized, let provisional else { return }
             surface.completeProvisionalBindings(provisional)
+            wasFinalized = true
         }
 
         func settle() {
-            if let provisional, !wasCommitted {
+            guard !wasSettled else { return }
+            wasSettled = true
+            if let provisional, !wasFinalized {
+                precondition(!wasCommitted)
                 try? surface.cancelProvisionalBindings(provisional)
             }
             if let lease { try? surface.returnLease(lease) }
         }
     }
 
+    private let device: any MTLDevice
     private let commandQueue: any MTLCommandQueue
-    private let store: PaintTileStore
+    private var store: PaintTileStore
+    private let byteBudget: Int
     private let maximumTileCount: Int
     private let completionGate:
         (any InteractiveStrokePresentationCacheCompletionGating)?
+    private var failureInjection:
+        InteractiveStrokePresentationCacheFailureInjection?
     private let traceRecorder: InteractiveBrushTraceRecorder?
     private var generationState: GenerationState?
     private var published: InteractiveStrokePresentationSnapshot?
+    private var updatingOwnerID: UUID?
     private var updatingRevision: InteractiveStrokePresentationRevision?
-    private var cancelledGenerations: Set<UInt64> = []
+    private var cancelledEpochs: Set<UUID> = []
     private var updateSlotHighWater = 0
     private var submittedUpdateCount: UInt64 = 0
     private var completedUpdateCount: UInt64 = 0
@@ -217,8 +325,14 @@ actor InteractiveStrokePresentationCache {
     private var cancelledUpdateCount: UInt64 = 0
     private var acknowledgementSettlementCount: UInt64 = 0
     private var retirementWaiters:
-        [(UInt64, CheckedContinuation<Void, Never>)] = []
+        [(UUID, CheckedContinuation<Void, Never>)] = []
     private var retirementResumeCount: UInt64 = 0
+    private var totalPhysicalResidentByteHighWater = 0
+    private var rolledBackRoleCommitCount: UInt64 = 0
+    private var retirementFailure: (strokeEpoch: UUID, description: String)?
+    private var retirementFailureCount: UInt64 = 0
+    private var pendingPreparedAcknowledgement:
+        PendingPreparedAcknowledgement?
 
     init(
         device: any MTLDevice,
@@ -227,13 +341,18 @@ actor InteractiveStrokePresentationCache {
         maximumTileCount: Int,
         completionGate:
             (any InteractiveStrokePresentationCacheCompletionGating)? = nil,
+        failureInjection:
+            InteractiveStrokePresentationCacheFailureInjection? = nil,
         traceRecorder: InteractiveBrushTraceRecorder? = nil
     ) {
         precondition(byteBudget > 0 && maximumTileCount > 0)
+        self.device = device
         self.commandQueue = commandQueue
         store = PaintTileStore(device: device, byteBudget: byteBudget)
+        self.byteBudget = byteBudget
         self.maximumTileCount = maximumTileCount
         self.completionGate = completionGate
+        self.failureInjection = failureInjection
         self.traceRecorder = traceRecorder
     }
 
@@ -241,29 +360,60 @@ actor InteractiveStrokePresentationCache {
         _ update: DocumentPaintTransientCacheUpdate,
         parameters: InteractiveStrokeCompositeParameters
     ) async throws -> InteractiveStrokePresentationRevision {
-        guard update.acknowledgementSettlement.claimOwnership() else {
+        guard pendingPreparedAcknowledgement == nil else {
+            throw InteractiveStrokePresentationCacheError.foreignUpdate
+        }
+        let ownerID = UUID()
+        guard update.acknowledgementSettlement.claimOwnership(
+            ownerID: ownerID
+        ) else {
             throw InteractiveStrokePresentationCacheError.foreignUpdate
         }
         let revision = InteractiveStrokePresentationRevision(
             generation: update.generation,
+            strokeEpoch: update.strokeEpoch,
             sequence: update.sequence
         )
-        defer { finishUpdateSlotIfOwned(revision) }
+        defer { finishUpdateSlotIfOwned(ownerID) }
+        let result: InteractiveStrokePresentationRevision
         do {
-            let result = try await adoptCore(
+            result = try await adoptCore(
                 update,
                 revision: revision,
+                ownerID: ownerID,
                 parameters: parameters
             )
-            try await settleAcknowledgement(update, revision: revision)
-            return result
         } catch {
             if error is CancellationError {
                 cancelledUpdateCount &+= 1
             } else {
                 failedUpdateCount &+= 1
             }
-            try? await settleAcknowledgement(update, revision: revision)
+            do {
+                try await settleAcknowledgement(
+                    update,
+                    ownerID: ownerID
+                )
+            } catch {
+                pendingPreparedAcknowledgement =
+                    PendingPreparedAcknowledgement(
+                        acknowledgement: update.acknowledgement,
+                        settlement: update.acknowledgementSettlement,
+                        ownerID: ownerID
+                    )
+            }
+            throw error
+        }
+        do {
+            try await settleAcknowledgement(update, ownerID: ownerID)
+            return result
+        } catch {
+            failedUpdateCount &+= 1
+            pendingPreparedAcknowledgement = PendingPreparedAcknowledgement(
+                acknowledgement: update.acknowledgement,
+                settlement: update.acknowledgementSettlement,
+                ownerID: ownerID
+            )
             throw error
         }
     }
@@ -277,42 +427,92 @@ actor InteractiveStrokePresentationCache {
         return published
     }
 
-    func retire(generation: UInt64) async throws {
-        if updatingRevision?.generation == generation {
+    func retire(
+        strokeEpoch: DocumentPaintStrokePresentationEpoch
+    ) async throws {
+        strokeEpoch.retire()
+        if updatingRevision?.strokeEpoch == strokeEpoch.identity {
             await withCheckedContinuation { continuation in
-                retirementWaiters.append((generation, continuation))
+                retirementWaiters.append((strokeEpoch.identity, continuation))
+                Task { await completionGate?.cacheRetirementDidWait() }
             }
         }
-        try retireCompletedGeneration(generation)
+        try retireCompletedEpochRecordingFailure(strokeEpoch.identity)
     }
 
-    private func retireCompletedGeneration(_ generation: UInt64) throws {
-        precondition(updatingRevision?.generation != generation)
-        guard let state = generationState, state.generation == generation else {
+    private func retireCompletedEpoch(_ strokeEpoch: UUID) throws {
+        precondition(updatingRevision?.strokeEpoch != strokeEpoch)
+        if failureInjection?.consumeRetirementFailure() == true {
+            throw InteractiveStrokePresentationCacheError
+                .injectedRetirementFailure(strokeEpoch)
+        }
+        guard let state = generationState,
+              state.strokeEpoch == strokeEpoch
+        else {
+            cancelledEpochs.remove(strokeEpoch)
             return
         }
         try state.authoritative.advanceGeneration()
         try state.prediction.advanceGeneration()
         generationState = nil
-        if published?.revision.generation == generation { published = nil }
-        cancelledGenerations.remove(generation)
+        if published?.revision.strokeEpoch == strokeEpoch { published = nil }
+        cancelledEpochs.remove(strokeEpoch)
     }
 
-    func cancel(generation: UInt64) async throws {
-        cancelledGenerations.insert(generation)
-        try await retire(generation: generation)
+    private func retireCompletedEpochRecordingFailure(
+        _ strokeEpoch: UUID
+    ) throws {
+        do {
+            try retireCompletedEpoch(strokeEpoch)
+            if retirementFailure?.strokeEpoch == strokeEpoch {
+                retirementFailure = nil
+            }
+        } catch {
+            retirementFailure = (strokeEpoch, String(describing: error))
+            retirementFailureCount &+= 1
+            throw error
+        }
+    }
+
+    func cancel(
+        strokeEpoch: DocumentPaintStrokePresentationEpoch
+    ) async throws {
+        strokeEpoch.retire()
+        cancelledEpochs.insert(strokeEpoch.identity)
+        if updatingRevision?.strokeEpoch == strokeEpoch.identity {
+            await withCheckedContinuation { continuation in
+                retirementWaiters.append((strokeEpoch.identity, continuation))
+                Task { await completionGate?.cacheRetirementDidWait() }
+            }
+        }
+        try retireCompletedEpochRecordingFailure(strokeEpoch.identity)
     }
 
     func snapshot() -> InteractiveStrokePresentationCacheSnapshot {
         let storeSnapshot = store.snapshot()
+        let totalPhysicalBytes = physicalResidentBytes(storeSnapshot)
         let activeSlots = (published == nil ? 0 : 1)
             + (updatingRevision == nil ? 0 : 1)
+        let retirementState: InteractiveStrokePresentationCacheRetirementState
+        if let retirementFailure {
+            retirementState = .failed(
+                strokeEpoch: retirementFailure.strokeEpoch
+            )
+        } else if let waiting = retirementWaiters.first {
+            retirementState = .waiting(strokeEpoch: waiting.0)
+        } else {
+            retirementState = .idle
+        }
         return InteractiveStrokePresentationCacheSnapshot(
             maximumUpdateSlotCount: Self.maximumUpdateSlotCount,
             activeUpdateSlotCount: activeSlots,
             updateSlotHighWater: updateSlotHighWater,
             residentBytes: storeSnapshot.residentByteCount,
-            residentByteHighWater: storeSnapshot.residentByteHighWater,
+            residentByteHighWater: totalPhysicalResidentByteHighWater,
+            residentByteBudget: byteBudget,
+            totalPhysicalResidentBytes: totalPhysicalBytes,
+            totalPhysicalResidentByteHighWater:
+                totalPhysicalResidentByteHighWater,
             provisionalBytes: storeSnapshot.provisionalByteCount,
             componentCoverageBytes: storeSnapshot.componentCoverageByteCount,
             backingBytes: storeSnapshot.backingByteCount,
@@ -322,16 +522,107 @@ actor InteractiveStrokePresentationCache {
             failedUpdateCount: failedUpdateCount,
             cancelledUpdateCount: cancelledUpdateCount,
             acknowledgementSettlementCount: acknowledgementSettlementCount,
+            activeStrokeEpochCount: generationState == nil ? 0 : 1,
+            activeUpdateOwnerCount: updatingOwnerID == nil ? 0 : 1,
             retirementWaiterCount: retirementWaiters.count,
-            retirementResumeCount: retirementResumeCount
+            retirementResumeCount: retirementResumeCount,
+            rolledBackRoleCommitCount: rolledBackRoleCommitCount,
+            retirementState: retirementState,
+            retirementFailureCount: retirementFailureCount,
+            retirementErrorDescription: retirementFailure?.description,
+            pendingPreparedAcknowledgementCount:
+                pendingPreparedAcknowledgement == nil ? 0 : 1,
+            isIdle: generationState == nil
+                && updatingOwnerID == nil
+                && retirementWaiters.isEmpty
+                && pendingPreparedAcknowledgement == nil
         )
+    }
+
+    func retryPendingPreparedAcknowledgement() async throws {
+        guard let pendingPreparedAcknowledgement else { return }
+        guard pendingPreparedAcknowledgement.settlement.beginFulfillment(
+            ownerID: pendingPreparedAcknowledgement.ownerID
+        ) else { return }
+        do {
+            try await pendingPreparedAcknowledgement.acknowledgement.fulfill()
+        } catch {
+            pendingPreparedAcknowledgement.settlement.failFulfillment(
+                ownerID: pendingPreparedAcknowledgement.ownerID
+            )
+            await completionGate?.cacheAcknowledgementDidFail()
+            throw error
+        }
+        guard pendingPreparedAcknowledgement.settlement.completeFulfillment(
+            ownerID: pendingPreparedAcknowledgement.ownerID
+        ) else { return }
+        if self.pendingPreparedAcknowledgement?.ownerID
+            == pendingPreparedAcknowledgement.ownerID
+        {
+            self.pendingPreparedAcknowledgement = nil
+            acknowledgementSettlementCount &+= 1
+        }
+    }
+
+    func waitBeforeRetirementRetry() async {
+        await completionGate?.cacheRetirementDidFail()
+    }
+
+    func waitForLifecycleRetry(attempt: Int) async throws {
+        if let completionGate {
+            try await completionGate.waitForLifecycleRetry(attempt: attempt)
+            return
+        }
+        let milliseconds = min(100, 1 << min(attempt, 7))
+        try await ContinuousClock().sleep(
+            for: .milliseconds(milliseconds)
+        )
+    }
+
+    func terminallyAbandonFailedRetirement(
+        strokeEpoch: DocumentPaintStrokePresentationEpoch
+    ) {
+        precondition(
+            updatingOwnerID == nil
+                && retirementWaiters.isEmpty
+        )
+        if generationState?.strokeEpoch == strokeEpoch.identity {
+            generationState = nil
+        }
+        if published?.revision.strokeEpoch == strokeEpoch.identity {
+            published = nil
+        }
+        cancelledEpochs.remove(strokeEpoch.identity)
+        if retirementFailure?.strokeEpoch == strokeEpoch.identity {
+            retirementFailure = nil
+        }
+        store = PaintTileStore(device: device, byteBudget: byteBudget)
+    }
+
+    func installFailureInjectionForTesting(
+        _ failureInjection:
+            InteractiveStrokePresentationCacheFailureInjection?
+    ) {
+        precondition(
+            generationState == nil
+                && updatingOwnerID == nil
+                && retirementWaiters.isEmpty
+        )
+        self.failureInjection = failureInjection
     }
 
     private func adoptCore(
         _ update: DocumentPaintTransientCacheUpdate,
         revision: InteractiveStrokePresentationRevision,
+        ownerID: UUID,
         parameters: InteractiveStrokeCompositeParameters
     ) async throws -> InteractiveStrokePresentationRevision {
+        guard update.strokeEpoch == update.presentationEpoch.identity else {
+            throw InteractiveStrokePresentationCacheError.foreignUpdate
+        }
+        guard !update.presentationEpoch.isRetired else {
+            throw CancellationError()
+        }
         guard parameters.opacity.isFinite,
               (0...1).contains(parameters.opacity)
         else { throw InteractiveStrokePresentationCacheError.foreignUpdate }
@@ -340,6 +631,11 @@ actor InteractiveStrokePresentationCache {
                 .updateSlotCapacityExceeded(
                     maximum: Self.maximumUpdateSlotCount
                 )
+        }
+        if let published {
+            guard revision.strokeEpoch == published.revision.strokeEpoch else {
+                throw InteractiveStrokePresentationCacheError.foreignUpdate
+            }
         }
         if let published, revision <= published.revision {
             throw InteractiveStrokePresentationCacheError.staleRevision(
@@ -361,6 +657,7 @@ actor InteractiveStrokePresentationCache {
         let state: GenerationState
         if let existing = generationState {
             guard existing.generation == update.generation,
+                  existing.strokeEpoch == update.strokeEpoch,
                   existing.layerID == update.layerID,
                   existing.pixelSize == authoritativeSource.pixelSize
             else { throw InteractiveStrokePresentationCacheError.foreignUpdate }
@@ -369,12 +666,14 @@ actor InteractiveStrokePresentationCache {
             state = GenerationState(
                 store: store,
                 generation: update.generation,
+                strokeEpoch: update.strokeEpoch,
                 layerID: update.layerID,
                 pixelSize: authoritativeSource.pixelSize
             )
             generationState = state
         }
 
+        updatingOwnerID = ownerID
         updatingRevision = revision
         updateSlotHighWater = max(
             updateSlotHighWater,
@@ -415,6 +714,23 @@ actor InteractiveStrokePresentationCache {
                 maximum: maximumTileCount
             )
         }
+        let coverageBytes = DepositionComponentCoverage.residentByteCount(
+            width: PaintTileDescriptor.side,
+            height: PaintTileDescriptor.side
+        )!
+        let (bytesPerTile, bytesPerTileOverflow) = PaintTileDescriptor
+            .residentByteCount.addingReportingOverflow(coverageBytes)
+        let (requiredBytes, requiredBytesOverflow) = requiredTileCount
+            .multipliedReportingOverflow(by: bytesPerTile)
+        guard !bytesPerTileOverflow,
+              !requiredBytesOverflow,
+              requiredBytes <= byteBudget
+        else {
+            throw InteractiveStrokePresentationCacheError.tileCapacityExceeded(
+                required: requiredTileCount,
+                maximum: maximumTileCount
+            )
+        }
         let restrictedSource = try selectedSource.restrictingEntitlement(
             to: sourceReferences
         )
@@ -423,12 +739,14 @@ actor InteractiveStrokePresentationCache {
         )
         var sourceLease: TiledRasterExactReferenceLease?
         let authoritativeUpdate = destinationUpdate(
+            role: .authoritative,
             surface: state.authoritative,
             clearsExisting: update.clearedAuthoritativeSurface,
             modified: update.changedRole == .authoritative
                 ? modifiedCoordinates : []
         )
         let predictionUpdate = destinationUpdate(
+            role: .prediction,
             surface: state.prediction,
             clearsExisting: update.clearedPredictionSurface,
             modified: update.changedRole == .prediction
@@ -436,10 +754,64 @@ actor InteractiveStrokePresentationCache {
         )
         let destinationUpdates = [authoritativeUpdate, predictionUpdate]
             .compactMap { $0 }
+        let currentStoreSnapshot = store.snapshot()
+        let currentPhysicalBytes = physicalResidentBytes(currentStoreSnapshot)
+        let provisionalBytesPerTarget = PaintTileDescriptor.residentByteCount
+            + coverageBytes
+        let additionalResidentColorBytes = destinationUpdates.reduce(into: 0) {
+            bytes, destination in
+            let existing = Set(destination.surface.references.map(\.coordinate))
+            bytes += destination.targetCoordinates.reduce(into: 0) {
+                if !existing.contains($1) {
+                    $0 += PaintTileDescriptor.residentByteCount
+                }
+            }
+        }
+        let additionalPersistentZeroBytes =
+            currentStoreSnapshot.persistentZeroAllocationBytes == 0
+                && additionalResidentColorBytes > 0
+            ? PaintTileDescriptor.residentByteCount : 0
+        let provisionalTargetCount = destinationUpdates.reduce(into: 0) {
+            $0 += $1.targetCoordinates.count
+        }
+        let (provisionalPlanBytes, provisionalPlanOverflow) =
+            provisionalTargetCount.multipliedReportingOverflow(
+                by: provisionalBytesPerTarget
+            )
+        let (withResidentColor, residentColorOverflow) = currentPhysicalBytes
+            .addingReportingOverflow(additionalResidentColorBytes)
+        let (withPersistentZero, persistentZeroOverflow) = withResidentColor
+            .addingReportingOverflow(additionalPersistentZeroBytes)
+        let (requiredPhysicalBytes, requiredPhysicalOverflow) =
+            withPersistentZero.addingReportingOverflow(provisionalPlanBytes)
+        guard !provisionalPlanOverflow,
+              !residentColorOverflow,
+              !persistentZeroOverflow,
+              !requiredPhysicalOverflow,
+              requiredPhysicalBytes <= byteBudget
+        else {
+            throw InteractiveStrokePresentationCacheError
+                .physicalCapacityExceeded(
+                    requested: provisionalPlanOverflow
+                        || residentColorOverflow || persistentZeroOverflow
+                        || requiredPhysicalOverflow
+                        ? .max : requiredPhysicalBytes,
+                    current: currentPhysicalBytes,
+                    highWater: totalPhysicalResidentByteHighWater,
+                    maximum: byteBudget
+                )
+        }
+        totalPhysicalResidentByteHighWater = max(
+            totalPhysicalResidentByteHighWater,
+            requiredPhysicalBytes
+        )
         defer {
             for destinationUpdate in destinationUpdates.reversed() {
                 destinationUpdate.settle()
             }
+            _ = try? store.applyMemoryPressure(
+                targetResidentBytes: byteBudget
+            )
             try? sourceLease?.returnLease()
             capture.close()
         }
@@ -488,20 +860,56 @@ actor InteractiveStrokePresentationCache {
             )
         }
         try Task.checkCancellation()
-        guard !cancelledGenerations.contains(update.generation) else {
+        guard !cancelledEpochs.contains(update.strokeEpoch) else {
             throw CancellationError()
         }
 
-        for destinationUpdate in destinationUpdates {
-            try destinationUpdate.commit()
+        let publicationOrder = destinationUpdates.sorted(by: {
+            $0.modifiedCoordinates.isEmpty && !$1.modifiedCoordinates.isEmpty
+        })
+        let next: InteractiveStrokePresentationSnapshot
+        do {
+            for destinationUpdate in publicationOrder {
+                if failureInjection?.sequence == update.sequence,
+                   failureInjection?.role == destinationUpdate.role
+                {
+                    throw InteractiveStrokePresentationCacheError
+                        .injectedRolePreparationFailure(
+                            destinationUpdate.role
+                        )
+                }
+                try destinationUpdate.commit()
+            }
+            next = InteractiveStrokePresentationSnapshot(
+                revision: revision,
+                canonicalIdentity: update.canonicalIdentity,
+                authoritative:
+                    try state.authoritative.makeExactReferenceProvider(),
+                prediction: try state.prediction.makeExactReferenceProvider(),
+                parameters: parameters
+            )
+        } catch {
+            do {
+                for destinationUpdate in publicationOrder.reversed()
+                where destinationUpdate.wasCommitted
+                {
+                    try destinationUpdate.rollback()
+                    rolledBackRoleCommitCount &+= 1
+                }
+            } catch let rollbackError {
+                throw InteractiveStrokePresentationCacheError.commandFailed(
+                    "transient cache atomic rollback failed: \(rollbackError)"
+                )
+            }
+            throw error
         }
-        let next = InteractiveStrokePresentationSnapshot(
-            revision: revision,
-            canonicalIdentity: update.canonicalIdentity,
-            authoritative: try state.authoritative.makeExactReferenceProvider(),
-            prediction: try state.prediction.makeExactReferenceProvider(),
-            parameters: parameters
-        )
+        for destinationUpdate in publicationOrder {
+            destinationUpdate.finalize()
+        }
+        for destinationUpdate in destinationUpdates.reversed() {
+            destinationUpdate.settle()
+        }
+        _ = try store.applyMemoryPressure(targetResidentBytes: byteBudget)
         published = next
         completedUpdateCount &+= 1
         recordTrace(
@@ -523,6 +931,7 @@ actor InteractiveStrokePresentationCache {
     }
 
     private func destinationUpdate(
+        role: StrokePrivateSurfaceLayer,
         surface: TiledRasterSurface,
         clearsExisting: Bool,
         modified: [PaintTileCoordinate]
@@ -534,6 +943,7 @@ actor InteractiveStrokePresentationCache {
         targets = sortedUnique(targets)
         guard !targets.isEmpty else { return nil }
         return DestinationUpdate(
+            role: role,
             surface: surface,
             targetCoordinates: targets,
             modifiedCoordinates: modified
@@ -546,6 +956,14 @@ actor InteractiveStrokePresentationCache {
         coordinates.sorted().reduce(into: []) {
             if $0.last != $1 { $0.append($1) }
         }
+    }
+
+    private func physicalResidentBytes(
+        _ snapshot: PaintTileStoreSnapshot
+    ) -> Int {
+        snapshot.residentByteCount
+            + snapshot.provisionalByteCount
+            + snapshot.persistentZeroAllocationBytes
     }
 
     private func encodeCopy(
@@ -633,23 +1051,37 @@ actor InteractiveStrokePresentationCache {
 
     private func settleAcknowledgement(
         _ update: DocumentPaintTransientCacheUpdate,
-        revision: InteractiveStrokePresentationRevision
+        ownerID: UUID
     ) async throws {
-        guard update.acknowledgementSettlement.claimSettlement() else {
+        guard update.acknowledgementSettlement.beginFulfillment(
+            ownerID: ownerID
+        ) else {
             return
         }
+        do {
+            try await update.acknowledgement.fulfill()
+        } catch {
+            update.acknowledgementSettlement.failFulfillment(ownerID: ownerID)
+            await completionGate?.cacheAcknowledgementDidFail()
+            throw error
+        }
+        guard update.acknowledgementSettlement.completeFulfillment(
+            ownerID: ownerID
+        ) else { return }
         acknowledgementSettlementCount &+= 1
-        try await update.acknowledgement.fulfill()
     }
 
     private func finishUpdateSlotIfOwned(
-        _ revision: InteractiveStrokePresentationRevision
+        _ ownerID: UUID
     ) {
-        guard updatingRevision == revision else { return }
+        guard updatingOwnerID == ownerID,
+              let revision = updatingRevision
+        else { return }
+        updatingOwnerID = nil
         updatingRevision = nil
         var resumed: [CheckedContinuation<Void, Never>] = []
         retirementWaiters.removeAll { waiter in
-            guard waiter.0 == revision.generation else { return false }
+            guard waiter.0 == revision.strokeEpoch else { return false }
             resumed.append(waiter.1)
             return true
         }
@@ -676,5 +1108,179 @@ actor InteractiveStrokePresentationCache {
                         + (updatingRevision == nil ? 0 : 1)
             )
         }
+    }
+}
+
+/// Strongly owns the exact cache handoff until acknowledgement settlement.
+/// The UI owner participates only in terminal signalling; when it is already
+/// gone, this operation also retires the epoch it just terminally adopted.
+@MainActor
+enum InteractiveStrokeCacheAdoptionOperation {
+    static func start(
+        cache: InteractiveStrokePresentationCache,
+        update: DocumentPaintTransientCacheUpdate,
+        parameters: InteractiveStrokeCompositeParameters,
+        terminal: @escaping @MainActor @Sendable ((any Error)?) -> Bool,
+        lifecycleTerminal: @escaping @Sendable (
+            InteractiveStrokePresentationCacheSnapshot
+        ) -> Void = { _ in }
+    ) -> Task<Void, Never> {
+        Task { @MainActor [
+            cache,
+            update,
+            parameters,
+            terminal,
+            lifecycleTerminal,
+        ] in
+            let terminalError: (any Error)?
+            do {
+                _ = try await cache.adopt(update, parameters: parameters)
+                terminalError = nil
+            } catch {
+                terminalError = error
+            }
+            guard !terminal(terminalError) else { return }
+            InteractiveStrokeCacheLifecycleCoordinator.shared.retain(
+                cache: cache,
+                update: update,
+                lifecycleTerminal: lifecycleTerminal
+            )
+        }
+    }
+}
+
+/// Durable event-driven owner for cache obligations whose UI owner vanished.
+/// Entries are removed only after ACK success plus epoch retirement.
+@MainActor
+final class InteractiveStrokeCacheLifecycleCoordinator {
+    static let shared = InteractiveStrokeCacheLifecycleCoordinator()
+
+    private struct Entry {
+        let cache: InteractiveStrokePresentationCache
+        let update: DocumentPaintTransientCacheUpdate
+        let lifecycleTerminal: @Sendable (
+            InteractiveStrokePresentationCacheSnapshot
+        ) -> Void
+    }
+
+    private var entries: [UUID: Entry] = [:]
+    private var active: Set<UUID> = []
+    private var quiescenceWaiters: [CheckedContinuation<Void, Never>] = []
+    private var retryAttemptCount: [UUID: Int] = [:]
+    private var retryTasks: [UUID: Task<Void, Never>] = [:]
+
+    func retain(
+        cache: InteractiveStrokePresentationCache,
+        update: DocumentPaintTransientCacheUpdate,
+        lifecycleTerminal: @escaping @Sendable (
+            InteractiveStrokePresentationCacheSnapshot
+        ) -> Void
+    ) {
+        let identity = update.presentationEpoch.identity
+        precondition(entries[identity] == nil)
+        entries[identity] = Entry(
+            cache: cache,
+            update: update,
+            lifecycleTerminal: lifecycleTerminal
+        )
+        retryAttemptCount[identity] = 0
+        scheduleAutomaticRetry(identity)
+    }
+
+    func advancePendingLifecycles() async {
+        await waitForQuiescence()
+        for identity in entries.keys { advance(identity) }
+        await waitForQuiescence()
+    }
+
+    private func advance(_ identity: UUID) {
+        guard entries[identity] != nil, active.insert(identity).inserted else {
+            return
+        }
+        Task { @MainActor [weak self] in
+            await self?.attempt(identity)
+        }
+    }
+
+    private func attempt(_ identity: UUID) async {
+        guard let entry = entries[identity] else {
+            finishAttempt(identity)
+            return
+        }
+        do {
+            if (await entry.cache.snapshot())
+                .pendingPreparedAcknowledgementCount > 0
+            {
+                try await entry.cache.retryPendingPreparedAcknowledgement()
+            }
+            guard (await entry.cache.snapshot())
+                    .pendingPreparedAcknowledgementCount == 0
+            else {
+                finishAttempt(identity)
+                return
+            }
+            try await entry.cache.retire(
+                strokeEpoch: entry.update.presentationEpoch
+            )
+            let snapshot = await entry.cache.snapshot()
+            retryTasks.removeValue(forKey: identity)?.cancel()
+            entries.removeValue(forKey: identity)
+            retryAttemptCount.removeValue(forKey: identity)
+            entry.lifecycleTerminal(snapshot)
+            finishAttempt(identity)
+        } catch {
+            await entry.cache.waitBeforeRetirementRetry()
+            finishAttempt(identity)
+            scheduleAutomaticRetry(identity)
+        }
+    }
+
+    private func scheduleAutomaticRetry(_ identity: UUID) {
+        guard let entry = entries[identity], retryTasks[identity] == nil else {
+            return
+        }
+        let attempt = retryAttemptCount[identity, default: 0]
+        retryAttemptCount[identity] = attempt + 1
+        retryTasks[identity] = Task { @MainActor [weak self, entry] in
+            do {
+                try await entry.cache.waitForLifecycleRetry(attempt: attempt)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, let self,
+                  self.entries[identity] != nil
+            else { return }
+            self.retryTasks[identity] = nil
+            self.advance(identity)
+        }
+    }
+
+    func cancelRetainedLifecycle(_ identity: UUID) async {
+        guard let entry = entries.removeValue(forKey: identity) else { return }
+        retryTasks.removeValue(forKey: identity)?.cancel()
+        retryAttemptCount.removeValue(forKey: identity)
+        active.remove(identity)
+        await entry.cache.terminallyAbandonFailedRetirement(
+            strokeEpoch: entry.update.presentationEpoch
+        )
+        entry.lifecycleTerminal(await entry.cache.snapshot())
+        if active.isEmpty {
+            let waiters = quiescenceWaiters
+            quiescenceWaiters.removeAll()
+            for waiter in waiters { waiter.resume() }
+        }
+    }
+
+    private func waitForQuiescence() async {
+        guard !active.isEmpty else { return }
+        await withCheckedContinuation { quiescenceWaiters.append($0) }
+    }
+
+    private func finishAttempt(_ identity: UUID) {
+        active.remove(identity)
+        guard active.isEmpty else { return }
+        let waiters = quiescenceWaiters
+        quiescenceWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
     }
 }

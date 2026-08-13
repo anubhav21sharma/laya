@@ -360,6 +360,8 @@ struct PaintTileProvisionalBinding: @unchecked Sendable {
     let candidateTexture: any MTLTexture
     let sourceComponentCoverageTexture: (any MTLTexture)?
     let candidateComponentCoverageTexture: any MTLTexture
+    let sourceBacking: PaintTileBackingSnapshot?
+    let sourceIsStrokeActive: Bool
     let sourceIsKnownClear: Bool
 }
 
@@ -454,6 +456,11 @@ final class PaintTileProvisionalReservation: @unchecked Sendable {
     fileprivate func markCompleted() {
         precondition(isReserved && isCommitted)
         isReserved = false
+    }
+
+    fileprivate func markRolledBack() {
+        precondition(isReserved && isCommitted)
+        isCommitted = false
     }
 
     fileprivate func markCancelled() {
@@ -2841,6 +2848,8 @@ public final class PaintTileStore: @unchecked Sendable {
                         record.storage.componentCoverageTexture,
                     candidateComponentCoverageTexture:
                         candidateComponentCoverage,
+                    sourceBacking: record.storage.backing,
+                    sourceIsStrokeActive: record.storage.isStrokeActive,
                     sourceIsKnownClear: record.backing == .knownClear
                 ), at: outputIndex)
             }
@@ -3121,6 +3130,142 @@ public final class PaintTileStore: @unchecked Sendable {
             releaseProvisionalReservation(provisional)
             provisional.markCompleted()
             provisional.workspace.clear()
+        }
+    }
+
+    func rollbackCommittedProvisionalBindings(
+        _ provisional: PaintTileProvisionalReservation,
+        for lease: PaintTileLease,
+        surfaceID: UUID,
+        currentGeneration: UInt64
+    ) throws {
+        try withLock {
+            try validateProvisionalReservation(provisional)
+            guard provisional.isCommitted else {
+                throw PaintTileStoreError.invalidProvisionalReservation
+            }
+            _ = try validate(
+                lease,
+                surfaceID: surfaceID,
+                currentGeneration: currentGeneration
+            )
+            guard lease.retainedBindingCount == provisional.count else {
+                throw PaintTileStoreError.leaseBindingMismatch
+            }
+
+            var restoredActivePinCount = 0
+            var restoredCoverageByteCount = componentCoverageByteCount
+            for index in 0..<provisional.count {
+                let candidate = provisional[index]
+                let key = Key(
+                    surfaceID: surfaceID,
+                    layerID: lease.layerID,
+                    generation: currentGeneration,
+                    coordinate: candidate.descriptor.coordinate
+                )
+                guard lease.retainedBinding(at: index).identity
+                        == candidate.identity,
+                      let record = records[key],
+                      record.identity == candidate.identity,
+                      let currentTexture = record.storage.texture,
+                      (currentTexture as AnyObject)
+                        === (candidate.candidateTexture as AnyObject)
+                else { throw PaintTileStoreError.leaseBindingMismatch }
+
+                let currentHasCoverage =
+                    record.storage.componentCoverageTexture != nil
+                let sourceHasCoverage =
+                    candidate.sourceComponentCoverageTexture != nil
+                if currentHasCoverage != sourceHasCoverage {
+                    let delta = provisional.componentCoverageBytesPerBinding
+                    if sourceHasCoverage {
+                        let (next, overflow) = restoredCoverageByteCount
+                            .addingReportingOverflow(delta)
+                        guard !overflow else {
+                            throw PaintTileResidencyError
+                                .residentByteCountOverflow
+                        }
+                        restoredCoverageByteCount = next
+                    } else {
+                        guard restoredCoverageByteCount >= delta else {
+                            throw PaintTileStoreError
+                                .invalidProvisionalReservation
+                        }
+                        restoredCoverageByteCount -= delta
+                    }
+                }
+                if candidate.sourceIsStrokeActive,
+                   !record.storage.isStrokeActive
+                {
+                    try residency.preflightPinExisting(
+                        candidate.identity,
+                        reasons: [.active]
+                    )
+                    restoredActivePinCount += 1
+                } else if !candidate.sourceIsStrokeActive,
+                          record.storage.isStrokeActive,
+                          residency.pinCount(
+                              candidate.identity,
+                              reason: .active
+                          ) == 0
+                {
+                    throw PaintTileResidencyError.unbalancedUnpin(
+                        reason: .active
+                    )
+                }
+            }
+            try residency.preflightUseEpochAdvance(
+                by: restoredActivePinCount
+            )
+            let nextResidentByteCount = aggregateResidentByteCount(
+                coverageByteCount: restoredCoverageByteCount
+            )
+            guard nextResidentByteCount <= residency.byteBudget else {
+                throw PaintTileResidencyError.insufficientCapacity(
+                    requestedBytes: max(
+                        0,
+                        restoredCoverageByteCount
+                            - componentCoverageByteCount
+                    ),
+                    byteBudget: residency.byteBudget,
+                    pinnedBytes: aggregatePinnedByteCount()
+                )
+            }
+            let nextRevision = try advancedStateRevision()
+            for index in 0..<provisional.count {
+                let candidate = provisional[index]
+                let key = Key(
+                    surfaceID: surfaceID,
+                    layerID: lease.layerID,
+                    generation: currentGeneration,
+                    coordinate: candidate.descriptor.coordinate
+                )
+                let record = records[key]!
+                if candidate.sourceIsStrokeActive,
+                   !record.storage.isStrokeActive
+                {
+                    residency.pinExistingPreflighted(
+                        candidate.identity,
+                        reasons: [.active]
+                    )
+                } else if !candidate.sourceIsStrokeActive,
+                          record.storage.isStrokeActive
+                {
+                    try residency.unpin(
+                        candidate.identity,
+                        reason: .active
+                    )
+                }
+                record.storage.texture = candidate.sourceTexture
+                record.storage.componentCoverageTexture =
+                    candidate.sourceComponentCoverageTexture
+                record.storage.backing = candidate.sourceBacking
+                record.storage.isStrokeActive =
+                    candidate.sourceIsStrokeActive
+            }
+            componentCoverageByteCount = restoredCoverageByteCount
+            stateRevision = nextRevision
+            provisional.markRolledBack()
         }
     }
 

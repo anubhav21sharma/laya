@@ -663,6 +663,12 @@ enum StrokePreparationAcknowledgementError: Error, Equatable, Sendable {
 struct StrokePreparedFrameAcknowledgement: Sendable {
     fileprivate let core: StrokePreparedFrameAcknowledgementCore?
 
+    func claimTransientCacheSettlement()
+        -> DocumentPaintTransientCacheAcknowledgementSettlement?
+    {
+        core?.claimTransientCacheSettlement()
+    }
+
     func fulfill() async throws {
         guard let core else {
             throw StrokePreparationAcknowledgementError.noPreparedFrame
@@ -866,6 +872,7 @@ private final class StrokePreparedFrameAcknowledgementCore:
 
     private let lock = NSLock()
     private var state: State = .available(nil)
+    private var transientCacheSettlementWasClaimed = false
     private let mailbox: StrokePreparationMailbox?
     private let wake: AsyncStream<Void>.Continuation?
     #if DEBUG
@@ -956,6 +963,18 @@ private final class StrokePreparedFrameAcknowledgementCore:
                 continuation.resume(throwing: error)
             }
         }
+    }
+
+    func claimTransientCacheSettlement()
+        -> DocumentPaintTransientCacheAcknowledgementSettlement?
+    {
+        lock.lock()
+        defer { lock.unlock() }
+        guard case .available(nil) = state,
+              !transientCacheSettlementWasClaimed
+        else { return nil }
+        transientCacheSettlementWasClaimed = true
+        return DocumentPaintTransientCacheAcknowledgementSettlement()
     }
 
     var status: StrokePreparedFrameAcknowledgementStatus {

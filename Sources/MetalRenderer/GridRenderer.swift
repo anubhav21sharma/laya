@@ -283,6 +283,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         activeStroke == nil
             && strokeWorkspaceState == .available
             && interactiveStrokeCacheRetirementTask == nil
+            && interactiveStrokeCacheRetirementFailure == nil
+            && interactiveStrokeCacheAcknowledgementRetryTask == nil
+            && interactiveStrokeCacheAcknowledgementRetryFailure == nil
     }
     public var strokeRuntimeSnapshot: StrokeRuntimeTelemetrySnapshot? {
         strokeRuntimeController?.snapshot
@@ -617,6 +620,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         DocumentPaintTransientDisplaySource?
     private var interactiveStrokeCacheAdoptionTask: Task<Void, Never>?
     private var interactiveStrokeCacheRetirementTask: Task<Void, Never>?
+    private var interactiveStrokeCacheRetirementFailure: (
+        strokeEpoch: DocumentPaintStrokePresentationEpoch,
+        error: MetalRendererError
+    )?
+    private var interactiveStrokeCacheAcknowledgementRetryTask:
+        Task<Void, Never>?
+    private var interactiveStrokeCacheAcknowledgementRetryFailure:
+        MetalRendererError?
     private var nextInteractiveStrokeCacheSequence: UInt64 = 1
     private var paintCommitTask: Task<Void, Never>?
     private var paintLifecycleTask: Task<Void, Never>?
@@ -3253,6 +3264,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     private func drainCompletedInteractiveOperationsCore() throws {
+        if interactiveStrokeCacheAcknowledgementRetryFailure != nil {
+            scheduleInteractiveStrokeCacheAcknowledgementRetry()
+        }
         try drainStrokePreparationResultsCore()
     }
 
@@ -3283,6 +3297,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     private func drainStrokePreparationResultsCore() throws {
+        if interactiveStrokeCacheAcknowledgementRetryFailure != nil {
+            scheduleInteractiveStrokeCacheAcknowledgementRetry()
+        }
         let ownsEventOperation = beginRendererEventOperationIfNeeded()
         defer {
             endRendererEventOperationIfNeeded(
@@ -3589,24 +3606,32 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     layerID: update.layerID
                 )
             nextInteractiveStrokeCacheSequence = nextSequence
-            interactiveStrokeCacheAdoptionTask = Task {
-                @MainActor [weak self] in
-                guard let self else { return }
-                do {
-                    _ = try await self.interactiveStrokePresentationCache
-                        .adopt(update, parameters: parameters)
-                    self.interactiveStrokeCacheAdoptionTask = nil
-                    self.invalidatePaintDisplayPreparation()
-                } catch is CancellationError {
-                    self.interactiveStrokeCacheAdoptionTask = nil
-                } catch {
-                    self.interactiveStrokeCacheAdoptionTask = nil
-                    let rendererError = (error as? MetalRendererError)
-                        ?? .commandFailed(error.localizedDescription)
-                    self.paintCommandError = rendererError
-                    self.failActiveOperationIfNeeded(rendererError)
-                }
-            }
+            interactiveStrokeCacheAdoptionTask =
+                InteractiveStrokeCacheAdoptionOperation.start(
+                    cache: interactiveStrokePresentationCache,
+                    update: update,
+                    parameters: parameters,
+                    terminal: { [weak self] error in
+                        guard let self else { return false }
+                        self.interactiveStrokeCacheAdoptionTask = nil
+                        if error == nil {
+                            self.invalidatePaintDisplayPreparation()
+                        } else if let error,
+                                  !(error is CancellationError)
+                        {
+                            let rendererError = (error as? MetalRendererError)
+                                ?? .commandFailed(
+                                    error.localizedDescription
+                                )
+                            self.paintCommandError = rendererError
+                            self.failActiveOperationIfNeeded(rendererError)
+                        }
+                        if error != nil {
+                            self.scheduleInteractiveStrokeCacheAcknowledgementRetry()
+                        }
+                        return true
+                    }
+                )
             pendingPaintHarnessDabCount = batch.logicalDabs.count
             pendingPaintHarnessInstanceCount = totalInstanceCount
             if totalInstanceCount == 0 {
@@ -5256,7 +5281,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     interactiveStrokeCacheAdoptionTask == nil
                         ? .abandonedBeforeSubmission
                         : .preserveMainOwnership
-            beginInteractiveStrokeCacheRetirement(generation: generation)
+            beginInteractiveStrokeCacheRetirement(
+                strokeEpoch: activeStrokeTileSurfaceResources?
+                    .capability.presentationEpoch
+            )
             do {
                 try bridge.submitCancellation(
                     generation: generation,
@@ -5289,24 +5317,117 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         notifyIdleStateIfChanged(from: wasIdle)
     }
 
-    private func beginInteractiveStrokeCacheRetirement(generation: UInt64) {
+    private func beginInteractiveStrokeCacheRetirement(
+        strokeEpoch: DocumentPaintStrokePresentationEpoch?,
+        automaticRetryRemaining: Int = 1
+    ) {
         guard interactiveStrokeCacheRetirementTask == nil else { return }
+        guard let strokeEpoch else { return }
+        interactiveStrokeCacheRetirementFailure = nil
         interactiveStrokeCacheRetirementTask = Task {
             @MainActor [weak self] in
             guard let self else { return }
             let wasIdle = self.isIdle
             do {
                 try await self.interactiveStrokePresentationCache.cancel(
-                    generation: generation
+                    strokeEpoch: strokeEpoch
                 )
             } catch {
-                self.report(.commandFailed(
+                let retirementError = MetalRendererError.commandFailed(
                     "interactive stroke cache retirement failed: \(error)"
-                ))
+                )
+                self.interactiveStrokeCacheRetirementFailure = (
+                    strokeEpoch,
+                    retirementError
+                )
+                self.report(retirementError)
             }
             self.interactiveStrokeCacheRetirementTask = nil
+            if self.interactiveStrokeCacheRetirementFailure != nil,
+               automaticRetryRemaining > 0
+            {
+                self.beginInteractiveStrokeCacheRetirement(
+                    strokeEpoch: strokeEpoch,
+                    automaticRetryRemaining:
+                        automaticRetryRemaining - 1
+                )
+            } else if self.interactiveStrokeCacheRetirementFailure != nil {
+                await self.interactiveStrokePresentationCache
+                    .terminallyAbandonFailedRetirement(
+                        strokeEpoch: strokeEpoch
+                    )
+            }
             self.notifyIdleStateIfChanged(from: wasIdle)
         }
+    }
+
+    private func scheduleInteractiveStrokeCacheAcknowledgementRetry() {
+        guard interactiveStrokeCacheAcknowledgementRetryTask == nil else {
+            return
+        }
+        interactiveStrokeCacheAcknowledgementRetryFailure = nil
+        interactiveStrokeCacheAcknowledgementRetryTask = Task {
+            @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await self.interactiveStrokePresentationCache
+                    .retryPendingPreparedAcknowledgement()
+            } catch {
+                self.interactiveStrokeCacheAcknowledgementRetryFailure =
+                    (error as? MetalRendererError)
+                    ?? .commandFailed(error.localizedDescription)
+            }
+            self.interactiveStrokeCacheAcknowledgementRetryTask = nil
+        }
+    }
+
+    func installInteractiveStrokeCacheFailureInjectionForTesting(
+        _ failureInjection:
+            InteractiveStrokePresentationCacheFailureInjection?
+    ) async {
+        await interactiveStrokePresentationCache
+            .installFailureInjectionForTesting(failureInjection)
+    }
+
+    func awaitInteractiveStrokeCacheRetirementForHarness() async {
+        await interactiveStrokeCacheRetirementTask?.value
+        await interactiveStrokeCacheRetirementTask?.value
+    }
+
+    func retryInteractiveStrokeCacheRetirementForHarness() async {
+        guard interactiveStrokeCacheRetirementTask == nil,
+              let failure = interactiveStrokeCacheRetirementFailure
+        else { return }
+        beginInteractiveStrokeCacheRetirement(
+            strokeEpoch: failure.strokeEpoch,
+            automaticRetryRemaining: 0
+        )
+        await interactiveStrokeCacheRetirementTask?.value
+    }
+
+    func interactiveStrokeCacheSnapshotForTesting() async
+        -> InteractiveStrokePresentationCacheSnapshot
+    {
+        await interactiveStrokePresentationCache.snapshot()
+    }
+
+    func installFailedInteractiveStrokeCacheUpdateForTesting(
+        _ update: DocumentPaintTransientCacheUpdate,
+        parameters: InteractiveStrokeCompositeParameters
+    ) async {
+        do {
+            _ = try await interactiveStrokePresentationCache.adopt(
+                update,
+                parameters: parameters
+            )
+        } catch {
+            interactiveStrokeCacheAcknowledgementRetryFailure =
+                .commandFailed(error.localizedDescription)
+        }
+    }
+
+    func awaitInteractiveStrokeCacheAcknowledgementRetryForHarness() async {
+        await interactiveStrokeCacheAcknowledgementRetryTask?.value
     }
 
     package func drainStrokeWorkspaceRetirementForHarness() throws {

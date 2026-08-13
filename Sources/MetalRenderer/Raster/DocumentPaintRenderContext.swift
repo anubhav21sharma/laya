@@ -180,6 +180,7 @@ struct DocumentPaintTransientDisplaySource: @unchecked Sendable {
 /// Context's captured canonical geometry are the complete copy contract.
 struct DocumentPaintTransientCacheUpdate: @unchecked Sendable {
     let generation: UInt64
+    let strokeEpoch: UUID
     let sequence: UInt64
     let layerID: UUID
     let canonicalIdentity: CanvasCanonicalStateIdentity
@@ -192,33 +193,50 @@ struct DocumentPaintTransientCacheUpdate: @unchecked Sendable {
     let traceIdentities: [StrokeTraceIdentity]
     let acknowledgementSettlement:
         DocumentPaintTransientCacheAcknowledgementSettlement
+    let presentationEpoch: DocumentPaintStrokePresentationEpoch
 }
 
 final class DocumentPaintTransientCacheAcknowledgementSettlement:
     @unchecked Sendable
 {
     private enum State: Equatable {
-        case available
-        case owned
-        case settled
+        case unowned
+        case available(ownerID: UUID)
+        case fulfilling(ownerID: UUID)
+        case fulfilled
     }
 
     private let lock = NSLock()
-    private var state = State.available
+    private var state = State.unowned
 
-    func claimOwnership() -> Bool {
+    func claimOwnership(ownerID: UUID) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        guard state == .available else { return false }
-        state = .owned
+        guard state == .unowned else { return false }
+        state = .available(ownerID: ownerID)
         return true
     }
 
-    func claimSettlement() -> Bool {
+    func beginFulfillment(ownerID: UUID) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        guard state == .owned else { return false }
-        state = .settled
+        guard state == .available(ownerID: ownerID) else { return false }
+        state = .fulfilling(ownerID: ownerID)
+        return true
+    }
+
+    func failFulfillment(ownerID: UUID) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard state == .fulfilling(ownerID: ownerID) else { return }
+        state = .available(ownerID: ownerID)
+    }
+
+    func completeFulfillment(ownerID: UUID) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard state == .fulfilling(ownerID: ownerID) else { return false }
+        state = .fulfilled
         return true
     }
 }
@@ -1113,8 +1131,17 @@ final class DocumentPaintRenderContext {
                 coordinates[index]
             )
         }
-        return try DocumentPaintTransientCacheUpdate(
+        let descriptor = try DocumentPaintTransientVisibleSourceDescriptor(
+            cacheCapability: capability
+        )
+        guard let acknowledgementSettlement = frame.acknowledgement
+            .claimTransientCacheSettlement()
+        else {
+            throw DocumentPaintRenderContextError.foreignTransientDisplayFrame
+        }
+        return DocumentPaintTransientCacheUpdate(
             generation: frame.generation,
+            strokeEpoch: capability.presentationEpoch.identity,
             sequence: sequence,
             layerID: capability.layerID,
             canonicalIdentity: canonicalStateIdentity(),
@@ -1123,13 +1150,11 @@ final class DocumentPaintRenderContext {
             clearedAuthoritativeSurface:
                 frame.clearedAuthoritativeSurface,
             clearedPredictionSurface: frame.clearedPredictionSurface,
-            descriptor: DocumentPaintTransientVisibleSourceDescriptor(
-                cacheCapability: capability
-            ),
+            descriptor: descriptor,
             acknowledgement: frame.acknowledgement,
             traceIdentities: frame.traceIdentities,
-            acknowledgementSettlement:
-                DocumentPaintTransientCacheAcknowledgementSettlement()
+            acknowledgementSettlement: acknowledgementSettlement,
+            presentationEpoch: capability.presentationEpoch
         )
     }
 

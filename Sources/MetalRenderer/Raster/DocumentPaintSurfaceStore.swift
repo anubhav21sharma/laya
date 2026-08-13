@@ -427,6 +427,29 @@ struct StrokePreparedCommitMutationSource: Sendable {
 
 }
 
+/// Authenticated lifetime identity for one stroke's transient presentation.
+/// A document generation can contain multiple strokes, so retirement must
+/// follow this exact affine identity rather than the generation number.
+final class DocumentPaintStrokePresentationEpoch: @unchecked Sendable {
+    let identity: UUID
+    private let lock = NSLock()
+    private var retired = false
+
+    init(identity: UUID) { self.identity = identity }
+
+    var isRetired: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return retired
+    }
+
+    func retire() {
+        lock.lock()
+        retired = true
+        lock.unlock()
+    }
+}
+
 /// Document-issued authority for one transient stroke namespace. The raw tile
 /// store and role surfaces remain confined to the raster owner; StrokeRuntime
 /// receives operation-shaped methods as the sparse path is activated.
@@ -459,6 +482,7 @@ final class DocumentPaintStrokeSurfaceCapability: @unchecked Sendable {
 
     let ownerIdentity: UUID
     let capabilityToken: UUID
+    let presentationEpoch: DocumentPaintStrokePresentationEpoch
     fileprivate let namespaceLease: StrokeTileSurfaceNamespaceLease
     fileprivate let store: PaintTileStore
     fileprivate let authoritative: TiledRasterSurface
@@ -541,6 +565,9 @@ final class DocumentPaintStrokeSurfaceCapability: @unchecked Sendable {
         }
         self.ownerIdentity = ownerIdentity
         self.capabilityToken = capabilityToken
+        presentationEpoch = DocumentPaintStrokePresentationEpoch(
+            identity: capabilityToken
+        )
         self.namespaceLease = namespaceLease
         self.store = store
         storeIdentity = store.identity
