@@ -108,7 +108,7 @@ final class PreparedLayerCompositePlan: @unchecked Sendable {
         )
     }
 
-    fileprivate func layers(
+    func layers(
         for childRegion: SparseTileOutputRegion,
         outputMapping: SparseTileSamplingOutputMapping
     ) throws -> [PreparedLayerCompositeLayer] {
@@ -117,6 +117,10 @@ final class PreparedLayerCompositePlan: @unchecked Sendable {
               childRegion.maxX <= outputRegion.maxX,
               childRegion.maxY <= outputRegion.maxY
         else { throw LayerCompositorError.invalidPlan }
+        // Child reachability geometry is shared, while source entitlement and
+        // the mutable per-build authority remain layer-local.
+        var sharedPeriodicReachabilitySeed:
+            SparseTilePeriodicReachabilitySeed?
         return try layers.compactMap { layer in
             let sources = try layer.sourceSelection.restrictedSources(
                 referenceScope: .entitlement
@@ -132,20 +136,16 @@ final class PreparedLayerCompositePlan: @unchecked Sendable {
             let selection = try SparseTileOwnedSourceBatch.selecting(
                 sources: sources,
                 key: key,
-                outputRegion: childRegion
+                outputRegion: childRegion,
+                reusingPeriodicReachabilitySeed:
+                    sharedPeriodicReachabilitySeed
             )
+            if sharedPeriodicReachabilitySeed == nil {
+                sharedPeriodicReachabilitySeed =
+                    selection.reusablePeriodicReachabilitySeed
+            }
             guard try selection.selectedReferenceCount() > 0 else {
                 return nil
-            }
-            let snapshots = try selection.restrictedSources().map {
-                try SparseTileSourceSnapshot(
-                    contentKey: $0.contentKey,
-                    addressing: $0.addressing,
-                    layerID: $0.layerID,
-                    references: $0.references,
-                    changedCoordinates: $0.changedCoordinates,
-                    disposition: $0.disposition
-                )
             }
             return PreparedLayerCompositeLayer(
                 layerID: layer.layerID,
@@ -153,7 +153,7 @@ final class PreparedLayerCompositePlan: @unchecked Sendable {
                 blendMode: layer.blendMode,
                 samplingPlan: try SparseTileSamplingPlanBuilder.buildFull(
                     key: key,
-                    sources: snapshots,
+                    selection: selection,
                     outputRegion: childRegion,
                     limits: planLimits
                 ),
@@ -883,6 +883,7 @@ actor LayerCompositor {
         ] = [:]
         for kind in [
             SparseTileSamplingOutputMappingKind.affine,
+            .periodic,
             .finiteRadial,
         ] {
             samplingPipelines[kind] = try SparseTileSamplingPipeline.prepare(

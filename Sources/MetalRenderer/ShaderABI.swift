@@ -316,6 +316,7 @@ public enum ShaderABI {
             && PatternSparseSamplingUniformsOffsetCompositeMode() == 48
             && PatternSparseSamplingUniformsOffsetLiveVisible() == 52
             && PatternSparseSamplingUniformsOffsetReserved() == 56
+            && periodicDisplayFoldIsValid
             && PatternSparsePageTableDescriptorOffsetEntryOffset() == 0
             && PatternSparsePageTableDescriptorOffsetEntryCount() == 4
             && PatternSparsePageTableDescriptorOffsetTableOrigin() == 8
@@ -328,9 +329,68 @@ public enum ShaderABI {
             && PatternSparseTilePageEntryOffsetPackedLocalMinimum() == 20
             && PatternSparseTilePageEntryOffsetPackedLocalMaximum() == 24
             && PatternSparseTilePageEntryOffsetFlags() == 28
-            && PatternSparseSamplingABIVersion == UInt32(
-                SparseSamplingABI.version
-            )
+            && PatternSparseSamplingABIVersion == 2
+            && SparseSamplingABI.version == 2
+    }
+
+    private static var periodicDisplayFoldIsValid: Bool {
+        MemoryLayout<PatternPeriodicDisplayFoldUniforms>.size == 80
+            && MemoryLayout<PatternPeriodicDisplayFoldUniforms>.stride == 80
+            && MemoryLayout<PatternPeriodicDisplayFoldUniforms>.alignment == 8
+            && MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+                of: \.canonicalSize
+            ) == 0
+            && MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+                of: \.repeatSize
+            ) == 8
+            && MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+                of: \.worldToLatticeXAxis
+            ) == 16
+            && MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+                of: \.worldToLatticeYAxis
+            ) == 24
+            && MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+                of: \.worldToLatticeTranslation
+            ) == 32
+            && MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+                of: \.phaseFractions
+            ) == 40
+            && MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+                of: \.foldMode
+            ) == 48
+            && MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+                of: \.symmetryFamily
+            ) == 52
+            && MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+                of: \.phaseCount
+            ) == 56
+            && MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+                of: \.phaseIndexAxis
+            ) == 60
+            && MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+                of: \.phaseOffsetAxis
+            ) == 64
+            && MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+                of: \.reflectionFlags
+            ) == 68
+            && MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+                of: \.reserved
+            ) == 72
+            && PatternPeriodicDisplayFoldUniformsOffsetCanonicalSize() == 0
+            && PatternPeriodicDisplayFoldUniformsOffsetRepeatSize() == 8
+            && PatternPeriodicDisplayFoldUniformsOffsetWorldToLatticeXAxis() == 16
+            && PatternPeriodicDisplayFoldUniformsOffsetWorldToLatticeYAxis() == 24
+            && PatternPeriodicDisplayFoldUniformsOffsetWorldToLatticeTranslation()
+                == 32
+            && PatternPeriodicDisplayFoldUniformsOffsetPhaseFractions() == 40
+            && PatternPeriodicDisplayFoldUniformsOffsetFoldMode() == 48
+            && PatternPeriodicDisplayFoldUniformsOffsetSymmetryFamily() == 52
+            && PatternPeriodicDisplayFoldUniformsOffsetPhaseCount() == 56
+            && PatternPeriodicDisplayFoldUniformsOffsetPhaseIndexAxis() == 60
+            && PatternPeriodicDisplayFoldUniformsOffsetPhaseOffsetAxis() == 64
+            && PatternPeriodicDisplayFoldUniformsOffsetReflectionFlags() == 68
+            && PatternPeriodicDisplayFoldUniformsOffsetReserved() == 72
+            && PatternBufferIndexPeriodicDisplayFold == 16
     }
 
     private static var layerBlendIsValid: Bool {
@@ -358,7 +418,7 @@ public enum SparseSamplingABIError: Error, Equatable, Sendable {
 }
 
 public enum SparseSamplingABI {
-    public static let version: UInt16 = 1
+    public static let version: UInt16 = 2
     public static let maximumFallbackTextures = 16
     public static let maximumTier2Textures = 512
 

@@ -13,6 +13,74 @@ func frameUniformLayoutMatchesTheMetalContract() {
 }
 
 @Test
+func periodicDisplayFoldUniformLayoutAndBufferIndexAreFrozen() {
+    #expect(PatternSparseSamplingABIVersion == 2)
+    #expect(PatternBufferIndexPeriodicDisplayFold == 16)
+    #expect(MemoryLayout<PatternPeriodicDisplayFoldUniforms>.size == 80)
+    #expect(MemoryLayout<PatternPeriodicDisplayFoldUniforms>.stride == 80)
+    #expect(MemoryLayout<PatternPeriodicDisplayFoldUniforms>.alignment == 8)
+    let expectedOffsets: [Int?] = [
+        0, 8, 16, 24, 32, 40,
+        48, 52, 56, 60, 64, 68, 72,
+    ]
+    let swiftOffsets: [Int?] = [
+        MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+            of: \.canonicalSize
+        ),
+        MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+            of: \.repeatSize
+        ),
+        MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+            of: \.worldToLatticeXAxis
+        ),
+        MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+            of: \.worldToLatticeYAxis
+        ),
+        MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+            of: \.worldToLatticeTranslation
+        ),
+        MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+            of: \.phaseFractions
+        ),
+        MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(of: \.foldMode),
+        MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+            of: \.symmetryFamily
+        ),
+        MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+            of: \.phaseCount
+        ),
+        MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+            of: \.phaseIndexAxis
+        ),
+        MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+            of: \.phaseOffsetAxis
+        ),
+        MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(
+            of: \.reflectionFlags
+        ),
+        MemoryLayout<PatternPeriodicDisplayFoldUniforms>.offset(of: \.reserved),
+    ]
+    #expect(swiftOffsets == expectedOffsets)
+    let cOffsets = [
+        PatternPeriodicDisplayFoldUniformsOffsetCanonicalSize(),
+        PatternPeriodicDisplayFoldUniformsOffsetRepeatSize(),
+        PatternPeriodicDisplayFoldUniformsOffsetWorldToLatticeXAxis(),
+        PatternPeriodicDisplayFoldUniformsOffsetWorldToLatticeYAxis(),
+        PatternPeriodicDisplayFoldUniformsOffsetWorldToLatticeTranslation(),
+        PatternPeriodicDisplayFoldUniformsOffsetPhaseFractions(),
+        PatternPeriodicDisplayFoldUniformsOffsetFoldMode(),
+        PatternPeriodicDisplayFoldUniformsOffsetSymmetryFamily(),
+        PatternPeriodicDisplayFoldUniformsOffsetPhaseCount(),
+        PatternPeriodicDisplayFoldUniformsOffsetPhaseIndexAxis(),
+        PatternPeriodicDisplayFoldUniformsOffsetPhaseOffsetAxis(),
+        PatternPeriodicDisplayFoldUniformsOffsetReflectionFlags(),
+        PatternPeriodicDisplayFoldUniformsOffsetReserved(),
+    ]
+    #expect(cOffsets == expectedOffsets.map { numericCast($0!) })
+    #expect(ShaderABI.isValid)
+}
+
+@Test
 func tilingWireValuesAreAppendOnly() {
     #expect(PatternTilingWireGrid == 0)
     #expect(PatternTilingWireHalfDrop == 1)
@@ -351,7 +419,7 @@ func sparseSamplingWireValuesAppendWithoutRenumberingExistingSlots() {
     #expect(PatternTextureIndexSparseFallbackBase == 6)
     #expect(PatternSparseMaximumFallbackTextures == 16)
     #expect(PatternSparseMaximumTier2Textures == 512)
-    #expect(PatternSparseSamplingABIVersion == 1)
+    #expect(PatternSparseSamplingABIVersion == 2)
 
     #expect(PatternSparseRoleCanonical == 0)
     #expect(PatternSparseRoleAuthoritative == 1)

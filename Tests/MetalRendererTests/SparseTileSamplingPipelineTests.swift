@@ -2,11 +2,27 @@ import CShaderTypes
 import Foundation
 import Metal
 @testable import MetalRenderer
-import PatternEngine
+@testable import PatternEngine
 import Testing
 
 @Suite("Sparse tile sampling pipeline", .serialized)
 struct SparseTileSamplingPipelineTests {
+    fileprivate enum PeriodicProbeCategory: String, CaseIterable, Sendable {
+        case centralCell
+        case noncentralCell
+        case negativePhaseParity
+        case reflectedCell
+        case seamPredecessor
+        case exactSeam
+        case seamSuccessor
+        case canonicalCorner
+    }
+
+    fileprivate struct PeriodicProbe: Sendable {
+        let category: PeriodicProbeCategory
+        let world: SIMD2<Float>
+    }
+
     @Test
     func sparseEntryPointsCompileIndependently() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
@@ -23,6 +39,10 @@ struct SparseTileSamplingPipelineTests {
             ) != nil
         )
         for name in [
+            "patternSparsePeriodicSamplingTier2Fragment",
+            "patternSparsePeriodicSamplingFallbackFragment",
+            "patternSparsePeriodicSamplingInterchangeTier2Fragment",
+            "patternSparsePeriodicSamplingInterchangeFallbackFragment",
             "patternSparseRadialSamplingWorkingTier2Fragment",
             "patternSparseRadialSamplingWorkingFallbackFragment",
             "patternSparseRadialSamplingDisplayTier2Fragment",
@@ -34,12 +54,411 @@ struct SparseTileSamplingPipelineTests {
         }
     }
 
+    @Test @MainActor
+    func everyPeriodicPresetMatchesCompilerFoldAndBilinearOracleOnEveryBackend()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let library = try makeSparseSamplingLibrary(device: device)
+        let size = PixelSize(width: 512, height: 512)
+        let canonicalTiles = Dictionary(uniqueKeysWithValues:
+            (0..<2).flatMap { y in
+                (0..<2).map { x in
+                    (PaintTileCoordinate(x: x, y: y), SIMD4<Float>.zero)
+                }
+            }
+        )
+
+        for preset in SymmetryPresetID.periodicCases {
+            let strategy = try TilingStrategy(
+                configuration: .defaultConfiguration(
+                    presetID: preset,
+                    canonicalRasterSize: size
+                ),
+                canonicalRasterSize: size
+            )
+            let fold = try #require(
+                strategy.compiledSymmetry.domain.periodic?.displayFold
+            )
+            let probes = periodicProbes(for: fold)
+            var coveredCategories = Set<PeriodicProbeCategory>()
+            for probe in probes {
+                coveredCategories.insert(probe.category)
+            }
+            #expect(
+                coveredCategories == Set(PeriodicProbeCategory.allCases),
+                "\(preset)"
+            )
+            var fallbackPixels: [PeriodicProbeCategory: SIMD4<Float>] = [:]
+
+            for probe in probes {
+                let transform = SparseTileOutputToSourceTransform(
+                    sourceOffset: probe.world
+                        - SIMD2<Float>(repeating: 0.5),
+                    sourceStep: .one
+                )
+                let mapping = SparseTileSamplingOutputMapping.periodic(
+                    SparseTilePeriodicOutputMapping(
+                        fold: fold,
+                        outputToWorldTransform: transform
+                    )
+                )
+                let fixture = try makeSamplingFixture(
+                    device: device,
+                    roleTiles: [.canonical: canonicalTiles],
+                    pixelSize: size,
+                    addressing: .periodic(period: size),
+                    outputRegion: try SparseTileOutputRegion(
+                        minX: 0,
+                        minY: 0,
+                        maxX: 1,
+                        maxY: 1
+                    ),
+                    outputMapping: mapping,
+                    coordinateColoredRoles: [.canonical]
+                )
+                let canonical = fold.applying(to: WorldPoint(probe.world))
+                let expected = expectedPeriodicCoordinateValue(
+                    canonical: canonical,
+                    size: size
+                )
+
+                for backend in availableBackends(device) {
+                    let pipeline = try SparseTileSamplingPipeline.prepare(
+                        device: device,
+                        library: library,
+                        key: key(backend, outputMappingKind: .periodic)
+                    )
+                    let lease = try await SparseTileSamplingGPUPlanCache(
+                        device: device
+                    ).acquire(plan: fixture.planLease, pipeline: pipeline)
+                    let bits = try await renderPlan(
+                        device: device,
+                        plan: lease,
+                        width: 1,
+                        height: 1,
+                        parameters: SparseTileSamplingEncodeParameters(
+                            outputMapping: mapping,
+                            compositeMode: PatternCompositeWireDraw,
+                            liveVisible: true,
+                            strokeOpacity: 1,
+                            accumulationLimit: 1,
+                            eraserStrength: 1
+                        )
+                    )
+                    let actual = readPixel(
+                        bits,
+                        x: 0,
+                        width: 1
+                    )
+                    expectClose(
+                        actual,
+                        expected,
+                        tolerance: 0.006,
+                        "\(preset) \(backend) \(probe.category.rawValue)"
+                    )
+                    if backend == .directFallback {
+                        fallbackPixels[probe.category] = actual
+                    } else if let fallback = fallbackPixels[probe.category] {
+                        expectClose(
+                            actual,
+                            fallback,
+                            tolerance: 0,
+                            "\(preset) \(probe.category.rawValue) backend parity"
+                        )
+                    }
+                }
+                try fixture.planLease.retire()
+                #expect(fixture.surfaces.allSatisfy {
+                    $0.backingSnapshot().activeLeaseCount == 0
+                })
+            }
+            #expect(fallbackPixels.count == probes.count, "\(preset)")
+        }
+    }
+
+    @Test @MainActor
+    func realMetalAxisRepeatScalingBoundaryMatchesTask7OracleOnEveryBackend()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let library = try makeSparseSamplingLibrary(device: device)
+        let size = PixelSize(width: 512, height: 512)
+        let fold = CompiledPeriodicDisplayFold(
+            family: .rectangular,
+            coordinateSpace: .axisAlignedRepeat,
+            worldToLattice: .identity,
+            canonicalSize: PatternSize(width: 512, height: 512),
+            repeatSize: PatternSize(width: 1_000.7, height: 1_000.7),
+            phase: nil,
+            alternatingReflections: []
+        )
+        let world = SIMD2<Float>(
+            Float(bitPattern: 0x43f9_afb6),
+            137.25
+        )
+        let canonical = fold.applying(to: WorldPoint(world))
+        #expect(floor(canonical.x - 0.5) == 254)
+        let expected = expectedPeriodicCoordinateValue(
+            canonical: canonical,
+            size: size
+        )
+        #expect(expected.w > 0.8)
+
+        for backend in availableBackends(device) {
+            let actual = try await renderPeriodicCoordinateProbe(
+                device: device,
+                library: library,
+                backend: backend,
+                fold: fold,
+                size: size,
+                world: world
+            )
+            #expect(actual.w > 0.8, "\(backend)")
+            expectClose(
+                actual,
+                expected,
+                tolerance: 0.006,
+                "axis C512 R1000.7 \(backend)"
+            )
+            let sampleX = canonical.x - 0.5
+            let preciseSeamExpected = SIMD4<Float>(
+                1 - (sampleX - floor(sampleX)), 0, 0, 1
+            )
+            #expect(preciseSeamExpected.x > 0)
+            let preciseSeamActual = try await renderPeriodicCoordinateProbe(
+                device: device,
+                library: library,
+                backend: backend,
+                fold: fold,
+                size: size,
+                world: world,
+                axisSeamColored: true
+            )
+            expectClose(
+                preciseSeamActual,
+                preciseSeamExpected,
+                tolerance: 0.000_000_2,
+                "precise axis C512 R1000.7 \(backend)"
+            )
+        }
+    }
+
+    @Test @MainActor
+    func realMetalNegativePhaseAndOddReflectionBoundariesMatchTask7Oracle()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let library = try makeSparseSamplingLibrary(device: device)
+        let size = PixelSize(width: 512, height: 512)
+        let phaseFold = CompiledPeriodicDisplayFold(
+            family: .rectangular,
+            coordinateSpace: .axisAlignedRepeat,
+            worldToLattice: .identity,
+            canonicalSize: PatternSize(width: 512, height: 512),
+            repeatSize: PatternSize(width: 512, height: 512),
+            phase: PeriodicPhaseProgram(
+                indexAxis: .x,
+                offsetAxis: .y,
+                fractions: [0, 0.5]
+            ),
+            alternatingReflections: []
+        )
+        let reflectionFold = CompiledPeriodicDisplayFold(
+            family: .rectangular,
+            coordinateSpace: .axisAlignedRepeat,
+            worldToLattice: .identity,
+            canonicalSize: PatternSize(width: 512, height: 512),
+            repeatSize: PatternSize(width: 512, height: 512),
+            phase: nil,
+            alternatingReflections: [.x, .y]
+        )
+        let probes: [(String, CompiledPeriodicDisplayFold, SIMD2<Float>)] = [
+            ("negative half-drop phase", phaseFold, SIMD2(-128, -256)),
+            ("negative odd reflected cell", reflectionFold,
+             SIMD2(-255.5, -255.5)),
+        ]
+
+        for (name, fold, world) in probes {
+            let canonical = fold.applying(to: WorldPoint(world))
+            let expected = expectedPeriodicCoordinateValue(
+                canonical: canonical,
+                size: size
+            )
+            #expect(expected.w > 0.8, "\(name)")
+            for backend in availableBackends(device) {
+                let actual = try await renderPeriodicCoordinateProbe(
+                    device: device,
+                    library: library,
+                    backend: backend,
+                    fold: fold,
+                    size: size,
+                    world: world
+                )
+                #expect(actual.w > 0.8, "\(name) \(backend)")
+                expectClose(
+                    actual,
+                    expected,
+                    tolerance: 0.006,
+                    "\(name) \(backend)"
+                )
+            }
+        }
+    }
+
+    @Test @MainActor
+    func realMetalUnitLatticeFoldToTexelBoundaryMatchesTask7Oracle()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let library = try makeSparseSamplingLibrary(device: device)
+        let size = PixelSize(width: 257, height: 257)
+        let fold = CompiledPeriodicDisplayFold(
+            family: .triangular,
+            coordinateSpace: .unitLattice,
+            worldToLattice: .identity,
+            canonicalSize: PatternSize(width: 257, height: 257),
+            repeatSize: PatternSize(width: 257, height: 257),
+            phase: nil,
+            alternatingReflections: []
+        )
+        let world = SIMD2<Float>(
+            Float(bitPattern: 0x3f7f_807f),
+            0.413_25
+        )
+        let canonical = fold.applying(to: WorldPoint(world))
+        #expect(floor(canonical.x - 0.5) == 256)
+        let expected = expectedPeriodicCoordinateValue(
+            canonical: canonical,
+            size: size
+        )
+        #expect(expected.w > 0.8)
+
+        for backend in availableBackends(device) {
+            let actual = try await renderPeriodicCoordinateProbe(
+                device: device,
+                library: library,
+                backend: backend,
+                fold: fold,
+                size: size,
+                world: world
+            )
+            #expect(actual.w > 0.8, "\(backend)")
+            expectClose(
+                actual,
+                expected,
+                tolerance: 0.006,
+                "unit-lattice fold-to-texel boundary \(backend)"
+            )
+        }
+    }
+
+    @Test @MainActor
+    func realMetalObliquePiOverSevenSeamMatchesTask7OracleOnEveryBackend()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let library = try makeSparseSamplingLibrary(device: device)
+        let size = PixelSize(width: 1_536, height: 1_536)
+        let strategy = try TilingStrategy(
+            configuration: PeriodicSymmetryConfiguration(
+                presetID: .squareRotation,
+                repeatSize: PatternSize(width: 1_536, height: 1_536),
+                orientationRadians: .pi / 7
+            ),
+            canonicalRasterSize: size
+        )
+        let fold = try #require(
+            strategy.compiledSymmetry.domain.periodic?.displayFold
+        )
+        #expect(fold.coordinateSpace == .unitLattice)
+        let world = SIMD2<Float>(
+            Float(bitPattern: 1_232_348_175),
+            Float(bitPattern: 1_302_845_308)
+        )
+        let canonical = fold.applying(to: WorldPoint(world))
+        let lowerX = Int(floor(canonical.x - 0.5))
+        let wrappedLowerX = (lowerX % size.width + size.width) % size.width
+        #expect(wrappedLowerX / PaintTileDescriptor.side == 2)
+        let expected = expectedPeriodicCoordinateValue(
+            canonical: canonical,
+            size: size
+        )
+        #expect(expected.w > 0.8)
+
+        for backend in availableBackends(device) {
+            let actual = try await renderPeriodicCoordinateProbe(
+                device: device,
+                library: library,
+                backend: backend,
+                fold: fold,
+                size: size,
+                world: world
+            )
+            #expect(actual.w > 0.8, "\(backend)")
+            expectClose(
+                actual,
+                expected,
+                tolerance: 0.006,
+                "oblique pi/7 arithmetic seam \(backend)"
+            )
+        }
+    }
+
+    @Test @MainActor
+    func realMetalLargeTriangularUnitLatticeUsesModuloWithoutInt32Cell()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let library = try makeSparseSamplingLibrary(device: device)
+        let size = PixelSize(width: 512, height: 512)
+        let strategy = try TilingStrategy(
+            configuration: PeriodicSymmetryConfiguration(
+                presetID: .rotation3,
+                repeatSize: PatternSize(width: 512, height: 512),
+                orientationRadians: .pi / 7
+            ),
+            canonicalRasterSize: size
+        )
+        let fold = try #require(
+            strategy.compiledSymmetry.domain.periodic?.displayFold
+        )
+        #expect(fold.coordinateSpace == .unitLattice)
+        #expect(fold.family == .triangular)
+        let large = Float(Int32.max) * 8
+        let world = SIMD2<Float>(large, -large.nextDown)
+        let canonical = fold.applying(to: WorldPoint(world))
+        let expected = expectedPeriodicCoordinateValue(
+            canonical: canonical,
+            size: size
+        )
+        #expect(expected.w > 0.8)
+
+        for backend in availableBackends(device) {
+            let actual = try await renderPeriodicCoordinateProbe(
+                device: device,
+                library: library,
+                backend: backend,
+                fold: fold,
+                size: size,
+                world: world
+            )
+            #expect(actual.w > 0.8, "\(backend)")
+            expectClose(
+                actual,
+                expected,
+                tolerance: 0.006,
+                "large triangular lattice modulo \(backend)"
+            )
+        }
+    }
+
     @Test
     func currentSparseABIAtMetalBoundaryRemainsExact() {
         #expect(PatternBufferIndexGridFrameUniforms == 1)
         #expect(PatternBufferIndexRadialFrameUniforms == 4)
-        #expect(PatternSparseSamplingABIVersion == 1)
-        #expect(SparseSamplingABI.version == 1)
+        #expect(PatternSparseSamplingABIVersion == 2)
+        #expect(SparseSamplingABI.version == 2)
         #expect(MemoryLayout<PatternSparseSamplingUniforms>.size == 64)
         #expect(MemoryLayout<PatternSparseSamplingUniforms>.stride == 64)
         #expect(MemoryLayout<PatternSparsePageTableDescriptor>.size == 32)
@@ -3550,8 +3969,11 @@ private func makeSamplingFixture(
     addressing: SparseTileAddressing,
     outputRegion: SparseTileOutputRegion,
     outputToSourceTransform: SparseTileOutputToSourceTransform = .identity,
+    outputMapping suppliedOutputMapping: SparseTileSamplingOutputMapping? = nil,
     planCache: SparseTileSamplingPlanCache = SparseTileSamplingPlanCache(),
-    planLimits: SparseTilePlanLimits = .pipelineTestDefaults
+    planLimits: SparseTilePlanLimits = .pipelineTestDefaults,
+    coordinateColoredRoles: Set<SparseTileSampleRole> = [],
+    axisSeamColoredRoles: Set<SparseTileSampleRole> = []
 ) throws -> SparseSamplingFixture {
     let layerID = UUID()
     var requests: [SparseTileSourceRequest] = []
@@ -3573,11 +3995,25 @@ private func makeSamplingFixture(
                 pinReasons: [.dirty]
             )
             for binding in lease.bindings {
-                try uploadUniformColor(
-                    tiles[binding.descriptor.coordinate]!,
-                    to: binding.texture,
-                    device: device
-                )
+                if axisSeamColoredRoles.contains(role) {
+                    try uploadPreciseAxisSeamColors(
+                        tile: binding.descriptor.coordinate,
+                        to: binding.texture,
+                        device: device
+                    )
+                } else if coordinateColoredRoles.contains(role) {
+                    try uploadPeriodicCoordinateColors(
+                        tile: binding.descriptor.coordinate,
+                        to: binding.texture,
+                        device: device
+                    )
+                } else {
+                    try uploadUniformColor(
+                        tiles[binding.descriptor.coordinate]!,
+                        to: binding.texture,
+                        device: device
+                    )
+                }
             }
             try surface.markDirty(lease)
             try surface.returnLease(lease)
@@ -3596,6 +4032,8 @@ private func makeSamplingFixture(
         ))
         surfaces.append(surface)
     }
+    let outputMapping = suppliedOutputMapping
+        ?? .affine(outputToSourceTransform)
     let key = SparseTileSamplingPlanKey(
         documentGeneration: 7,
         orderedLayers: [SparseTileLayerContentKey(
@@ -3604,7 +4042,7 @@ private func makeSamplingFixture(
         )],
         addressingRevision: 1,
         outputGeometryRevision: 1,
-        outputToSourceTransform: outputToSourceTransform
+        outputMapping: outputMapping
     )
     let planLease = try planCache.acquire(
         key: key,
@@ -3613,6 +4051,149 @@ private func makeSamplingFixture(
         limits: planLimits
     )
     return SparseSamplingFixture(surfaces: surfaces, planLease: planLease)
+}
+
+private func expectedPeriodicCoordinateValue(
+    canonical: CanonicalPoint,
+    size: PixelSize
+) -> SIMD4<Float> {
+    let sample = SIMD2<Float>(canonical.x, canonical.y)
+        - SIMD2<Float>(repeating: 0.5)
+    let lowerX = Int(floor(sample.x))
+    let lowerY = Int(floor(sample.y))
+    let fractionX = sample.x - floor(sample.x)
+    let fractionY = sample.y - floor(sample.y)
+    func value(_ x: Int, _ y: Int) -> SIMD4<Float> {
+        let wrappedX = (x % size.width + size.width) % size.width
+        let wrappedY = (y % size.height + size.height) % size.height
+        let color = periodicCoordinateColor(
+            x: wrappedX,
+            y: wrappedY
+        )
+        return SIMD4(
+            Float(Float16(color.x)), Float(Float16(color.y)),
+            Float(Float16(color.z)), Float(Float16(color.w))
+        )
+    }
+    let value00 = value(lowerX, lowerY)
+    let value10 = value(lowerX + 1, lowerY)
+    let value01 = value(lowerX, lowerY + 1)
+    let value11 = value(lowerX + 1, lowerY + 1)
+    let top = value00 + (value10 - value00) * fractionX
+    let bottom = value01 + (value11 - value01) * fractionX
+    return top + (bottom - top) * fractionY
+}
+
+private func periodicCoordinateColor(x: Int, y: Int) -> SIMD4<Float> {
+    SIMD4(
+        Float((x * 13 + y * 3) % 29 + 1) / 40,
+        Float((x * 5 + y * 17) % 31 + 1) / 44,
+        Float((x * 19 + y * 7) % 37 + 1) / 52,
+        0.875
+    )
+}
+
+private func periodicProbes(
+    for fold: CompiledPeriodicDisplayFold
+) -> [SparseTileSamplingPipelineTests.PeriodicProbe] {
+    let canonicalToWorld = fold.worldToLattice.inverted()
+    let pageSeam: Float = 0.5
+    let seamPredecessor = pageSeam.nextDown
+    let seamSuccessor = pageSeam.nextUp
+    func world(_ lattice: SIMD2<Float>) -> SIMD2<Float> {
+        switch fold.coordinateSpace {
+        case .axisAlignedRepeat:
+            return SIMD2(
+                lattice.x * fold.repeatSize.width,
+                lattice.y * fold.repeatSize.height
+            )
+        case .unitLattice:
+            return canonicalToWorld.applying(to: lattice)
+        }
+    }
+    return [
+        .init(category: .centralCell, world: world(SIMD2(0.173, 0.319))),
+        .init(category: .noncentralCell, world: world(SIMD2(2.311, 3.727))),
+        .init(category: .negativePhaseParity, world: world(SIMD2(-0.267, -0.613))),
+        .init(category: .reflectedCell, world: world(SIMD2(1.219, 1.781))),
+        .init(category: .seamPredecessor, world: world(SIMD2(seamPredecessor, 0.417))),
+        .init(category: .exactSeam, world: world(SIMD2(pageSeam, 0.417))),
+        .init(category: .seamSuccessor, world: world(SIMD2(seamSuccessor, 0.417))),
+        .init(category: .canonicalCorner, world: world(SIMD2(1, 1))),
+    ]
+}
+
+@MainActor
+private func renderPeriodicCoordinateProbe(
+    device: any MTLDevice,
+    library: any MTLLibrary,
+    backend: SparseTileSamplingBackend,
+    fold: CompiledPeriodicDisplayFold,
+    size: PixelSize,
+    world: SIMD2<Float>,
+    axisSeamColored: Bool = false
+) async throws -> SIMD4<Float> {
+    let columns = (size.width + PaintTileDescriptor.side - 1)
+        / PaintTileDescriptor.side
+    let rows = (size.height + PaintTileDescriptor.side - 1)
+        / PaintTileDescriptor.side
+    let tiles = Dictionary(uniqueKeysWithValues: (0..<rows).flatMap { y in
+        (0..<columns).map { x in
+            (PaintTileCoordinate(x: x, y: y), SIMD4<Float>.zero)
+        }
+    })
+    let transform = SparseTileOutputToSourceTransform(
+        sourceOffset: world - SIMD2<Float>(repeating: 0.5),
+        sourceStep: .one
+    )
+    let mapping = SparseTileSamplingOutputMapping.periodic(
+        SparseTilePeriodicOutputMapping(
+            fold: fold,
+            outputToWorldTransform: transform
+        )
+    )
+    let fixture = try makeSamplingFixture(
+        device: device,
+        roleTiles: [.canonical: tiles],
+        pixelSize: size,
+        addressing: .periodic(period: size),
+        outputRegion: try SparseTileOutputRegion(
+            minX: 0,
+            minY: 0,
+            maxX: 1,
+            maxY: 1
+        ),
+        outputMapping: mapping,
+        coordinateColoredRoles: axisSeamColored ? [] : [.canonical],
+        axisSeamColoredRoles: axisSeamColored ? [.canonical] : []
+    )
+    let pipeline = try SparseTileSamplingPipeline.prepare(
+        device: device,
+        library: library,
+        key: key(backend, outputMappingKind: .periodic)
+    )
+    let lease = try await SparseTileSamplingGPUPlanCache(
+        device: device
+    ).acquire(plan: fixture.planLease, pipeline: pipeline)
+    let bits = try await renderPlan(
+        device: device,
+        plan: lease,
+        width: 1,
+        height: 1,
+        parameters: SparseTileSamplingEncodeParameters(
+            outputMapping: mapping,
+            compositeMode: PatternCompositeWireDraw,
+            liveVisible: true,
+            strokeOpacity: 1,
+            accumulationLimit: 1,
+            eraserStrength: 1
+        )
+    )
+    try fixture.planLease.retire()
+    #expect(fixture.surfaces.allSatisfy {
+        $0.backingSnapshot().activeLeaseCount == 0
+    })
+    return readPixel(bits, x: 0, width: 1)
 }
 
 private func availableBackends(
@@ -3740,6 +4321,96 @@ private func uploadUniformColor(
     #expect(commandBuffer.status == .completed)
 }
 
+private func uploadPeriodicCoordinateColors(
+    tile: PaintTileCoordinate,
+    to texture: any MTLTexture,
+    device: any MTLDevice
+) throws {
+    let side = PaintTileDescriptor.side
+    let originX = tile.x * side
+    let originY = tile.y * side
+    var values = [UInt16]()
+    values.reserveCapacity(side * side * 4)
+    for localY in 0..<side {
+        for localX in 0..<side {
+            let color = periodicCoordinateColor(
+                x: originX + localX,
+                y: originY + localY
+            )
+            values.append(Float16(color.x).bitPattern)
+            values.append(Float16(color.y).bitPattern)
+            values.append(Float16(color.z).bitPattern)
+            values.append(Float16(color.w).bitPattern)
+        }
+    }
+    let byteCount = values.count * MemoryLayout<UInt16>.stride
+    let buffer = try #require(values.withUnsafeBytes {
+        device.makeBuffer(bytes: $0.baseAddress!, length: byteCount)
+    })
+    let queue = try #require(device.makeCommandQueue())
+    let commandBuffer = try #require(queue.makeCommandBuffer())
+    let blit = try #require(commandBuffer.makeBlitCommandEncoder())
+    blit.copy(
+        from: buffer,
+        sourceOffset: 0,
+        sourceBytesPerRow: side * 8,
+        sourceBytesPerImage: byteCount,
+        sourceSize: MTLSize(width: side, height: side, depth: 1),
+        to: texture,
+        destinationSlice: 0,
+        destinationLevel: 0,
+        destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+    )
+    blit.endEncoding()
+    commandBuffer.commit()
+    commandBuffer.waitUntilCompleted()
+    #expect(commandBuffer.status == .completed)
+    #expect(commandBuffer.error == nil)
+}
+
+private func uploadPreciseAxisSeamColors(
+    tile: PaintTileCoordinate,
+    to texture: any MTLTexture,
+    device: any MTLDevice
+) throws {
+    let side = PaintTileDescriptor.side
+    let originX = tile.x * side
+    var values = [UInt16]()
+    values.reserveCapacity(side * side * 4)
+    for _ in 0..<side {
+        for localX in 0..<side {
+            let red: Float = originX + localX == 254 ? 1 : 0
+            values.append(Float16(red).bitPattern)
+            values.append(Float16(0).bitPattern)
+            values.append(Float16(0).bitPattern)
+            values.append(Float16(1).bitPattern)
+        }
+    }
+    let byteCount = values.count * MemoryLayout<UInt16>.stride
+    let buffer = try #require(values.withUnsafeBytes {
+        device.makeBuffer(bytes: $0.baseAddress!, length: byteCount)
+    })
+    let queue = try #require(device.makeCommandQueue())
+    let commandBuffer = try #require(queue.makeCommandBuffer())
+    let blit = try #require(commandBuffer.makeBlitCommandEncoder())
+    blit.copy(
+        from: buffer,
+        sourceOffset: 0,
+        sourceBytesPerRow: side * 8,
+        sourceBytesPerImage: byteCount,
+        sourceSize: MTLSize(width: side, height: side, depth: 1),
+        to: texture,
+        destinationSlice: 0,
+        destinationLevel: 0,
+        destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+    )
+    blit.endEncoding()
+    commandBuffer.commit()
+    commandBuffer.waitUntilCompleted()
+    #expect(commandBuffer.status == .completed)
+    #expect(commandBuffer.error == nil)
+}
+
 private func targetDescriptor(
     width: Int = 1,
     height: Int = 1,
@@ -3846,10 +4517,14 @@ private func readSinglePixel(_ texture: any MTLTexture) -> SIMD4<Float> {
 private func expectClose(
     _ actual: SIMD4<Float>,
     _ expected: SIMD4<Float>,
-    tolerance: Float = 0.002
+    tolerance: Float = 0.002,
+    _ comment: @autoclosure () -> String = ""
 ) {
     for index in 0..<4 {
-        #expect(abs(actual[index] - expected[index]) <= tolerance)
+        #expect(
+            abs(actual[index] - expected[index]) <= tolerance,
+            Comment(rawValue: comment())
+        )
     }
 }
 

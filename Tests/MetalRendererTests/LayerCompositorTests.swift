@@ -48,6 +48,148 @@ struct LayerCompositorTests {
     }
 
     @Test @MainActor
+    func periodicRootAndChildPreparationReuseImmutableReachabilitySeed()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layers = try (103..<111).map { try descriptor($0) }
+        let stack = try LayerStack(
+            layers: layers,
+            activeLayerID: try #require(layers.last).id
+        )
+        let documentSize = PixelSize(width: 4_096, height: 4_096)
+        let storageSize = PixelSize(width: 4_096, height: 4_096)
+        let registry = try DocumentPaintSurfaceStore(
+            device: device,
+            byteBudget: layers.count * PaintTileDescriptor.residentByteCount,
+            geometry: DocumentPaintGeometry(
+                documentPixelSize: documentSize,
+                storagePixelSize: storageSize,
+                radialLayout: nil
+            ),
+            layerIDs: stack.orderedLayerIDs,
+            layerStack: stack
+        )
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        let dirty: [UUID: [PaintTileCoordinate]] = Dictionary(
+            uniqueKeysWithValues: layers.map { ($0.id, [coordinate]) }
+        )
+        let candidate = try registry.makeCandidate(
+            dirtyCoordinatesByLayer: dirty
+        )
+        let colors: [UUID: SIMD4<Float>] = Dictionary(
+            uniqueKeysWithValues: layers.enumerated().map { index, layer in
+                (layer.id, SIMD4<Float>(
+                    Float(index + 1) / 16,
+                    0.25,
+                    0.125,
+                    1
+                ))
+            }
+        )
+        try uploadLayerColors(
+            colors,
+            layers: layers,
+            candidate: candidate,
+            coordinate: coordinate,
+            device: device
+        )
+        registry.commitPrepared(try registry.prepareCommit(candidate))
+        let fold = try #require(TilingStrategy(
+            configuration: PeriodicSymmetryConfiguration(
+                presetID: .squareRotation,
+                repeatSize: PatternSize(
+                    width: Float(storageSize.width),
+                    height: Float(storageSize.height)
+                ),
+                orientationRadians: .pi / 7
+            ),
+            canonicalRasterSize: storageSize
+        ).compiledSymmetry.domain.periodic?.displayFold)
+        let mapping = SparseTileSamplingOutputMapping.periodic(
+            SparseTilePeriodicOutputMapping(
+                fold: fold,
+                outputToWorldTransform: .identity
+            )
+        )
+        let output = try SparseTileOutputRegion(
+            minX: 0, minY: 0,
+            maxX: 3_024, maxY: 1_964
+        )
+        let plan = try registry.prepareLayerCompositePlan(
+            layerStack: stack,
+            addressing: .periodic(period: storageSize),
+            addressingRevision: 1,
+            outputRegion: output,
+            outputGeometryRevision: 1,
+            outputMapping: mapping,
+            limits: .documentProduction
+        )
+        #expect(plan.layers.count == layers.count)
+        var rootPhaseA: [SparseTilePeriodicReachabilityReceipt] = []
+        for layer in plan.layers {
+            let selectionReceipt = try #require(layer.sourceSelection
+                .testingPeriodicReachabilityReceipt)
+            let buildReceipt = try #require(layer.samplingPlan
+                .periodicReachabilityReceipt)
+            rootPhaseA.append(selectionReceipt)
+            #expect(buildReceipt.phaseAWorkCount
+                == selectionReceipt.workCount)
+            #expect(buildReceipt.acquisitionWorkCount
+                < max(1, selectionReceipt.workCount / 10))
+            #expect(buildReceipt.cacheHitCount
+                > selectionReceipt.cacheHitCount)
+        }
+        let firstRootPhaseA = try #require(rootPhaseA.first)
+        #expect(firstRootPhaseA.workCount > 1_000)
+        #expect(firstRootPhaseA.workCount < 125_000)
+        #expect(firstRootPhaseA.enumeratedPixelCenterCount < 50_000)
+        #expect(firstRootPhaseA.cacheHitCount == 0)
+        #expect(rootPhaseA.dropFirst().allSatisfy {
+            $0.workCount == firstRootPhaseA.workCount
+                && $0.cacheHitCount > 0
+        })
+
+        let child = try SparseTileOutputRegion(
+            minX: 0, minY: 0, maxX: 1_512, maxY: 1_964
+        )
+        let childMapping = try DocumentPaintStableSnapshotChunkPlanner
+            .childMapping(global: mapping, full: output, child: child)
+        let childLayers = try plan.layers(
+            for: child,
+            outputMapping: childMapping
+        )
+        #expect(childLayers.count == layers.count)
+        var childPhaseA: [SparseTilePeriodicReachabilityReceipt] = []
+        for layer in childLayers {
+            let selectionReceipt = try #require(layer.sourceSelection
+                .testingPeriodicReachabilityReceipt)
+            let buildReceipt = try #require(layer.samplingPlan
+                .periodicReachabilityReceipt)
+            childPhaseA.append(selectionReceipt)
+            #expect(buildReceipt.phaseAWorkCount
+                == selectionReceipt.workCount)
+            #expect(buildReceipt.acquisitionWorkCount
+                < max(1, selectionReceipt.workCount / 10))
+            #expect(buildReceipt.cacheHitCount
+                > selectionReceipt.cacheHitCount)
+        }
+        let firstChildPhaseA = try #require(childPhaseA.first)
+        #expect(firstChildPhaseA.workCount > 1_000)
+        #expect(firstChildPhaseA.workCount < 125_000)
+        #expect(firstChildPhaseA.enumeratedPixelCenterCount < 50_000)
+        #expect(firstChildPhaseA.cacheHitCount == 0)
+        #expect(childPhaseA.dropFirst().allSatisfy {
+            $0.workCount == firstChildPhaseA.workCount
+                && $0.cacheHitCount > 0
+        })
+        plan.close()
+        let store = registry.sharedTileStore.snapshot()
+        #expect(store.activeSnapshotTokenCount == 0)
+        #expect(store.aggregateSnapshotReferenceCount == 0)
+    }
+
+    @Test @MainActor
     func finiteExportCompositesTheCurrentNativeLayerStackOnce() async throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let library = try makeLayerCompositorLibrary(device: device)

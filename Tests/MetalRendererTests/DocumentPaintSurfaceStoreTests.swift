@@ -2,12 +2,89 @@ import EditorCore
 import Foundation
 import Metal
 @testable import MetalRenderer
-import PatternEngine
+@testable import PatternEngine
 import Testing
 
 @Suite("Document paint surface registry", .serialized)
 struct DocumentPaintSurfaceStoreTests {
     private let tileBytes = PaintTileDescriptor.residentByteCount
+
+    @Test
+    func invalidPeriodicMappingFailsBeforeStableRootRetention() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layer = UUID()
+        let registry = try makeRegistry(device: device, layers: [layer])
+        let candidate = try registry.makeCandidate(
+            dirtyCoordinatesByLayer: [layer: [.init(x: 0, y: 0)]]
+        )
+        registry.commitPrepared(try registry.prepareCommit(candidate))
+        let period = registry.geometry.storagePixelSize
+        let strategy = try TilingStrategy(
+            configuration: .defaultConfiguration(
+                presetID: .grid,
+                canonicalRasterSize: period
+            ),
+            canonicalRasterSize: period
+        )
+        let supported = try #require(
+            strategy.compiledSymmetry.domain.periodic?.displayFold
+        )
+        let aliasedWidth = (1 << 24) + 1
+        let invalidFold = CompiledPeriodicDisplayFold(
+            family: supported.family,
+            coordinateSpace: supported.coordinateSpace,
+            worldToLattice: supported.worldToLattice,
+            canonicalSize: PatternSize(
+                width: Float(aliasedWidth),
+                height: supported.canonicalSize.height
+            ),
+            repeatSize: supported.repeatSize,
+            phase: supported.phase,
+            alternatingReflections: supported.alternatingReflections
+        )
+        let invalidFoldMapping = SparseTileSamplingOutputMapping.periodic(
+            SparseTilePeriodicOutputMapping(
+                fold: invalidFold,
+                outputToWorldTransform: .identity
+            )
+        )
+        let invalidOffsetMapping = SparseTileSamplingOutputMapping.periodic(
+            SparseTilePeriodicOutputMapping(
+                fold: supported,
+                outputToWorldTransform: .identity,
+                screenPixelOffset: SIMD2((1 << 24) + 1, 0)
+            )
+        )
+        for (revision, mapping) in [
+            (UInt64(1), invalidFoldMapping),
+            (UInt64(2), invalidOffsetMapping),
+        ] {
+            let beforeRegistry = registry.snapshot()
+            let beforeStore = registry.sharedTileStore.snapshot()
+
+            #expect(throws: SparseTileSamplingPlanError
+                .inconsistentAddressing) {
+                _ = try registry.captureStableCanonicalSnapshot(
+                    layerID: layer,
+                    addressing: .periodic(period: period),
+                    addressingRevision: revision,
+                    outputMapping: mapping
+                )
+            }
+            let afterRegistry = registry.snapshot()
+            let afterStore = registry.sharedTileStore.snapshot()
+            #expect(afterRegistry.activeTileLeaseCount
+                == beforeRegistry.activeTileLeaseCount)
+            #expect(afterStore.activeSnapshotTokenCount
+                == beforeStore.activeSnapshotTokenCount)
+            #expect(afterStore.aggregateSnapshotReferenceCount
+                == beforeStore.aggregateSnapshotReferenceCount)
+            #expect(afterStore.snapshotMetadataByteCount
+                == beforeStore.snapshotMetadataByteCount)
+            #expect(afterStore.snapshotPayloadDebtByteCount
+                == beforeStore.snapshotPayloadDebtByteCount)
+        }
+    }
 
     @Test
     func defaultTransferCapacityIncludesExactlyOnePersistentZeroTile() throws {

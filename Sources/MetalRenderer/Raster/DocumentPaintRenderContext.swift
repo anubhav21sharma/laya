@@ -1003,6 +1003,18 @@ final class DocumentPaintRenderContext {
                 outputMappingKind: .finiteRadial
             )
         )
+        let periodicSamplingPipeline = try SparseTileSamplingPipeline.prepare(
+            device: device,
+            library: library,
+            key: SparseTileSamplingPipelineKey(
+                backend: samplingBackend,
+                outputPixelFormatRawValue:
+                    DocumentColorPipeline.displayPixelFormat.rawValue,
+                sampleCount: 1,
+                abiVersion: SparseSamplingABI.version,
+                outputMappingKind: .periodic
+            )
+        )
 
         self.registry = registry
         self.revisionStore = revisionStore
@@ -1022,6 +1034,7 @@ final class DocumentPaintRenderContext {
             device: device,
             pipelines: DocumentPaintVisiblePlanPipelines(
                 affine: affineSamplingPipeline,
+                periodic: periodicSamplingPipeline,
                 finiteRadial: radialSamplingPipeline
             ),
             submissionOwnerIdentity: identity,

@@ -1,10 +1,1233 @@
+import Foundation
 import Metal
-import PatternEngine
 import Testing
 @testable import MetalRenderer
+@testable import PatternEngine
 
 @Suite("Sparse tile sampling plan")
 struct SparseTileSamplingPlanTests {
+    @Test
+    func hugeFinitePeriodicFoldFailsClosedBeforeRetentionInSubprocess()
+        throws
+    {
+        if ProcessInfo.processInfo.environment[
+            "PATTERN_PERIODIC_HUGE_FINITE_FOLD"
+        ] == "1" {
+            try exerciseHugeFinitePeriodicFoldRejection()
+            return
+        }
+        let result = try runHugeFinitePeriodicFoldSubprocess()
+        #expect(result.status == 0, Comment(rawValue: result.standardError))
+    }
+
+    @Test
+    func periodicFloatAliasedCanonicalPeriodFailsBeforeRetention() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let sourceSize = PixelSize(width: 64, height: 64)
+        let fixture = try makeSource(
+            device: device,
+            pixelSize: sourceSize,
+            coordinates: [.init(x: 0, y: 0)],
+            addressing: .periodic(period: sourceSize)
+        )
+        let supported = try periodicFold(.grid, rasterSize: sourceSize)
+        let aliasedWidth = (1 << 24) + 1
+        #expect(Float(aliasedWidth) == Float(aliasedWidth - 1))
+        let fold = CompiledPeriodicDisplayFold(
+            family: supported.family,
+            coordinateSpace: supported.coordinateSpace,
+            worldToLattice: supported.worldToLattice,
+            canonicalSize: PatternSize(
+                width: Float(aliasedWidth),
+                height: supported.canonicalSize.height
+            ),
+            repeatSize: supported.repeatSize,
+            phase: supported.phase,
+            alternatingReflections: supported.alternatingReflections
+        )
+        let mapping = SparseTilePeriodicOutputMapping(
+            fold: fold,
+            outputToWorldTransform: .identity
+        )
+        let key = SparseTileSamplingPlanKey(
+            documentGeneration: 7,
+            orderedLayers: [SparseTileLayerContentKey(
+                layerID: fixture.layerID,
+                roles: [fixture.request.contentKey]
+            )],
+            addressingRevision: 1,
+            outputGeometryRevision: 1,
+            outputMapping: .periodic(mapping)
+        )
+        let before = fixture.request.provider.backingSnapshot()
+
+        #expect(throws: SparseTileSamplingPlanError.inconsistentAddressing) {
+            _ = try SparseTileSamplingPlanCache().acquire(
+                key: key,
+                sources: [fixture.request],
+                outputRegion: try region(0, 0, 1, 1),
+                limits: .testDefaults
+            )
+        }
+        #expect(fixture.request.provider.backingSnapshot() == before)
+    }
+
+    @Test
+    func periodicCellBeyondMetalInt32FailsBeforeRetention() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 64, height: 64)
+        let fixture = try makeSource(
+            device: device,
+            pixelSize: size,
+            coordinates: [.init(x: 0, y: 0)],
+            addressing: .periodic(period: size)
+        )
+        let fold = try periodicFold(.grid, rasterSize: size)
+        let firstUnsafeCell = Float(Int32.max) + 1
+        let mapping = SparseTilePeriodicOutputMapping(
+            fold: fold,
+            outputToWorldTransform: SparseTileOutputToSourceTransform(
+                sourceOffset: SIMD2(
+                    firstUnsafeCell * fold.repeatSize.width,
+                    0
+                ),
+                sourceStep: SIMD2(repeating: 1)
+            )
+        )
+        let key = SparseTileSamplingPlanKey(
+            documentGeneration: 7,
+            orderedLayers: [SparseTileLayerContentKey(
+                layerID: fixture.layerID,
+                roles: [fixture.request.contentKey]
+            )],
+            addressingRevision: 1,
+            outputGeometryRevision: 1,
+            outputMapping: .periodic(mapping)
+        )
+        let before = fixture.request.provider.backingSnapshot()
+
+        #expect(throws: SparseTileSamplingPlanError
+            .invalidOutputToSourceTransform) {
+            _ = try SparseTileSamplingPlanCache().acquire(
+                key: key,
+                sources: [fixture.request],
+                outputRegion: try region(0, 0, 1, 1),
+                limits: .testDefaults
+            )
+        }
+        #expect(fixture.request.provider.backingSnapshot() == before)
+    }
+
+    @Test
+    func incompatiblePeriodicMappingFailsBeforeSelectionOrSourceRetention()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 512, height: 512)
+        let fixture = try makeSource(
+            device: device,
+            pixelSize: size,
+            coordinates: [.init(x: 0, y: 0)],
+            addressing: .finite(size)
+        )
+        let fold = try periodicFold(.halfDrop, rasterSize: size)
+        let mapping = SparseTileSamplingOutputMapping.periodic(
+            SparseTilePeriodicOutputMapping(
+                fold: fold,
+                outputToWorldTransform: .identity
+            )
+        )
+        let key = SparseTileSamplingPlanKey(
+            documentGeneration: 7,
+            orderedLayers: [SparseTileLayerContentKey(
+                layerID: fixture.layerID,
+                roles: [fixture.request.contentKey]
+            )],
+            addressingRevision: 1,
+            outputGeometryRevision: 1,
+            outputMapping: mapping
+        )
+        let before = fixture.request.provider.backingSnapshot()
+
+        #expect(throws: SparseTileSamplingPlanError.inconsistentAddressing) {
+            _ = try SparseTileSamplingPlanCache().acquire(
+                key: key,
+                sources: [fixture.request],
+                outputRegion: try region(0, 0, 1, 1),
+                limits: .testDefaults
+            )
+        }
+        #expect(fixture.request.provider.backingSnapshot() == before)
+    }
+
+    @Test
+    func unsupportedPeriodicPhaseCountFailsBeforeSourceRetention() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 512, height: 512)
+        let fixture = try makeSource(
+            device: device,
+            pixelSize: size,
+            coordinates: [.init(x: 0, y: 0)],
+            addressing: .periodic(period: size)
+        )
+        let supported = try periodicFold(.halfDrop, rasterSize: size)
+        let fold = CompiledPeriodicDisplayFold(
+            family: supported.family,
+            coordinateSpace: supported.coordinateSpace,
+            worldToLattice: supported.worldToLattice,
+            canonicalSize: supported.canonicalSize,
+            repeatSize: supported.repeatSize,
+            phase: PeriodicPhaseProgram(
+                indexAxis: .x,
+                offsetAxis: .y,
+                fractions: [0, 0.25, 0.5]
+            ),
+            alternatingReflections: supported.alternatingReflections
+        )
+        let key = SparseTileSamplingPlanKey(
+            documentGeneration: 7,
+            orderedLayers: [SparseTileLayerContentKey(
+                layerID: fixture.layerID,
+                roles: [fixture.request.contentKey]
+            )],
+            addressingRevision: 1,
+            outputGeometryRevision: 1,
+            outputMapping: .periodic(SparseTilePeriodicOutputMapping(
+                fold: fold,
+                outputToWorldTransform: .identity
+            ))
+        )
+        let before = fixture.request.provider.backingSnapshot()
+
+        #expect(throws: SparseTileSamplingPlanError.inconsistentAddressing) {
+            _ = try SparseTileSamplingPlanCache().acquire(
+                key: key,
+                sources: [fixture.request],
+                outputRegion: try region(0, 0, 1, 1),
+                limits: .testDefaults
+            )
+        }
+        #expect(fixture.request.provider.backingSnapshot() == before)
+    }
+
+    @Test(arguments: [
+        SymmetryPresetID.halfDrop,
+        .brick,
+        .mirrorXY,
+        .squareRotation,
+        .rotation3,
+        .kaleidoscope30,
+    ])
+    func periodicReachabilityMatchesFoldedPixelCentersAtBoundariesAndNegatives(
+        preset: SymmetryPresetID
+    ) throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 768, height: 768)
+        let fold = try periodicFold(preset, rasterSize: size)
+        let coordinates = allPageCoordinates(size)
+        let fixture = try makeSource(
+            device: device,
+            pixelSize: size,
+            coordinates: coordinates,
+            addressing: .periodic(period: size)
+        )
+        let output = try region(-259, -131, -251, -123)
+        let transform = SparseTileOutputToSourceTransform(
+            sourceOffset: SIMD2(511.5, 255.5),
+            sourceStep: SIMD2(0.5, 0.5)
+        )
+        let mapping = SparseTilePeriodicOutputMapping(
+            fold: fold,
+            outputToWorldTransform: transform
+        )
+        let key = SparseTileSamplingPlanKey(
+            documentGeneration: 7,
+            orderedLayers: [SparseTileLayerContentKey(
+                layerID: fixture.layerID,
+                roles: [fixture.request.contentKey]
+            )],
+            addressingRevision: 1,
+            outputGeometryRevision: 1,
+            outputMapping: .periodic(mapping)
+        )
+        let expected = expectedPeriodicPages(
+            fold: fold,
+            transform: transform,
+            output: output
+        )
+
+        let lease = try SparseTileSamplingPlanCache().acquire(
+            key: key,
+            sources: [fixture.request],
+            outputRegion: output,
+            limits: .testDefaults
+        )
+        #expect(Set(lease.content.bindingRecords.map(\.reference.coordinate))
+            == expected)
+        #expect(lease.content.outputMapping == .periodic(mapping))
+        try lease.retire()
+        #expect(fixture.request.provider.backingSnapshot().activeLeaseCount == 0)
+    }
+
+    @Test
+    func periodicFallbackBatchesReuseExactReachabilityBelowSixteenTextures()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 1_536, height: 1_536)
+        let fold = try periodicFold(.halfDrop, rasterSize: size)
+        let coordinates = allPageCoordinates(size)
+        let fixture = try makeSource(
+            device: device,
+            pixelSize: size,
+            coordinates: coordinates,
+            addressing: .periodic(period: size)
+        )
+        let output = try region(-6, -6, 7, 7)
+        let transform = SparseTileOutputToSourceTransform(
+            sourceOffset: SIMD2(767.5, 767.5),
+            sourceStep: SIMD2(255.75, 255.75)
+        )
+        let mapping = SparseTilePeriodicOutputMapping(
+            fold: fold,
+            outputToWorldTransform: transform
+        )
+        let key = SparseTileSamplingPlanKey(
+            documentGeneration: 7,
+            orderedLayers: [SparseTileLayerContentKey(
+                layerID: fixture.layerID,
+                roles: [fixture.request.contentKey]
+            )],
+            addressingRevision: 1,
+            outputGeometryRevision: 1,
+            outputMapping: .periodic(mapping)
+        )
+
+        let lease = try SparseTileSamplingPlanCache().acquire(
+            key: key,
+            sources: [fixture.request],
+            outputRegion: output,
+            limits: .testDefaults
+        )
+        #expect(lease.content.bindingRecords.count > 16)
+        #expect(lease.content.batches.count > 1)
+        #expect(lease.content.batches.allSatisfy {
+            $0.globalSlots.count <= SparseSamplingABI.maximumFallbackTextures
+        })
+        for batch in lease.content.batches {
+            let expected = expectedPeriodicPages(
+                fold: fold,
+                transform: transform,
+                output: output,
+                subregion: batch.outputRegion
+            )
+            let actual = Set(batch.globalSlots.compactMap { slot in
+                lease.content.bindingRecords.first {
+                    $0.globalSlot == slot
+                }?.reference.coordinate
+            })
+            #expect(actual == expected)
+        }
+        try lease.retire()
+        #expect(fixture.request.provider.backingSnapshot().activeLeaseCount == 0)
+    }
+
+    @Test
+    func periodicObliqueSeamAfterFirst4096CentersIsNotMissed() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 1_536, height: 1_536)
+        let fold = try orientedPeriodicFold(
+            .squareRotation,
+            rasterSize: size,
+            orientationRadians: .pi / 7
+        )
+        let output = try region(0, 0, 129, 65)
+        #expect(output.width * output.height > 4_096)
+
+        // Put an oblique lattice-cell boundary through the lower-right portion
+        // of the region. Row-major traversal cannot encounter it among the
+        // first 4,096 pixel centers.
+        let seamLocal = SIMD2<Float>(126.25, 48.75)
+        let seamWorld = fold.worldToLattice.inverted().applying(
+            to: SIMD2<Float>(1, 0.375)
+        )
+        let transform = SparseTileOutputToSourceTransform(
+            sourceOffset: seamWorld - seamLocal,
+            sourceStep: SIMD2(repeating: 1)
+        )
+        let expected = expectedPeriodicPages(
+            fold: fold,
+            transform: transform,
+            output: output
+        )
+        let first4096 = expectedPeriodicPages(
+            fold: fold,
+            transform: transform,
+            output: output,
+            maximumPixelCenters: 4_096
+        )
+        #expect(!expected.subtracting(first4096).isEmpty)
+
+        let fixture = try makeSource(
+            device: device,
+            pixelSize: size,
+            coordinates: allPageCoordinates(size),
+            addressing: .periodic(period: size)
+        )
+        let mapping = SparseTilePeriodicOutputMapping(
+            fold: fold,
+            outputToWorldTransform: transform
+        )
+        let key = SparseTileSamplingPlanKey(
+            documentGeneration: 7,
+            orderedLayers: [SparseTileLayerContentKey(
+                layerID: fixture.layerID,
+                roles: [fixture.request.contentKey]
+            )],
+            addressingRevision: 1,
+            outputGeometryRevision: 1,
+            outputMapping: .periodic(mapping)
+        )
+
+        let lease = try SparseTileSamplingPlanCache().acquire(
+            key: key,
+            sources: [fixture.request],
+            outputRegion: output,
+            limits: .testDefaults
+        )
+        #expect(Set(lease.content.bindingRecords.map(\.reference.coordinate))
+            == expected)
+        try lease.retire()
+        #expect(fixture.request.provider.backingSnapshot().activeLeaseCount == 0)
+    }
+
+    @Test
+    func unitLatticeThinDiagonalRetainsOnlyExactlyReachablePages() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 2_048, height: 2_048)
+        let fold = try orientedPeriodicFold(
+            .squareRotation,
+            rasterSize: size,
+            orientationRadians: .pi / 4
+        )
+        let output = try region(0, 0, 1_024, 1)
+        let step: Float = 1.9
+        let firstLatticeCenter = SIMD2<Float>(0.1, 0.8)
+        let firstWorldCenter = fold.worldToLattice.inverted().applying(
+            to: firstLatticeCenter
+        )
+        let transform = SparseTileOutputToSourceTransform(
+            sourceOffset: firstWorldCenter - SIMD2<Float>(
+                repeating: 0.5 * step
+            ),
+            sourceStep: SIMD2(repeating: step)
+        )
+        let expected = expectedPeriodicPages(
+            fold: fold,
+            transform: transform,
+            output: output
+        )
+        #expect(expected.count < 24)
+
+        let fixture = try makeSource(
+            device: device,
+            pixelSize: size,
+            coordinates: allPageCoordinates(size),
+            addressing: .periodic(period: size)
+        )
+        let mapping = SparseTilePeriodicOutputMapping(
+            fold: fold,
+            outputToWorldTransform: transform
+        )
+        let key = SparseTileSamplingPlanKey(
+            documentGeneration: 7,
+            orderedLayers: [SparseTileLayerContentKey(
+                layerID: fixture.layerID,
+                roles: [fixture.request.contentKey]
+            )],
+            addressingRevision: 1,
+            outputGeometryRevision: 1,
+            outputMapping: .periodic(mapping)
+        )
+        let before = fixture.request.provider.backingSnapshot()
+
+        let lease = try SparseTileSamplingPlanCache().acquire(
+            key: key,
+            sources: [fixture.request],
+            outputRegion: output,
+            limits: limits(maximumBindingSlots: 24)
+        )
+        let actual = Set(
+            lease.content.bindingRecords.map(\.reference.coordinate)
+        )
+        #expect(actual == expected)
+        #expect(lease.content.bindingRecords.count == expected.count)
+        // One aggregate exact-reference lease must back the exact selected
+        // binding set; no unreachable page may create another reference.
+        let retained = fixture.request.provider.backingSnapshot()
+        #expect(retained.activeLeaseCount == 1)
+        #expect(Set(retained.entries.filter { !$0.pinCounts.isEmpty }
+            .map(\.identity.coordinate)) == expected)
+        try lease.retire()
+        let after = fixture.request.provider.backingSnapshot()
+        #expect(after.activeLeaseCount == before.activeLeaseCount)
+        #expect(after.entries.allSatisfy { $0.pinCounts.isEmpty })
+    }
+
+    @Test
+    func axisAlignedSparseStepRetainsOnlySampledBilinearPages() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 2_048, height: 2_048)
+        let fold = try periodicFold(.grid, rasterSize: size)
+        let output = try region(0, 0, 2, 1)
+        let transform = SparseTileOutputToSourceTransform(
+            sourceOffset: SIMD2(-511.5, 0),
+            sourceStep: SIMD2(1_024, 1)
+        )
+        let expected = expectedPeriodicPages(
+            fold: fold,
+            transform: transform,
+            output: output
+        )
+        #expect(expected == [
+            PaintTileCoordinate(x: 0, y: 0),
+            PaintTileCoordinate(x: 4, y: 0),
+        ])
+        let fixture = try makeSource(
+            device: device,
+            pixelSize: size,
+            coordinates: allPageCoordinates(size),
+            addressing: .periodic(period: size)
+        )
+        let mapping = SparseTilePeriodicOutputMapping(
+            fold: fold,
+            outputToWorldTransform: transform
+        )
+        let key = SparseTileSamplingPlanKey(
+            documentGeneration: 7,
+            orderedLayers: [SparseTileLayerContentKey(
+                layerID: fixture.layerID,
+                roles: [fixture.request.contentKey]
+            )],
+            addressingRevision: 1,
+            outputGeometryRevision: 1,
+            outputMapping: .periodic(mapping)
+        )
+        let before = fixture.request.provider.backingSnapshot()
+
+        let lease = try SparseTileSamplingPlanCache().acquire(
+            key: key,
+            sources: [fixture.request],
+            outputRegion: output,
+            limits: limits(maximumBindingSlots: expected.count)
+        )
+        #expect(Set(lease.content.bindingRecords.map(\.reference.coordinate))
+            == expected)
+        #expect(lease.content.bindingRecords.count == expected.count)
+        let retained = fixture.request.provider.backingSnapshot()
+        #expect(retained.activeLeaseCount == 1)
+        #expect(Set(retained.entries.filter { !$0.pinCounts.isEmpty }
+            .map(\.identity.coordinate)) == expected)
+        try lease.retire()
+        let after = fixture.request.provider.backingSnapshot()
+        #expect(after.activeLeaseCount == before.activeLeaseCount)
+        #expect(after.entries.allSatisfy { $0.pinCounts.isEmpty })
+    }
+
+    @Test(arguments: [
+        SymmetryPresetID.squareRotation,
+        .rotation3,
+    ])
+    func productionViewportPeriodicReachabilityUsesBoundedSubdivision(
+        preset: SymmetryPresetID
+    ) throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 4_096, height: 4_096)
+        let fold = try orientedPeriodicFold(
+            preset,
+            rasterSize: size,
+            orientationRadians: .pi / 7
+        )
+        let output = try region(0, 0, 3_024, 1_964)
+        let mapping = SparseTilePeriodicOutputMapping(
+            fold: fold,
+            outputToWorldTransform: SparseTileOutputToSourceTransform(
+                sourceOffset: SIMD2(-1_205.25, -773.5),
+                sourceStep: SIMD2(repeating: 0.625)
+            )
+        )
+        let expected = try SparseTileSamplingPlanBuilder
+            .testingPeriodicReachabilityReceipt(
+                for: output,
+                mapping: mapping,
+                addressing: .periodic(period: size)
+            )
+        let coordinates = expected.physicalPages.sorted()
+        let layerID = UUID()
+        let sources = try SparseTileSampleRole.allCases.map { role in
+            try makeRequest(
+                device: device,
+                layerID: layerID,
+                role: role,
+                pixelSize: size,
+                coordinates: coordinates,
+                addressing: .periodic(period: size),
+                contentRevision: UInt64(role.rawValue) + 1
+            )
+        }
+        let key = SparseTileSamplingPlanKey(
+            documentGeneration: 7,
+            orderedLayers: [SparseTileLayerContentKey(
+                layerID: layerID,
+                roles: sources.map(\.contentKey)
+            )],
+            addressingRevision: 1,
+            outputGeometryRevision: 1,
+            outputMapping: .periodic(mapping)
+        )
+        let metadata = try sources.map { source in
+            try SparseTileSourceSnapshot(
+                contentKey: source.contentKey,
+                addressing: source.addressing,
+                layerID: source.layerID,
+                references: source.references,
+                changedCoordinates: source.changedCoordinates,
+                disposition: source.disposition
+            )
+        }
+        let fullContent = try SparseTileSamplingPlanBuilder.buildFull(
+            key: key,
+            sources: metadata,
+            outputRegion: output,
+            limits: .testDefaults
+        )
+        #expect(Set(fullContent.bindingRecords.map {
+            SparseTileRecordCoordinateKey(
+                layerID: $0.layerID,
+                role: $0.role,
+                coordinate: $0.reference.coordinate
+            )
+        }) == Set(SparseTileSampleRole.allCases.flatMap { role in
+            coordinates.map {
+                SparseTileRecordCoordinateKey(
+                    layerID: layerID,
+                    role: role,
+                    coordinate: $0
+                )
+            }
+        }))
+        let selection = try SparseTileOwnedSourceBatch.selecting(
+            sources: sources,
+            key: key,
+            outputRegion: output
+        )
+        let phaseA = try #require(
+            selection.testingPeriodicReachabilityReceipt
+        )
+        #expect(phaseA.physicalPages == expected.physicalPages)
+        #expect(try selection.selectedReferenceCount()
+            == coordinates.count * SparseTileSampleRole.allCases.count)
+        let batch = try SparseTileOwnedSourceBatch.capturing(selection)
+        let cache = SparseTileSamplingPlanCache()
+        let lease = try cache.acquire(
+            key: key,
+            sourceBatch: batch,
+            outputRegion: output,
+            limits: .testDefaults
+        )
+        let receipt = try #require(
+            cache.testingLastPeriodicReachabilityReceipt
+        )
+        let area = output.width * output.height
+        #expect(area == 5_939_136)
+        #expect(!receipt.physicalPages.isEmpty)
+        #expect(receipt.singlePageFastPathCount > 0)
+        #expect(
+            receipt.enumeratedPixelCenterCount < 50_000,
+            "\(receipt)"
+        )
+        #expect(receipt.visitedNodeCount < 50_000, "\(receipt)")
+        #expect(receipt.subdivisionCount < receipt.visitedNodeCount)
+        #expect(receipt.cacheHitCount > 2, "\(receipt)")
+        // Every corner/signature/fold/witness/page walk is charged, so this
+        // honest aggregate stays below half the production 250k hard cap while
+        // expensive discrete-center enumeration remains below 50k.
+        #expect(receipt.workCount < 125_000, "\(receipt)")
+        #expect(receipt.phaseAWorkCount == phaseA.workCount)
+        #expect(receipt.acquisitionWorkCount
+            < receipt.phaseAWorkCount / 10, "\(receipt)")
+        for source in sources {
+            let backing = source.provider.backingSnapshot()
+            #expect(Set(backing.entries.filter { !$0.pinCounts.isEmpty }
+                .map(\.identity.coordinate)) == expected.physicalPages)
+        }
+        try lease.retire()
+        for source in sources {
+            let backing = source.provider.backingSnapshot()
+            #expect(backing.activeLeaseCount == 0)
+            #expect(backing.entries.allSatisfy { $0.pinCounts.isEmpty })
+        }
+    }
+
+    @Test
+    func periodicReachabilitySplitsProjectedFoldAmbiguityBeforeScreenLength()
+        throws
+    {
+        let size = PixelSize(width: 512, height: 512)
+        let fold = try periodicFold(.grid, rasterSize: size)
+        let output = try region(0, 0, 3_024, 2)
+        let transform = SparseTileOutputToSourceTransform(
+            sourceOffset: SIMD2(100, -0.5),
+            sourceStep: SIMD2(0, 512)
+        )
+        let mapping = SparseTilePeriodicOutputMapping(
+            fold: fold,
+            outputToWorldTransform: transform
+        )
+        let receipt = try SparseTileSamplingPlanBuilder
+            .testingPeriodicReachabilityReceipt(
+                for: output,
+                mapping: mapping,
+                addressing: .periodic(period: size)
+            )
+        #expect(receipt.physicalPages == expectedPeriodicPages(
+            fold: fold,
+            transform: transform,
+            output: output
+        ))
+        #expect(receipt.visitedNodeCount == 3, "\(receipt)")
+        #expect(receipt.subdivisionCount == 1, "\(receipt)")
+        #expect(receipt.enumeratedPixelCenterCount == 0, "\(receipt)")
+        // Root signature work (5), two proved children (14 each), and the
+        // four-entry recursive Set merge are all charged.
+        #expect(receipt.workCount == 37, "\(receipt)")
+    }
+
+    @Test
+    func periodicReachabilityBudgetsFailTypedWithoutLeasesOrSlotDebt() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 2_048, height: 2_048)
+        let fold = try orientedPeriodicFold(
+            .rotation3,
+            rasterSize: size,
+            orientationRadians: .pi / 7
+        )
+        let output = try region(0, 0, 2_048, 2_048)
+        let mapping = SparseTilePeriodicOutputMapping(
+            fold: fold,
+            outputToWorldTransform: SparseTileOutputToSourceTransform(
+                sourceOffset: SIMD2(-421.25, -317.75),
+                sourceStep: SIMD2(repeating: 0.75)
+            )
+        )
+        let fixture = try makeSource(
+            device: device,
+            pixelSize: size,
+            coordinates: allPageCoordinates(size),
+            addressing: .periodic(period: size)
+        )
+        let before = fixture.request.provider.backingSnapshot()
+
+        let axisMapping = SparseTilePeriodicOutputMapping(
+            fold: try periodicFold(.grid, rasterSize: size),
+            outputToWorldTransform: SparseTileOutputToSourceTransform(
+                sourceOffset: .zero,
+                sourceStep: SIMD2(1_024, 1)
+            )
+        )
+        let axisKey = SparseTileSamplingPlanKey(
+            documentGeneration: 7,
+            orderedLayers: [SparseTileLayerContentKey(
+                layerID: fixture.layerID,
+                roles: [fixture.request.contentKey]
+            )],
+            addressingRevision: 1,
+            outputGeometryRevision: 1,
+            outputMapping: .periodic(axisMapping)
+        )
+        // One node, five upper-bound page visits, three discrete axis centers,
+        // then two exact Cartesian page insertions. These thresholds prove all
+        // formerly hidden variable loops participate in the hard budget.
+        for maximum in [13, 15, 18, 20] {
+            #expect(throws: SparseTileSamplingPlanError
+                .periodicReachabilityWorkLimitExceeded(maximum: maximum)) {
+                _ = try SparseTileOwnedSourceBatch.selecting(
+                    sources: [fixture.request],
+                    key: axisKey,
+                    outputRegion: try region(0, 0, 2, 1),
+                    maximumPeriodicReachabilityWork: maximum
+                )
+            }
+        }
+        #expect(fixture.request.provider.backingSnapshot() == before)
+
+        // A complete immutable seed must not bypass a stricter Phase-B cap
+        // merely because every acquisition lookup is a cache hit.
+        let onePixel = try region(0, 0, 1, 1)
+        let fullSeedSelection = try SparseTileOwnedSourceBatch.selecting(
+            sources: [fixture.request],
+            key: axisKey,
+            outputRegion: onePixel
+        )
+        #expect(try #require(fullSeedSelection
+            .testingPeriodicReachabilityReceipt).phaseAWorkCount > 1)
+        let fullSeedBatch = try SparseTileOwnedSourceBatch.capturing(
+            fullSeedSelection
+        )
+        let strictSeedCache = SparseTileSamplingPlanCache(
+            maximumPeriodicReachabilityWork: 1
+        )
+        #expect(throws: SparseTileSamplingPlanError
+            .periodicReachabilityWorkLimitExceeded(maximum: 1)) {
+            _ = try strictSeedCache.acquire(
+                key: axisKey,
+                sourceBatch: fullSeedBatch,
+                outputRegion: onePixel,
+                limits: .testDefaults
+            )
+        }
+        #expect(fixture.request.provider.backingSnapshot() == before)
+        #expect(strictSeedCache.snapshot().activeContentAcquisitionCount == 0)
+        #expect(strictSeedCache.snapshot().pendingRetirementCount == 0)
+
+        let key = SparseTileSamplingPlanKey(
+            documentGeneration: 7,
+            orderedLayers: [SparseTileLayerContentKey(
+                layerID: fixture.layerID,
+                roles: [fixture.request.contentKey]
+            )],
+            addressingRevision: 1,
+            outputGeometryRevision: 1,
+            outputMapping: .periodic(mapping)
+        )
+        #expect(throws: SparseTileSamplingPlanError
+            .periodicReachabilityWorkLimitExceeded(maximum: 1)) {
+            _ = try SparseTileOwnedSourceBatch.selecting(
+                sources: [fixture.request],
+                key: key,
+                outputRegion: output,
+                maximumPeriodicReachabilityWork: 1
+            )
+        }
+        #expect(fixture.request.provider.backingSnapshot() == before)
+
+        let completeSelection = try SparseTileOwnedSourceBatch.selecting(
+            sources: [fixture.request],
+            key: key,
+            outputRegion: output
+        )
+        let phaseAWork = try #require(completeSelection
+            .testingPeriodicReachabilityReceipt).phaseAWorkCount
+        let selection = completeSelection
+            .testingWithRootOnlyPeriodicReachabilitySeed()
+        #expect(try selection.selectedReferenceCount() > 16)
+        let batch = try SparseTileOwnedSourceBatch.capturing(selection)
+        let retained = fixture.request.provider.backingSnapshot()
+        #expect(retained.activeLeaseCount == 0)
+        #expect(retained.entries.reduce(0) {
+            $0 + $1.snapshotRetainCount
+        } > 0)
+        let cache = SparseTileSamplingPlanCache(
+            maximumPeriodicReachabilityWork: phaseAWork
+        )
+        #expect(throws: SparseTileSamplingPlanError
+            .periodicReachabilityWorkLimitExceeded(maximum: phaseAWork)) {
+            _ = try cache.acquire(
+                key: key,
+                sourceBatch: batch,
+                outputRegion: output,
+                limits: .testDefaults
+            )
+        }
+        let after = fixture.request.provider.backingSnapshot()
+        #expect(after.activeLeaseCount == 0)
+        #expect(after.entries.allSatisfy { $0.snapshotRetainCount == 0 })
+        #expect(after.entries.allSatisfy { $0.pinCounts.isEmpty })
+        let cacheSnapshot = cache.snapshot()
+        #expect(cacheSnapshot.activeContentAcquisitionCount == 0)
+        #expect(cacheSnapshot.pendingRetirementCount == 0)
+        #expect(cache.testingActiveContentIdentityCount == 0)
+    }
+
+    @Test
+    func periodicOnePixelFallbackUsesExactFoldedBilinearHalo() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 1_536, height: 1_536)
+        let fold = try orientedPeriodicFold(
+            .squareRotation,
+            rasterSize: size,
+            orientationRadians: -.pi / 9
+        )
+        let targetCanonical = SIMD2<Float>(255.6, 255.6)
+        let targetWorld = fold.worldToLattice.inverted().applying(
+            to: targetCanonical / Float(size.width)
+        )
+        let transform = SparseTileOutputToSourceTransform(
+            sourceOffset: targetWorld - SIMD2<Float>(repeating: 0.5),
+            sourceStep: SIMD2(repeating: 1)
+        )
+        let output = try region(0, 0, 1, 1)
+        let expected = expectedPeriodicPages(
+            fold: fold,
+            transform: transform,
+            output: output
+        )
+        #expect(expected.count == 4)
+
+        let fixture = try makeSource(
+            device: device,
+            pixelSize: size,
+            coordinates: allPageCoordinates(size),
+            addressing: .periodic(period: size)
+        )
+        let mapping = SparseTilePeriodicOutputMapping(
+            fold: fold,
+            outputToWorldTransform: transform
+        )
+        let key = SparseTileSamplingPlanKey(
+            documentGeneration: 7,
+            orderedLayers: [SparseTileLayerContentKey(
+                layerID: fixture.layerID,
+                roles: [fixture.request.contentKey]
+            )],
+            addressingRevision: 1,
+            outputGeometryRevision: 1,
+            outputMapping: .periodic(mapping)
+        )
+
+        let lease = try SparseTileSamplingPlanCache().acquire(
+            key: key,
+            sources: [fixture.request],
+            outputRegion: output,
+            limits: .testDefaults
+        )
+        #expect(Set(lease.content.bindingRecords.map(\.reference.coordinate))
+            == expected)
+        #expect(lease.content.batches.count == 1)
+        #expect(lease.content.batches[0].globalSlots.count == 4)
+        try lease.retire()
+        #expect(fixture.request.provider.backingSnapshot().activeLeaseCount == 0)
+    }
+
+    @Test
+    func obliqueLatticeReachabilityPinsOnlyPreciseTask7Pages()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 1_536, height: 1_536)
+        let fold = try orientedPeriodicFold(
+            .squareRotation,
+            rasterSize: size,
+            orientationRadians: .pi / 7
+        )
+        let world = SIMD2<Float>(
+            Float(bitPattern: 1_232_348_175),
+            Float(bitPattern: 1_302_845_308)
+        )
+        let transform = SparseTileOutputToSourceTransform(
+            sourceOffset: world - SIMD2<Float>(repeating: 0.5),
+            sourceStep: SIMD2(repeating: 1)
+        )
+        let output = try region(0, 0, 1, 1)
+        let expected = expectedPeriodicPages(
+            fold: fold,
+            transform: transform,
+            output: output
+        )
+        #expect(Set(expected.map(\.x)) == [2])
+
+        let fixture = try makeSource(
+            device: device,
+            pixelSize: size,
+            coordinates: allPageCoordinates(size),
+            addressing: .periodic(period: size)
+        )
+        let mapping = SparseTilePeriodicOutputMapping(
+            fold: fold,
+            outputToWorldTransform: transform
+        )
+        let key = SparseTileSamplingPlanKey(
+            documentGeneration: 7,
+            orderedLayers: [SparseTileLayerContentKey(
+                layerID: fixture.layerID,
+                roles: [fixture.request.contentKey]
+            )],
+            addressingRevision: 1,
+            outputGeometryRevision: 1,
+            outputMapping: .periodic(mapping)
+        )
+
+        let lease = try SparseTileSamplingPlanCache().acquire(
+            key: key,
+            sources: [fixture.request],
+            outputRegion: output,
+            limits: .testDefaults
+        )
+        #expect(Set(lease.content.bindingRecords.map(
+            \.reference.coordinate
+        )) == expected)
+        #expect(Set(fixture.request.provider.backingSnapshot().entries
+            .filter { !$0.pinCounts.isEmpty }
+            .map(\.identity.coordinate)) == expected)
+        try lease.retire()
+    }
+
+    @Test
+    func largeTriangularUnitLatticeUsesModuloWithoutInt32CellNarrowing()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 512, height: 512)
+        let fold = try orientedPeriodicFold(
+            .rotation3,
+            rasterSize: size,
+            orientationRadians: .pi / 7
+        )
+        #expect(fold.coordinateSpace == .unitLattice)
+        #expect(fold.family == .triangular)
+        let large = Float(Int32.max) * 8
+        let world = SIMD2<Float>(large, -large.nextDown)
+        let transform = SparseTileOutputToSourceTransform(
+            sourceOffset: world - SIMD2<Float>(repeating: 0.5),
+            sourceStep: SIMD2(repeating: 1)
+        )
+        let output = try region(0, 0, 1, 1)
+        let expected = expectedPeriodicPages(
+            fold: fold,
+            transform: transform,
+            output: output
+        )
+        #expect(!expected.isEmpty)
+        let fixture = try makeSource(
+            device: device,
+            pixelSize: size,
+            coordinates: allPageCoordinates(size),
+            addressing: .periodic(period: size)
+        )
+        let mapping = SparseTilePeriodicOutputMapping(
+            fold: fold,
+            outputToWorldTransform: transform
+        )
+        let key = SparseTileSamplingPlanKey(
+            documentGeneration: 7,
+            orderedLayers: [SparseTileLayerContentKey(
+                layerID: fixture.layerID,
+                roles: [fixture.request.contentKey]
+            )],
+            addressingRevision: 1,
+            outputGeometryRevision: 1,
+            outputMapping: .periodic(mapping)
+        )
+        let lease = try SparseTileSamplingPlanCache().acquire(
+            key: key,
+            sources: [fixture.request],
+            outputRegion: output,
+            limits: .testDefaults
+        )
+        #expect(Set(lease.content.bindingRecords.map(
+            \.reference.coordinate
+        )) == expected)
+        #expect(Set(fixture.request.provider.backingSnapshot().entries
+            .filter { !$0.pinCounts.isEmpty }
+            .map(\.identity.coordinate)) == expected)
+        try lease.retire()
+        #expect(fixture.request.provider.backingSnapshot()
+            .entries.allSatisfy { $0.pinCounts.isEmpty })
+    }
+
+    @Test
+    func largeRectangularUnitLatticeRejectsTask7InexactCellBeforeRetention()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 512, height: 512)
+        let fold = try orientedPeriodicFold(
+            .squareRotation,
+            rasterSize: size,
+            orientationRadians: .pi / 7
+        )
+        #expect(fold.coordinateSpace == .unitLattice)
+        #expect(fold.family == .rectangular)
+        let large = Float(Int32.max) * 8
+        let world = SIMD2<Float>(large, -large.nextDown)
+        let fixture = try makeSource(
+            device: device,
+            pixelSize: size,
+            coordinates: allPageCoordinates(size),
+            addressing: .periodic(period: size)
+        )
+        let before = fixture.request.provider.backingSnapshot()
+        let mapping = SparseTilePeriodicOutputMapping(
+            fold: fold,
+            outputToWorldTransform: SparseTileOutputToSourceTransform(
+                sourceOffset: world - SIMD2<Float>(repeating: 0.5),
+                sourceStep: .one
+            )
+        )
+        let key = SparseTileSamplingPlanKey(
+            documentGeneration: 7,
+            orderedLayers: [SparseTileLayerContentKey(
+                layerID: fixture.layerID,
+                roles: [fixture.request.contentKey]
+            )],
+            addressingRevision: 1,
+            outputGeometryRevision: 1,
+            outputMapping: .periodic(mapping)
+        )
+        #expect(throws: SparseTileSamplingPlanError
+            .invalidOutputToSourceTransform) {
+            _ = try SparseTileOwnedSourceBatch.selecting(
+                sources: [fixture.request],
+                key: key,
+                outputRegion: try region(0, 0, 1, 1)
+            )
+        }
+        #expect(fixture.request.provider.backingSnapshot() == before)
+    }
+
+    @Test
+    func axisFoldScalingPinsOnlyPreciseTask7LowerNeighbors() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 512, height: 512)
+        let repeatWidth: Float = 1_000.7
+        let remainder = Float(bitPattern: 0x43f9_afb6)
+        let scalarCanonical = remainder * Float(size.width) / repeatWidth
+        let reassociatedCanonical = remainder
+            * (Float(size.width) / repeatWidth)
+        #expect(scalarCanonical < 255.5)
+        #expect(reassociatedCanonical == 255.5)
+        let fold = CompiledPeriodicDisplayFold(
+            family: .rectangular,
+            coordinateSpace: .axisAlignedRepeat,
+            worldToLattice: .identity,
+            canonicalSize: PatternSize(width: 512, height: 512),
+            repeatSize: PatternSize(width: repeatWidth, height: 512),
+            phase: nil,
+            alternatingReflections: []
+        )
+        let transform = SparseTileOutputToSourceTransform(
+            sourceOffset: SIMD2(remainder - 0.5, 63.5),
+            sourceStep: SIMD2(repeating: 1)
+        )
+        let output = try region(0, 0, 1, 1)
+        let fixture = try makeSource(
+            device: device,
+            pixelSize: size,
+            coordinates: allPageCoordinates(size),
+            addressing: .periodic(period: size)
+        )
+        let mapping = SparseTilePeriodicOutputMapping(
+            fold: fold,
+            outputToWorldTransform: transform
+        )
+        let key = SparseTileSamplingPlanKey(
+            documentGeneration: 7,
+            orderedLayers: [SparseTileLayerContentKey(
+                layerID: fixture.layerID,
+                roles: [fixture.request.contentKey]
+            )],
+            addressingRevision: 1,
+            outputGeometryRevision: 1,
+            outputMapping: .periodic(mapping)
+        )
+
+        let lease = try SparseTileSamplingPlanCache().acquire(
+            key: key,
+            sources: [fixture.request],
+            outputRegion: output,
+            limits: .testDefaults
+        )
+        let selectedXPages = Set(
+            lease.content.bindingRecords.map(\.reference.coordinate.x)
+        )
+        let expected = expectedPeriodicPages(
+            fold: fold,
+            transform: transform,
+            output: output
+        )
+        #expect(Set(expected.map(\.x)) == [0])
+        #expect(selectedXPages == Set(expected.map(\.x)))
+        #expect(Set(fixture.request.provider.backingSnapshot().entries
+            .filter { !$0.pinCounts.isEmpty }
+            .map(\.identity.coordinate)) == expected)
+        try lease.retire()
+    }
+
+    @Test
+    func negativePhaseAndOddReflectionPinOnlyPreciseTask7Neighbors()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 512, height: 512)
+        let repeatWidth: Float = 1_000.7
+        let remainder = Float(bitPattern: 0x43f9_afb8)
+        let phaseOffset = repeatWidth * 0.5
+        let phasedX = remainder - repeatWidth
+        let world = SIMD2<Float>(phasedX + phaseOffset, -0.5)
+        let fold = CompiledPeriodicDisplayFold(
+            family: .rectangular,
+            coordinateSpace: .axisAlignedRepeat,
+            worldToLattice: .identity,
+            canonicalSize: PatternSize(width: 512, height: 512),
+            repeatSize: PatternSize(width: repeatWidth, height: 512),
+            phase: PeriodicPhaseProgram(
+                indexAxis: .y,
+                offsetAxis: .x,
+                fractions: [0, 0.5]
+            ),
+            alternatingReflections: [.x]
+        )
+        let compiled = fold.applying(to: WorldPoint(world))
+        #expect(compiled.x == 256.5)
+        let reassociatedLocal = remainder * (512 / repeatWidth)
+        let reassociatedReflected = (512 as Float) - reassociatedLocal
+        #expect(reassociatedReflected < 256.5)
+        let transform = SparseTileOutputToSourceTransform(
+            sourceOffset: world - SIMD2<Float>(repeating: 0.5),
+            sourceStep: SIMD2(repeating: 1)
+        )
+        let fixture = try makeSource(
+            device: device,
+            pixelSize: size,
+            coordinates: allPageCoordinates(size),
+            addressing: .periodic(period: size)
+        )
+        let mapping = SparseTilePeriodicOutputMapping(
+            fold: fold,
+            outputToWorldTransform: transform
+        )
+        let key = SparseTileSamplingPlanKey(
+            documentGeneration: 7,
+            orderedLayers: [SparseTileLayerContentKey(
+                layerID: fixture.layerID,
+                roles: [fixture.request.contentKey]
+            )],
+            addressingRevision: 1,
+            outputGeometryRevision: 1,
+            outputMapping: .periodic(mapping)
+        )
+        let output = try region(0, 0, 1, 1)
+        let lease = try SparseTileSamplingPlanCache().acquire(
+            key: key,
+            sources: [fixture.request],
+            outputRegion: output,
+            limits: .testDefaults
+        )
+        let expected = expectedPeriodicPages(
+            fold: fold,
+            transform: transform,
+            output: output
+        )
+        #expect(Set(expected.map(\.x)) == [1])
+        #expect(Set(lease.content.bindingRecords.map(
+            \.reference.coordinate
+        )) == expected)
+        #expect(Set(fixture.request.provider.backingSnapshot().entries
+            .filter { !$0.pinCounts.isEmpty }
+            .map(\.identity.coordinate)) == expected)
+        try lease.retire()
+    }
+
     @Test
     func finiteRadialMappingIdentityCannotAliasAffinePlanIdentity() throws {
         let strategy = try TilingStrategy(
@@ -3071,6 +4294,116 @@ struct SparseTileSamplingPlanTests {
     }
 
     @Test
+    func buildFromSelectionCannotWidenRestrictedPeriodicEntitlement() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 512, height: 256)
+        let fixture = try makeSource(
+            device: device,
+            pixelSize: size,
+            coordinates: [.init(x: 0, y: 0), .init(x: 1, y: 0)],
+            addressing: .periodic(period: size)
+        )
+        let references = fixture.request.references
+        let restrictedProvider = try fixture.request.provider
+            .restrictingEntitlement(to: [references[0]])
+        let restricted = try SparseTileSourceRequest(
+            contentKey: fixture.request.contentKey,
+            addressing: fixture.request.addressing,
+            provider: restrictedProvider,
+            changedCoordinates: [],
+            disposition: fixture.request.disposition,
+            referenceScope: .entitlement
+        )
+        let mapping = SparseTilePeriodicOutputMapping(
+            fold: try periodicFold(.grid, rasterSize: size),
+            outputToWorldTransform: .identity
+        )
+        let key = SparseTileSamplingPlanKey(
+            documentGeneration: 7,
+            orderedLayers: [SparseTileLayerContentKey(
+                layerID: fixture.layerID,
+                roles: [fixture.request.contentKey]
+            )],
+            addressingRevision: 1,
+            outputGeometryRevision: 1,
+            outputMapping: .periodic(mapping)
+        )
+        let output = try region(0, 0, 512, 1)
+        let before = restrictedProvider.backingSnapshot()
+        let selection = try SparseTileOwnedSourceBatch.selecting(
+            sources: [restricted],
+            key: key,
+            outputRegion: output
+        )
+        #expect(try selection.selectedReferenceCount() == 1)
+
+        #expect(throws: SparseTileSamplingPlanError
+            .sourceBatchSelectionMismatch(sourceIndex: 0)) {
+            _ = try SparseTileSamplingPlanBuilder.buildFull(
+                key: key,
+                selection: selection,
+                outputRegion: output,
+                limits: .testDefaults
+            )
+        }
+        #expect(restrictedProvider.backingSnapshot() == before)
+    }
+
+    @Test
+    func buildFromSelectionRejectsPeriodicMappingKindSubstitution() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 256, height: 256)
+        let fixture = try makeSource(
+            device: device,
+            pixelSize: size,
+            coordinates: [.init(x: 0, y: 0)],
+            addressing: .periodic(period: size)
+        )
+        let output = try region(0, 0, 1, 1)
+        let affineKey = fixture.key
+        let periodicKey = SparseTileSamplingPlanKey(
+            documentGeneration: 7,
+            orderedLayers: [SparseTileLayerContentKey(
+                layerID: fixture.layerID,
+                roles: [fixture.request.contentKey]
+            )],
+            addressingRevision: 1,
+            outputGeometryRevision: 1,
+            outputMapping: .periodic(SparseTilePeriodicOutputMapping(
+                fold: try periodicFold(.grid, rasterSize: size),
+                outputToWorldTransform: .identity
+            ))
+        )
+        let affineSelection = try SparseTileOwnedSourceBatch.selecting(
+            sources: [fixture.request],
+            key: affineKey,
+            outputRegion: output
+        )
+        let periodicSelection = try SparseTileOwnedSourceBatch.selecting(
+            sources: [fixture.request],
+            key: periodicKey,
+            outputRegion: output
+        )
+
+        #expect(throws: SparseTileSamplingPlanError.inconsistentAddressing) {
+            _ = try SparseTileSamplingPlanBuilder.buildFull(
+                key: periodicKey,
+                selection: affineSelection,
+                outputRegion: output,
+                limits: .testDefaults
+            )
+        }
+        #expect(throws: SparseTileSamplingPlanError.inconsistentAddressing) {
+            _ = try SparseTileSamplingPlanBuilder.buildFull(
+                key: affineKey,
+                selection: periodicSelection,
+                outputRegion: output,
+                limits: .testDefaults
+            )
+        }
+    }
+
+    @Test
     func productionSelectionForDisjointViewportOwnsNoTokenOrLease() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let size = PixelSize(width: 256, height: 256)
@@ -3924,6 +5257,85 @@ private extension SparseTilePlanLimits {
     )
 }
 
+private func exerciseHugeFinitePeriodicFoldRejection() throws {
+    guard let device = MTLCreateSystemDefaultDevice() else { return }
+    let size = PixelSize(width: 64, height: 64)
+    let fixture = try makeSource(
+        device: device,
+        pixelSize: size,
+        coordinates: [.init(x: 0, y: 0)],
+        addressing: .periodic(period: size)
+    )
+    let fold = try periodicFold(.halfDrop, rasterSize: size)
+    // The local quotient is finite and Int-representable, but the adjusted
+    // half-open cell does not satisfy Task 7's exact Float round-trip.
+    let unsafeCoordinate = Float(bitPattern: 1_317_061_535)
+    let mapping = SparseTilePeriodicOutputMapping(
+        fold: fold,
+        outputToWorldTransform: SparseTileOutputToSourceTransform(
+            sourceOffset: SIMD2(unsafeCoordinate, 0),
+            sourceStep: SIMD2(repeating: 1)
+        )
+    )
+    let key = SparseTileSamplingPlanKey(
+        documentGeneration: 7,
+        orderedLayers: [SparseTileLayerContentKey(
+            layerID: fixture.layerID,
+            roles: [fixture.request.contentKey]
+        )],
+        addressingRevision: 1,
+        outputGeometryRevision: 1,
+        outputMapping: .periodic(mapping)
+    )
+    let before = fixture.request.provider.backingSnapshot()
+    #expect(throws: SparseTileSamplingPlanError
+        .invalidOutputToSourceTransform) {
+        _ = try SparseTileSamplingPlanCache().acquire(
+            key: key,
+            sources: [fixture.request],
+            outputRegion: try region(0, 0, 1, 1),
+            limits: .testDefaults
+        )
+    }
+    #expect(fixture.request.provider.backingSnapshot() == before)
+}
+
+private func runHugeFinitePeriodicFoldSubprocess()
+    throws -> (status: Int32, standardError: String)
+{
+    guard
+        let optionIndex = CommandLine.arguments.firstIndex(
+            of: "--test-bundle-path"
+        ),
+        CommandLine.arguments.indices.contains(optionIndex + 1)
+    else {
+        preconditionFailure("Swift Testing test executable path is unavailable")
+    }
+    let testExecutablePath = CommandLine.arguments[optionIndex + 1]
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+    process.arguments = [
+        "--test-bundle-path", testExecutablePath,
+        "--filter", "hugeFinitePeriodicFoldFailsClosedBeforeRetentionInSubprocess",
+        testExecutablePath,
+        "--testing-library", "swift-testing",
+    ]
+    process.environment = ProcessInfo.processInfo.environment.merging(
+        ["PATTERN_PERIODIC_HUGE_FINITE_FOLD": "1"],
+        uniquingKeysWith: { _, new in new }
+    )
+    process.standardOutput = FileHandle.nullDevice
+    let standardError = Pipe()
+    process.standardError = standardError
+    try process.run()
+    process.waitUntilExit()
+    let errorOutput = String(
+        decoding: standardError.fileHandleForReading.readDataToEndOfFile(),
+        as: UTF8.self
+    )
+    return (process.terminationStatus, errorOutput)
+}
+
 private func limits(
     maximumPageEntries: Int = 4_096,
     maximumBindingSlots: Int = 256,
@@ -3940,6 +5352,96 @@ private func limits(
         maximumTexturesPerBatch: maximumTexturesPerBatch,
         maximumBatchCount: maximumBatchCount
     )
+}
+
+private func periodicFold(
+    _ preset: SymmetryPresetID,
+    rasterSize: PixelSize
+) throws -> CompiledPeriodicDisplayFold {
+    let strategy = try TilingStrategy(
+        configuration: .defaultConfiguration(
+            presetID: preset,
+            canonicalRasterSize: rasterSize
+        ),
+        canonicalRasterSize: rasterSize
+    )
+    return try #require(
+        strategy.compiledSymmetry.domain.periodic?.displayFold
+    )
+}
+
+private func orientedPeriodicFold(
+    _ preset: SymmetryPresetID,
+    rasterSize: PixelSize,
+    orientationRadians: Float
+) throws -> CompiledPeriodicDisplayFold {
+    let strategy = try TilingStrategy(
+        configuration: PeriodicSymmetryConfiguration(
+            presetID: preset,
+            repeatSize: PatternSize(
+                width: Float(rasterSize.width),
+                height: Float(rasterSize.height)
+            ),
+            orientationRadians: orientationRadians
+        ),
+        canonicalRasterSize: rasterSize
+    )
+    return try #require(
+        strategy.compiledSymmetry.domain.periodic?.displayFold
+    )
+}
+
+private func allPageCoordinates(
+    _ size: PixelSize
+) -> [PaintTileCoordinate] {
+    let columns = (size.width + PaintTileDescriptor.side - 1)
+        / PaintTileDescriptor.side
+    let rows = (size.height + PaintTileDescriptor.side - 1)
+        / PaintTileDescriptor.side
+    return (0..<rows).flatMap { y in
+        (0..<columns).map { x in PaintTileCoordinate(x: x, y: y) }
+    }
+}
+
+private func expectedPeriodicPages(
+    fold: CompiledPeriodicDisplayFold,
+    transform: SparseTileOutputToSourceTransform,
+    output: SparseTileOutputRegion,
+    subregion: SparseTileOutputRegion? = nil,
+    maximumPixelCenters: Int? = nil
+) -> Set<PaintTileCoordinate> {
+    let region = subregion ?? output
+    let width = Int(fold.canonicalSize.width)
+    let height = Int(fold.canonicalSize.height)
+    var result: Set<PaintTileCoordinate> = []
+    var remaining = maximumPixelCenters ?? Int.max
+    outer: for y in region.minY..<region.maxY {
+        for x in region.minX..<region.maxX {
+            guard remaining > 0 else { break outer }
+            remaining -= 1
+            let local = SIMD2(
+                Float(x - output.minX) + 0.5,
+                Float(y - output.minY) + 0.5
+            )
+            let root = SIMD2(Float(output.minX), Float(output.minY))
+                + transform.sourceOffset
+            let world = root + local * transform.sourceStep
+            let canonical = fold.applying(to: WorldPoint(world))
+            let lowerX = Int(floor(canonical.x - 0.5))
+            let lowerY = Int(floor(canonical.y - 0.5))
+            for dy in 0...1 {
+                for dx in 0...1 {
+                    let pixelX = ((lowerX + dx) % width + width) % width
+                    let pixelY = ((lowerY + dy) % height + height) % height
+                    result.insert(PaintTileCoordinate(
+                        x: pixelX / PaintTileDescriptor.side,
+                        y: pixelY / PaintTileDescriptor.side
+                    ))
+                }
+            }
+        }
+    }
+    return result
 }
 
 private func region(

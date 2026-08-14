@@ -269,8 +269,27 @@ typedef struct PatternSparseSamplingUniforms {
     PatternUInt2 period;
     PatternUInt32 compositeMode;
     PatternUInt32 liveVisible;
+    // Sparse ABI v2: root-relative screen-pixel offset for periodic stable
+    // chunks. This must be uint2(0) for affine, radial, and unsplit periodic
+    // draws. The field name/layout stays frozen for ABI compatibility.
     PatternUInt2 reserved;
 } PatternSparseSamplingUniforms;
+
+typedef struct PatternPeriodicDisplayFoldUniforms {
+    PatternFloat2 canonicalSize;
+    PatternFloat2 repeatSize;
+    PatternFloat2 worldToLatticeXAxis;
+    PatternFloat2 worldToLatticeYAxis;
+    PatternFloat2 worldToLatticeTranslation;
+    PatternFloat2 phaseFractions;
+    PatternUInt32 foldMode;
+    PatternUInt32 symmetryFamily;
+    PatternUInt32 phaseCount;
+    PatternUInt32 phaseIndexAxis;
+    PatternUInt32 phaseOffsetAxis;
+    PatternUInt32 reflectionFlags;
+    PatternUInt2 reserved;
+} PatternPeriodicDisplayFoldUniforms;
 
 typedef struct PatternSparsePageTableDescriptor {
     PatternUInt32 entryOffset;
@@ -323,6 +342,45 @@ static inline size_t PatternSparseSamplingUniformsOffsetLiveVisible(void) {
 }
 static inline size_t PatternSparseSamplingUniformsOffsetReserved(void) {
     return offsetof(PatternSparseSamplingUniforms, reserved);
+}
+static inline size_t PatternPeriodicDisplayFoldUniformsOffsetCanonicalSize(void) {
+    return offsetof(PatternPeriodicDisplayFoldUniforms, canonicalSize);
+}
+static inline size_t PatternPeriodicDisplayFoldUniformsOffsetRepeatSize(void) {
+    return offsetof(PatternPeriodicDisplayFoldUniforms, repeatSize);
+}
+static inline size_t PatternPeriodicDisplayFoldUniformsOffsetWorldToLatticeXAxis(void) {
+    return offsetof(PatternPeriodicDisplayFoldUniforms, worldToLatticeXAxis);
+}
+static inline size_t PatternPeriodicDisplayFoldUniformsOffsetWorldToLatticeYAxis(void) {
+    return offsetof(PatternPeriodicDisplayFoldUniforms, worldToLatticeYAxis);
+}
+static inline size_t PatternPeriodicDisplayFoldUniformsOffsetWorldToLatticeTranslation(void) {
+    return offsetof(PatternPeriodicDisplayFoldUniforms, worldToLatticeTranslation);
+}
+static inline size_t PatternPeriodicDisplayFoldUniformsOffsetPhaseFractions(void) {
+    return offsetof(PatternPeriodicDisplayFoldUniforms, phaseFractions);
+}
+static inline size_t PatternPeriodicDisplayFoldUniformsOffsetFoldMode(void) {
+    return offsetof(PatternPeriodicDisplayFoldUniforms, foldMode);
+}
+static inline size_t PatternPeriodicDisplayFoldUniformsOffsetSymmetryFamily(void) {
+    return offsetof(PatternPeriodicDisplayFoldUniforms, symmetryFamily);
+}
+static inline size_t PatternPeriodicDisplayFoldUniformsOffsetPhaseCount(void) {
+    return offsetof(PatternPeriodicDisplayFoldUniforms, phaseCount);
+}
+static inline size_t PatternPeriodicDisplayFoldUniformsOffsetPhaseIndexAxis(void) {
+    return offsetof(PatternPeriodicDisplayFoldUniforms, phaseIndexAxis);
+}
+static inline size_t PatternPeriodicDisplayFoldUniformsOffsetPhaseOffsetAxis(void) {
+    return offsetof(PatternPeriodicDisplayFoldUniforms, phaseOffsetAxis);
+}
+static inline size_t PatternPeriodicDisplayFoldUniformsOffsetReflectionFlags(void) {
+    return offsetof(PatternPeriodicDisplayFoldUniforms, reflectionFlags);
+}
+static inline size_t PatternPeriodicDisplayFoldUniformsOffsetReserved(void) {
+    return offsetof(PatternPeriodicDisplayFoldUniforms, reserved);
 }
 static inline size_t PatternSparsePageTableDescriptorOffsetEntryOffset(void) {
     return offsetof(PatternSparsePageTableDescriptor, entryOffset);
@@ -380,6 +438,7 @@ PATTERN_WIRE_CONSTANT PatternUInt32
 PATTERN_WIRE_CONSTANT PatternUInt32
     PatternBufferIndexDocumentPaintMutationSourceBytes = 14;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexLayerBlendUniforms = 15;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexPeriodicDisplayFold = 16;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexBrushShape = 2;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexBrushGrain = 3;
@@ -405,7 +464,7 @@ PATTERN_WIRE_CONSTANT PatternUInt32 PatternDocumentPaintFlagRadialTargetMask = 8
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternSparseMaximumFallbackTextures = 16;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternSparseMaximumTier2Textures = 512;
-PATTERN_WIRE_CONSTANT PatternUInt32 PatternSparseSamplingABIVersion = 1;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternSparseSamplingABIVersion = 2;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternLayerBlendABIVersion = 1;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternLayerBlendWireNormal = 0;

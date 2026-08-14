@@ -2327,6 +2327,11 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
             var capturedProviders: [TiledRasterExactReferenceProvider] = []
             preparedLayers.reserveCapacity(attempt.layers.count)
             capturedProviders.reserveCapacity(attempt.layers.count)
+            // Periodic geometry is source-independent. Each layer still gets
+            // a fresh authority, seeded from this immutable authenticated
+            // receipt, before its provider entitlement is filtered.
+            var sharedPeriodicReachabilitySeed:
+                SparseTilePeriodicReachabilitySeed?
             for (layer, state) in attempt.layers {
                 let binding = try makeBinding(
                     for: layer.id,
@@ -2354,25 +2359,21 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
                 let selection = try SparseTileOwnedSourceBatch.selecting(
                     sources: sources,
                     key: key,
-                    outputRegion: outputRegion
+                    outputRegion: outputRegion,
+                    reusingPeriodicReachabilitySeed:
+                        sharedPeriodicReachabilitySeed
                 )
+                if sharedPeriodicReachabilitySeed == nil {
+                    sharedPeriodicReachabilitySeed =
+                        selection.reusablePeriodicReachabilitySeed
+                }
                 guard try selection.selectedReferenceCount() > 0 else {
                     continue
                 }
                 let restrictedSources = try selection.restrictedSources()
-                let snapshots = try restrictedSources.map {
-                    try SparseTileSourceSnapshot(
-                        contentKey: $0.contentKey,
-                        addressing: $0.addressing,
-                        layerID: $0.layerID,
-                        references: $0.references,
-                        changedCoordinates: $0.changedCoordinates,
-                        disposition: $0.disposition
-                    )
-                }
                 let content = try SparseTileSamplingPlanBuilder.buildFull(
                     key: key,
-                    sources: snapshots,
+                    selection: selection,
                     outputRegion: outputRegion,
                     limits: limits
                 )
@@ -2548,25 +2549,16 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
                     let restricted = try selection.restrictedSources(
                         referenceScope: .entitlement
                     )
-                    let snapshots = try restricted.map {
-                        try SparseTileSourceSnapshot(
-                            contentKey: $0.contentKey,
-                            addressing: $0.addressing,
-                            layerID: $0.layerID,
-                            references: $0.references,
-                            changedCoordinates: $0.changedCoordinates,
-                            disposition: $0.disposition
-                        )
-                    }
                     preparedLayers.append(PreparedLayerCompositeLayer(
                         layerID: layer.id,
                         opacity: layer.opacity,
                         blendMode: layer.blendMode,
                         samplingPlan: try SparseTileSamplingPlanBuilder.buildFull(
                             key: key,
-                            sources: snapshots,
+                            selection: selection,
                             outputRegion: outputRegion,
-                            limits: limits
+                            limits: limits,
+                            referenceScope: .entitlement
                         ),
                         samplingParameters: SparseTileSamplingEncodeParameters(
                             outputMapping: .affine(.identity),
@@ -2811,6 +2803,15 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
             else {
                 throw DocumentPaintStableSnapshotRendererError.invalidRequest
             }
+        case let .periodic(mapping):
+            guard case let .periodic(period) = addressing,
+                  geometry.radialLayout == nil,
+                  geometry.storagePixelSize == period
+            else { throw SparseTileSamplingPlanError.inconsistentAddressing }
+            try SparseTilePeriodicOutputMappingValidator.validate(
+                mapping,
+                addressing: addressing
+            )
         case let .finiteRadial(mapping):
             guard case let .radial(layout) = addressing,
                   layout == mapping.layout,

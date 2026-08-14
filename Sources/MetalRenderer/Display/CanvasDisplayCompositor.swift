@@ -54,9 +54,9 @@ enum CanvasDisplayCompositor {
             maxX: snapshot.drawablePixelSize.width,
             maxY: snapshot.drawablePixelSize.height
         )
-        let outputMapping = try outputMapping(
+        let outputMapping = try CanvasDisplayOutputMapping.make(
             viewport: snapshot.viewport,
-            tilingStrategy: tilingStrategy,
+            strategy: tilingStrategy,
             outputPixelSize: snapshot.drawablePixelSize
         )
         return try await context.prepareLayerDisplaySubmission(
@@ -131,25 +131,4 @@ enum CanvasDisplayCompositor {
         }
     }
 
-    private static func outputMapping(
-        viewport: ViewportTransform,
-        tilingStrategy: TilingStrategy,
-        outputPixelSize: PixelSize
-    ) throws -> SparseTileSamplingOutputMapping {
-        let inverseZoom = 1 / viewport.zoom
-        let transform = SparseTileOutputToSourceTransform(
-            sourceOffset: viewport.worldCenter.simd - SIMD2(
-                Float(outputPixelSize.width) * 0.5 * inverseZoom,
-                Float(outputPixelSize.height) * 0.5 * inverseZoom
-            ),
-            sourceStep: SIMD2(repeating: inverseZoom)
-        )
-        if tilingStrategy.compiledSymmetry.domain.finite?.radial.layout != nil {
-            return try .finiteRadial(
-                strategy: tilingStrategy,
-                outputToWorldTransform: transform
-            )
-        }
-        return .affine(transform)
-    }
 }

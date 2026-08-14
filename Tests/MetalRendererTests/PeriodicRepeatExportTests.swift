@@ -330,6 +330,78 @@ struct PeriodicRepeatExportTests {
         )
     }
 
+    @Test(arguments: [
+        SymmetryPresetID.halfDrop,
+        .brick,
+        .mirrorXY,
+        .squareRotation,
+        .rotation3,
+    ])
+    @MainActor
+    func flattenedViewportUsesCompiledFoldForEveryPeriodicFamily(
+        preset: SymmetryPresetID
+    ) async throws {
+        let raster = PixelSize(width: 64, height: 64)
+        let orientation: Float = preset == .squareRotation ? .pi / 7 : 0
+        guard let renderer = try makeExportRenderer(
+            preset: preset,
+            pixelSize: raster,
+            repeatSide: Float(raster.width),
+            orientationRadians: orientation
+        ) else { return }
+        let source = makeCanonicalFixture(
+            width: raster.width,
+            height: raster.height
+        )
+        try await installCommittedRaster(source, into: renderer)
+        let strategy = try TilingStrategy(
+            configuration: PeriodicSymmetryConfiguration(
+                presetID: preset,
+                repeatSize: PatternSize(
+                    width: Float(raster.width),
+                    height: Float(raster.height)
+                ),
+                orientationRadians: orientation
+            ),
+            canonicalRasterSize: raster
+        )
+        let fold = try #require(
+            strategy.compiledSymmetry.domain.periodic?.displayFold
+        )
+        let outputSize = PixelSize(width: 64, height: 64)
+        let worldCenter = try #require(asymmetricWorldCenter(
+            fold: fold,
+            outputSize: outputSize
+        ))
+        renderer.restoreSavedViewport(worldCenter: worldCenter, zoom: 1)
+
+        let export = try await renderer.exportFlattenedScene(
+            pixelSize: outputSize,
+            transparentBackground: true
+        )
+        let expected = foldedViewportBilinearReference(
+            source,
+            sourceSize: raster,
+            outputSize: outputSize,
+            worldCenter: worldCenter,
+            fold: fold
+        )
+        let legacyAffine = foldedViewportBilinearReference(
+            source,
+            sourceSize: raster,
+            outputSize: outputSize,
+            worldCenter: worldCenter,
+            fold: nil
+        )
+
+        #expect(expected != legacyAffine, "\(preset)")
+        #expect(export.pixelSize == outputSize)
+        #expect(maximumChannelDelta(export.bgra8Bytes, expected) <= 1,
+                "\(preset)")
+        #expect(renderer.viewport.worldCenter == worldCenter)
+        #expect(try await canonicalBytes(renderer) == source)
+    }
+
 }
 
 private func exportPixel(
@@ -534,6 +606,104 @@ private func sourceLinearPixel(
         Float(Float16(linear.z)),
         Float(Float16(linear.w))
     )
+}
+
+private func asymmetricWorldCenter(
+    fold: CompiledPeriodicDisplayFold,
+    outputSize: PixelSize
+) -> WorldPoint? {
+    _ = outputSize
+    let candidates: [(Float, Float)] = [
+        (-2.25, -1.5), (-1.25, 1.75),
+        (1.25, -0.75), (2.25, 1.5), (3.25, -2.5),
+    ]
+    for candidate in candidates {
+        let world = WorldPoint(
+            x: candidate.0 * fold.repeatSize.width + 3.25,
+            y: candidate.1 * fold.repeatSize.height + 7.75
+        )
+        let canonical = fold.applying(to: world)
+        let legacyX = positiveModulo(
+            world.x,
+            extent: fold.canonicalSize.width
+        )
+        let legacyY = positiveModulo(
+            world.y,
+            extent: fold.canonicalSize.height
+        )
+        if abs(canonical.x - legacyX) > 1
+            || abs(canonical.y - legacyY) > 1
+        {
+            return world
+        }
+    }
+    return nil
+}
+
+private func foldedViewportBilinearReference(
+    _ source: [UInt8],
+    sourceSize: PixelSize,
+    outputSize: PixelSize,
+    worldCenter: WorldPoint,
+    fold: CompiledPeriodicDisplayFold?
+) -> [UInt8] {
+    var result = [UInt8](
+        repeating: 0,
+        count: outputSize.width * outputSize.height * 4
+    )
+    for y in 0..<outputSize.height {
+        for x in 0..<outputSize.width {
+            let world = WorldPoint(
+                x: worldCenter.x - Float(outputSize.width) * 0.5
+                    + Float(x) + 0.5,
+                y: worldCenter.y - Float(outputSize.height) * 0.5
+                    + Float(y) + 0.5
+            )
+            let canonical = fold?.applying(to: world)
+                ?? CanonicalPoint(x: world.x, y: world.y)
+            let sampleX = canonical.x - 0.5
+            let sampleY = canonical.y - 0.5
+            let lowerX = Int(floor(sampleX))
+            let lowerY = Int(floor(sampleY))
+            let blendX = sampleX - Float(lowerX)
+            let blendY = sampleY - Float(lowerY)
+            let value00 = sourceLinearPixel(
+                source, size: sourceSize, x: lowerX, y: lowerY
+            )
+            let value10 = sourceLinearPixel(
+                source, size: sourceSize, x: lowerX + 1, y: lowerY
+            )
+            let value01 = sourceLinearPixel(
+                source, size: sourceSize, x: lowerX, y: lowerY + 1
+            )
+            let value11 = sourceLinearPixel(
+                source, size: sourceSize, x: lowerX + 1, y: lowerY + 1
+            )
+            let top = value00 + (value10 - value00) * blendX
+            let bottom = value01 + (value11 - value01) * blendX
+            let value = top + (bottom - top) * blendY
+            guard let color = LinearPremultipliedColor(
+                red: value.x,
+                green: value.y,
+                blue: value.z,
+                alpha: value.w
+            ) else { preconditionFailure("fold oracle left premultiplied space") }
+            let encoded = DocumentColorPipeline
+                .exportEncodedPremultipliedBGRA8(color)
+            let offset = (y * outputSize.width + x) * 4
+            result[offset] = encoded.blue
+            result[offset + 1] = encoded.green
+            result[offset + 2] = encoded.red
+            result[offset + 3] = encoded.alpha
+        }
+    }
+    return result
+}
+
+private func positiveModulo(_ value: Float, extent: Float) -> Float {
+    let remainder = value.truncatingRemainder(dividingBy: extent)
+    if remainder == 0 { return 0 }
+    return remainder < 0 ? remainder + extent : remainder
 }
 
 private func maximumChannelDelta(

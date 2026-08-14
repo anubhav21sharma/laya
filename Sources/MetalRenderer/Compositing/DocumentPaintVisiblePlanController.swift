@@ -664,15 +664,19 @@ struct DocumentPaintVisiblePlanControllerSnapshot: Equatable, @unchecked Sendabl
 /// they never compile a pipeline or create a second plan owner.
 struct DocumentPaintVisiblePlanPipelines {
     let affine: SparseTileSamplingPipelineBinding
+    let periodic: SparseTileSamplingPipelineBinding
     let finiteRadial: SparseTileSamplingPipelineBinding
 
     init(
         affine: SparseTileSamplingPipelineBinding,
+        periodic: SparseTileSamplingPipelineBinding,
         finiteRadial: SparseTileSamplingPipelineBinding
     ) {
         precondition(affine.key.outputMappingKind == .affine)
+        precondition(periodic.key.outputMappingKind == .periodic)
         precondition(finiteRadial.key.outputMappingKind == .finiteRadial)
         self.affine = affine
+        self.periodic = periodic
         self.finiteRadial = finiteRadial
     }
 
@@ -681,6 +685,7 @@ struct DocumentPaintVisiblePlanPipelines {
     ) -> SparseTileSamplingPipelineBinding {
         switch kind {
         case .affine: affine
+        case .periodic: periodic
         case .finiteRadial: finiteRadial
         }
     }

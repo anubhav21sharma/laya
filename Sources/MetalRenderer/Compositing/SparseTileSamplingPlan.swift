@@ -44,6 +44,7 @@ enum SparseTileSamplingPlanError: Error, Equatable, Sendable {
     case sourceBatchInUse
     case sourceBatchConsumed
     case sourceBatchSelectionMismatch(sourceIndex: Int)
+    case periodicReachabilityWorkLimitExceeded(maximum: Int)
     case injectedSourceLeaseFailure(Int)
     case injectedBoundTextureFailure
     case injectedContentPublicationFailure
@@ -73,13 +74,22 @@ struct SparseTileOutputToSourceTransform: Equatable, Hashable, Sendable {
         sourceStep: SIMD2(repeating: 1)
     )
 
-    fileprivate func shaderSourceOrigin(
+    func shaderSourceOrigin(
         outputRegion: SparseTileOutputRegion
     ) throws -> SIMD2<Float> {
-        let root = SIMD2(Float(outputRegion.minX), Float(outputRegion.minY))
+        try shaderSourceOrigin(outputOrigin: SIMD2(
+            outputRegion.minX,
+            outputRegion.minY
+        ))
+    }
+
+    func shaderSourceOrigin(
+        outputOrigin: SIMD2<Int>
+    ) throws -> SIMD2<Float> {
+        let root = SIMD2(Float(outputOrigin.x), Float(outputOrigin.y))
         guard root.x.isFinite, root.y.isFinite,
-              Double(root.x) == Double(outputRegion.minX),
-              Double(root.y) == Double(outputRegion.minY),
+              Double(root.x) == Double(outputOrigin.x),
+              Double(root.y) == Double(outputOrigin.y),
               sourceOffset.x.isFinite, sourceOffset.y.isFinite,
               sourceStep.x.isFinite, sourceStep.y.isFinite
         else {
@@ -95,7 +105,92 @@ struct SparseTileOutputToSourceTransform: Equatable, Hashable, Sendable {
 
 enum SparseTileSamplingOutputMappingKind: UInt8, Hashable, Sendable {
     case affine
+    case periodic
     case finiteRadial
+}
+
+struct SparseTilePeriodicOutputMapping: Equatable, Sendable {
+    let fold: CompiledPeriodicDisplayFold
+    let outputToWorldTransform: SparseTileOutputToSourceTransform
+    /// Root-relative integer pixel displacement used by stable child chunks.
+    /// Keeping the root transform unchanged lets CPU and Metal evaluate
+    /// `origin + (localPixel + offset) * step` with the unsplit grouping.
+    let screenPixelOffset: SIMD2<Int>
+
+    init(
+        fold: CompiledPeriodicDisplayFold,
+        outputToWorldTransform: SparseTileOutputToSourceTransform,
+        screenPixelOffset: SIMD2<Int> = .zero
+    ) {
+        self.fold = fold
+        self.outputToWorldTransform = outputToWorldTransform
+        self.screenPixelOffset = screenPixelOffset
+    }
+
+    func shaderSourceOrigin(
+        outputRegion: SparseTileOutputRegion
+    ) throws -> SIMD2<Float> {
+        let rootX = try outputRegion.minX
+            .subtractingChecked(screenPixelOffset.x)
+        let rootY = try outputRegion.minY
+            .subtractingChecked(screenPixelOffset.y)
+        return try outputToWorldTransform.shaderSourceOrigin(
+            outputOrigin: SIMD2(rootX, rootY)
+        )
+    }
+}
+
+extension SparseTilePeriodicOutputMapping: Hashable {
+    static func == (
+        lhs: SparseTilePeriodicOutputMapping,
+        rhs: SparseTilePeriodicOutputMapping
+    ) -> Bool {
+        let left = lhs.fold
+        let right = rhs.fold
+        return left.family == right.family
+            && left.coordinateSpace == right.coordinateSpace
+            && left.worldToLattice == right.worldToLattice
+            && left.canonicalSize == right.canonicalSize
+            && left.repeatSize == right.repeatSize
+            && left.phase == right.phase
+            && left.alternatingReflections == right.alternatingReflections
+            && lhs.outputToWorldTransform == rhs.outputToWorldTransform
+            && lhs.screenPixelOffset == rhs.screenPixelOffset
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(fold.family.rawValue)
+        hasher.combine(fold.coordinateSpace.rawValue)
+        hasher.combine(fold.worldToLattice.xAxis.x)
+        hasher.combine(fold.worldToLattice.xAxis.y)
+        hasher.combine(fold.worldToLattice.yAxis.x)
+        hasher.combine(fold.worldToLattice.yAxis.y)
+        hasher.combine(fold.worldToLattice.translation.x)
+        hasher.combine(fold.worldToLattice.translation.y)
+        hasher.combine(fold.canonicalSize.width)
+        hasher.combine(fold.canonicalSize.height)
+        hasher.combine(fold.repeatSize.width)
+        hasher.combine(fold.repeatSize.height)
+        if let phase = fold.phase {
+            hasher.combine(true)
+            switch phase.indexAxis {
+            case .x: hasher.combine(UInt32(0))
+            case .y: hasher.combine(UInt32(1))
+            }
+            switch phase.offsetAxis {
+            case .x: hasher.combine(UInt32(0))
+            case .y: hasher.combine(UInt32(1))
+            }
+            hasher.combine(phase.fractions.count)
+            for fraction in phase.fractions { hasher.combine(fraction) }
+        } else {
+            hasher.combine(false)
+        }
+        hasher.combine(fold.alternatingReflections.rawValue)
+        hasher.combine(outputToWorldTransform)
+        hasher.combine(screenPixelOffset.x)
+        hasher.combine(screenPixelOffset.y)
+    }
 }
 
 struct SparseTileFiniteRadialOutputMapping: Equatable, Sendable {
@@ -166,6 +261,7 @@ extension SparseTileFiniteRadialOutputMapping: Hashable {
 
 enum SparseTileSamplingOutputMapping: Equatable, Hashable, Sendable {
     case affine(SparseTileOutputToSourceTransform)
+    case periodic(SparseTilePeriodicOutputMapping)
     case finiteRadial(SparseTileFiniteRadialOutputMapping)
 
     static func finiteRadial(
@@ -181,6 +277,7 @@ enum SparseTileSamplingOutputMapping: Equatable, Hashable, Sendable {
     var kind: SparseTileSamplingOutputMappingKind {
         switch self {
         case .affine: .affine
+        case .periodic: .periodic
         case .finiteRadial: .finiteRadial
         }
     }
@@ -188,6 +285,52 @@ enum SparseTileSamplingOutputMapping: Equatable, Hashable, Sendable {
     var affineTransform: SparseTileOutputToSourceTransform? {
         guard case let .affine(transform) = self else { return nil }
         return transform
+    }
+
+    var outputToWorldTransform: SparseTileOutputToSourceTransform {
+        switch self {
+        case let .affine(transform): transform
+        case let .periodic(mapping): mapping.outputToWorldTransform
+        case let .finiteRadial(mapping): mapping.outputToWorldTransform
+        }
+    }
+
+    var periodicScreenPixelOffset: SIMD2<Int> {
+        guard case let .periodic(mapping) = self else { return .zero }
+        return mapping.screenPixelOffset
+    }
+}
+
+/// One compatibility authority used before any periodic root/source retention
+/// and again by plan construction. Region-specific cell admissibility remains
+/// in nonlinear reachability because it depends on the requested pixel centers.
+enum SparseTilePeriodicOutputMappingValidator {
+    static func validate(
+        _ mapping: SparseTilePeriodicOutputMapping,
+        addressing: SparseTileAddressing
+    ) throws {
+        guard case let .periodic(period) = addressing,
+              period.width <= Int(Int32.max),
+              period.height <= Int(Int32.max),
+              Int(exactly: mapping.fold.canonicalSize.width) == period.width,
+              Int(exactly: mapping.fold.canonicalSize.height) == period.height,
+              mapping.fold.phase?.fractions.count ?? 0 <= 2,
+              mapping.fold.family != .radial,
+              mapping.outputToWorldTransform.sourceOffset.x.isFinite,
+              mapping.outputToWorldTransform.sourceOffset.y.isFinite,
+              mapping.outputToWorldTransform.sourceStep.x.isFinite,
+              mapping.outputToWorldTransform.sourceStep.y.isFinite,
+              mapping.screenPixelOffset.x >= 0,
+              mapping.screenPixelOffset.y >= 0,
+              mapping.screenPixelOffset.x <= Int(UInt32.max),
+              mapping.screenPixelOffset.y <= Int(UInt32.max),
+              Int(exactly: Float(mapping.screenPixelOffset.x))
+                == mapping.screenPixelOffset.x,
+              Int(exactly: Float(mapping.screenPixelOffset.y))
+                == mapping.screenPixelOffset.y
+        else {
+            throw SparseTileSamplingPlanError.inconsistentAddressing
+        }
     }
 }
 
@@ -225,7 +368,7 @@ struct SparseTileSamplingPlanKey: Hashable, Sendable {
     let outputMapping: SparseTileSamplingOutputMapping
 
     var outputToSourceTransform: SparseTileOutputToSourceTransform {
-        outputMapping.affineTransform ?? .identity
+        outputMapping.outputToWorldTransform
     }
 
     init(
@@ -321,13 +464,23 @@ struct SparseTileSourceRequest: @unchecked Sendable {
 struct SparseTileSourceSelection: @unchecked Sendable {
     fileprivate let sources: [SparseTileSourceRequest]
     fileprivate let selectedReferencesBySource: [[PaintTileReference]]
+    fileprivate let periodicReachabilitySeed:
+        SparseTilePeriodicReachabilitySeed?
+
+    var reusablePeriodicReachabilitySeed:
+        SparseTilePeriodicReachabilitySeed?
+    {
+        periodicReachabilitySeed
+    }
 
     fileprivate init(
         sources: [SparseTileSourceRequest],
-        selectedReferencesBySource: [[PaintTileReference]]
+        selectedReferencesBySource: [[PaintTileReference]],
+        periodicReachabilitySeed: SparseTilePeriodicReachabilitySeed?
     ) {
         self.sources = sources
         self.selectedReferencesBySource = selectedReferencesBySource
+        self.periodicReachabilitySeed = periodicReachabilitySeed
     }
 
     func selectedReferenceCount() throws -> Int {
@@ -370,6 +523,57 @@ struct SparseTileSourceSelection: @unchecked Sendable {
             )
         }
     }
+
+    #if DEBUG
+    var testingPeriodicReachabilityReceipt:
+        SparseTilePeriodicReachabilityReceipt?
+    {
+        guard let seed = periodicReachabilitySeed else { return nil }
+        return SparseTilePeriodicReachabilityReceipt(
+            physicalPages: seed.cachedPages[seed.outputRegion] ?? [],
+            visitedNodeCount: seed.phaseAVisitedNodeCount,
+            subdivisionCount: seed.phaseASubdivisionCount,
+            enumeratedPixelCenterCount:
+                seed.phaseAEnumeratedPixelCenterCount,
+            singlePageFastPathCount:
+                seed.phaseASinglePageFastPathCount,
+            axisSweepPixelCenterCount:
+                seed.phaseAAxisSweepPixelCenterCount,
+            cacheHitCount: seed.phaseACacheHitCount,
+            phaseAWorkCount: seed.phaseAWorkCount,
+            acquisitionWorkCount: 0,
+            workCount: seed.phaseAWorkCount
+        )
+    }
+
+    func testingWithRootOnlyPeriodicReachabilitySeed()
+        -> SparseTileSourceSelection
+    {
+        guard let seed = periodicReachabilitySeed,
+              let rootPages = seed.cachedPages[seed.outputRegion]
+        else { return self }
+        return SparseTileSourceSelection(
+            sources: sources,
+            selectedReferencesBySource: selectedReferencesBySource,
+            periodicReachabilitySeed: SparseTilePeriodicReachabilitySeed(
+                outputRegion: seed.outputRegion,
+                mapping: seed.mapping,
+                addressing: seed.addressing,
+                cachedPages: [seed.outputRegion: rootPages],
+                phaseAVisitedNodeCount: seed.phaseAVisitedNodeCount,
+                phaseASubdivisionCount: seed.phaseASubdivisionCount,
+                phaseAEnumeratedPixelCenterCount:
+                    seed.phaseAEnumeratedPixelCenterCount,
+                phaseASinglePageFastPathCount:
+                    seed.phaseASinglePageFastPathCount,
+                phaseAAxisSweepPixelCenterCount:
+                    seed.phaseAAxisSweepPixelCenterCount,
+                phaseACacheHitCount: seed.phaseACacheHitCount,
+                phaseAWorkCount: seed.phaseAWorkCount
+            )
+        )
+    }
+    #endif
 }
 
 /// Explicit one-shot access envelope for every exact source provider in a plan
@@ -419,15 +623,19 @@ final class SparseTileOwnedSourceBatch: @unchecked Sendable {
     private var state = State.fresh
     private let deinitDiagnostic: @Sendable () -> Void
     private var terminalAction: (@Sendable () -> Void)?
+    fileprivate let periodicReachabilitySeed:
+        SparseTilePeriodicReachabilitySeed?
 
     private init(
         sources: [SparseTileSourceRequest],
         captureAccess: CaptureAccess,
+        periodicReachabilitySeed: SparseTilePeriodicReachabilitySeed?,
         deinitDiagnostic: @escaping @Sendable () -> Void = {},
         onTerminal: @escaping @Sendable () -> Void = {}
     ) {
         self.sources = sources
         self.captureAccess = captureAccess
+        self.periodicReachabilitySeed = periodicReachabilitySeed
         self.deinitDiagnostic = deinitDiagnostic
         terminalAction = onTerminal
     }
@@ -435,12 +643,20 @@ final class SparseTileOwnedSourceBatch: @unchecked Sendable {
     /// Pure selection path. Entitlement is derived by the same Phase-A selector
     /// that the cache rechecks before any reservation.
     /// This operation performs no store mutation and can run outside registry
-    /// locks before an immutable epoch identity is revalidated.
+    /// locks before an immutable epoch identity is revalidated. A seed may be
+    /// shared across sources only when the authority authenticates the exact
+    /// output region, periodic mapping, and addressing tuple.
     static func selecting(
         sources: [SparseTileSourceRequest],
         key: SparseTileSamplingPlanKey,
-        outputRegion: SparseTileOutputRegion
+        outputRegion: SparseTileOutputRegion,
+        reusingPeriodicReachabilitySeed:
+            SparseTilePeriodicReachabilitySeed? = nil,
+        maximumPeriodicReachabilityWork: Int = 250_000
     ) throws -> SparseTileSourceSelection {
+        guard !sources.isEmpty else {
+            throw SparseTileSamplingPlanError.contentKeyMismatch
+        }
         let metadata = try sources.map {
             try SparseTileSourceSnapshot(
                 contentKey: $0.contentKey,
@@ -451,15 +667,28 @@ final class SparseTileOwnedSourceBatch: @unchecked Sendable {
                 disposition: $0.disposition
             )
         }
+        let authority = try SparseTileSamplingPlanBuilder
+            .makePeriodicReachabilityAuthority(
+                key: key,
+                addressing: metadata[0].addressing,
+                outputRegion: outputRegion,
+                maximumWork: maximumPeriodicReachabilityWork,
+                seed: reusingPeriodicReachabilitySeed
+            )
         let selected = try SparseTileSamplingPlanBuilder
             .selectingPhysicalReferences(
                 key: key,
                 sources: metadata,
-                outputRegion: outputRegion
+                outputRegion: outputRegion,
+                periodicReachabilityAuthority: authority
             )
+        let seed = authority.map {
+            SparseTileSamplingPlanBuilder.periodicReachabilitySeed(from: $0)
+        }
         return SparseTileSourceSelection(
             sources: sources,
-            selectedReferencesBySource: selected.map(\.references)
+            selectedReferencesBySource: selected.map(\.references),
+            periodicReachabilitySeed: seed
         )
     }
 
@@ -477,6 +706,7 @@ final class SparseTileOwnedSourceBatch: @unchecked Sendable {
         return Self(
             sources: sources,
             captureAccess: .owned(capture),
+            periodicReachabilitySeed: selection.periodicReachabilitySeed,
             deinitDiagnostic: deinitDiagnostic
         )
     }
@@ -495,6 +725,7 @@ final class SparseTileOwnedSourceBatch: @unchecked Sendable {
         return Self(
             sources: sources,
             captureAccess: .borrowed(borrow),
+            periodicReachabilitySeed: selection.periodicReachabilitySeed,
             deinitDiagnostic: deinitDiagnostic,
             onTerminal: onTerminal
         )
@@ -807,6 +1038,13 @@ final class SparseTileSamplingPlanContent: @unchecked Sendable {
     let outputToSourceTransform: SparseTileOutputToSourceTransform
     let shaderSourceOrigin: SIMD2<Float>
     let sourceFingerprints: [SparseTileSourceFingerprint]
+    #if DEBUG
+    /// Diagnostic receipt authenticates that prepared layer plans reused their
+    /// immutable Phase-A selection. Release contents retain no diagnostic page
+    /// set or work receipt.
+    fileprivate(set) var periodicReachabilityReceipt:
+        SparseTilePeriodicReachabilityReceipt?
+    #endif
     fileprivate let outputRegion: SparseTileOutputRegion
     private let recordsBySlot: [Int: SparseTileBindingRecord]
 
@@ -834,6 +1072,9 @@ final class SparseTileSamplingPlanContent: @unchecked Sendable {
         self.outputToSourceTransform = outputToSourceTransform
         self.shaderSourceOrigin = shaderSourceOrigin
         self.sourceFingerprints = sourceFingerprints
+        #if DEBUG
+        self.periodicReachabilityReceipt = nil
+        #endif
         self.outputRegion = outputRegion
         recordsBySlot = Dictionary(
             uniqueKeysWithValues: bindingRecords.map { ($0.globalSlot, $0) }
@@ -1222,6 +1463,11 @@ final class SparseTileSamplingPlanCache: @unchecked Sendable {
     private let sourceLeaseFailureInjector: @Sendable (Int) throws -> Void
     private let boundTextureFailureInjector: @Sendable () throws -> Void
     private let afterContentPublication: @Sendable () throws -> Void
+    private let maximumPeriodicReachabilityWork: Int
+    #if DEBUG
+    private var lastPeriodicReachabilityReceipt:
+        SparseTilePeriodicReachabilityReceipt?
+    #endif
 
     init(
         returnLease: @escaping SparseTileLeaseReturner = { lease in
@@ -1234,7 +1480,8 @@ final class SparseTileSamplingPlanCache: @unchecked Sendable {
         boundTextureFailureInjector:
             @escaping @Sendable () throws -> Void = {},
         afterContentPublication:
-            @escaping @Sendable () throws -> Void = {}
+            @escaping @Sendable () throws -> Void = {},
+        maximumPeriodicReachabilityWork: Int = 250_000
     ) {
         self.returnLease = returnLease
         self.afterSlotReservation = afterSlotReservation
@@ -1242,6 +1489,8 @@ final class SparseTileSamplingPlanCache: @unchecked Sendable {
         self.sourceLeaseFailureInjector = sourceLeaseFailureInjector
         self.boundTextureFailureInjector = boundTextureFailureInjector
         self.afterContentPublication = afterContentPublication
+        self.maximumPeriodicReachabilityWork =
+            maximumPeriodicReachabilityWork
     }
 
     func acquire(
@@ -1274,6 +1523,14 @@ final class SparseTileSamplingPlanCache: @unchecked Sendable {
             )
         }
         let sourceFingerprints = metadata.fingerprints
+        let periodicReachabilityAuthority = try SparseTileSamplingPlanBuilder
+            .makePeriodicReachabilityAuthority(
+                key: key,
+                addressing: metadata[0].addressing,
+                outputRegion: outputRegion,
+                maximumWork: maximumPeriodicReachabilityWork,
+                seed: sourceBatch.periodicReachabilitySeed
+            )
         // Selection is deliberately complete before the cache lock and slot
         // reservation. Full metadata remains the cache/collision identity;
         // only viewport-reachable physical references consume live resources.
@@ -1281,7 +1538,9 @@ final class SparseTileSamplingPlanCache: @unchecked Sendable {
             .selectingPhysicalReferences(
                 key: key,
                 sources: metadata,
-                outputRegion: outputRegion
+                outputRegion: outputRegion,
+                periodicReachabilityAuthority:
+                    periodicReachabilityAuthority
             )
         for (sourceIndex, pair) in zip(
             sources,
@@ -1363,13 +1622,26 @@ final class SparseTileSamplingPlanCache: @unchecked Sendable {
                     outputRegion: outputRegion,
                     limits: limits,
                     previous: cachedBeforeBuild ?? eligiblePrevious,
-                    slotAssignments: reservation.assignments
+                    slotAssignments: reservation.assignments,
+                    periodicReachabilityAuthority:
+                        periodicReachabilityAuthority
                 )
             } catch {
                 _ = try retirement.requestRetirement()
                 throw error
             }
         }
+        #if DEBUG
+        if let periodicReachabilityAuthority {
+            let receipt = SparseTileSamplingPlanBuilder
+                .periodicReachabilityReceipt(
+                    from: periodicReachabilityAuthority
+                )
+            lock.lock()
+            lastPeriodicReachabilityReceipt = receipt
+            lock.unlock()
+        }
+        #endif
 
         var acquired: [(request: SparseTileSourceRequest,
                         references: [PaintTileReference],
@@ -1514,6 +1786,14 @@ final class SparseTileSamplingPlanCache: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return activeContentAcquisitions.count
+    }
+
+    var testingLastPeriodicReachabilityReceipt:
+        SparseTilePeriodicReachabilityReceipt?
+    {
+        lock.lock()
+        defer { lock.unlock() }
+        return lastPeriodicReachabilityReceipt
     }
     #endif
 
@@ -2056,7 +2336,213 @@ enum SparseTilePlanAllocationKind: Sendable {
     case pageEntries
 }
 
+struct SparseTilePeriodicReachabilityReceipt: Equatable, Sendable {
+    let physicalPages: Set<PaintTileCoordinate>
+    let visitedNodeCount: Int
+    let subdivisionCount: Int
+    let enumeratedPixelCenterCount: Int
+    let singlePageFastPathCount: Int
+    let axisSweepPixelCenterCount: Int
+    let cacheHitCount: Int
+    let phaseAWorkCount: Int
+    let acquisitionWorkCount: Int
+    let workCount: Int
+}
+
+private final class SparseTilePeriodicReachabilityDiagnostics {
+    var visitedNodeCount = 0
+    var subdivisionCount = 0
+    var enumeratedPixelCenterCount = 0
+    var singlePageFastPathCount = 0
+    var axisSweepPixelCenterCount = 0
+}
+
+struct SparseTilePeriodicReachabilitySeed: Sendable {
+    fileprivate let outputRegion: SparseTileOutputRegion
+    fileprivate let mapping: SparseTilePeriodicOutputMapping
+    fileprivate let addressing: SparseTileAddressing
+    fileprivate let cachedPages:
+        [SparseTileOutputRegion: Set<PaintTileCoordinate>]
+    fileprivate let phaseAVisitedNodeCount: Int
+    fileprivate let phaseASubdivisionCount: Int
+    fileprivate let phaseAEnumeratedPixelCenterCount: Int
+    fileprivate let phaseASinglePageFastPathCount: Int
+    fileprivate let phaseAAxisSweepPixelCenterCount: Int
+    fileprivate let phaseACacheHitCount: Int
+    fileprivate let phaseAWorkCount: Int
+}
+
+private final class SparseTilePeriodicReachabilityAuthority {
+    let outputRegion: SparseTileOutputRegion
+    let mapping: SparseTilePeriodicOutputMapping
+    let addressing: SparseTileAddressing
+    let maximumWork: Int
+    let phaseAVisitedNodeCount: Int
+    let phaseASubdivisionCount: Int
+    let phaseAEnumeratedPixelCenterCount: Int
+    let phaseASinglePageFastPathCount: Int
+    let phaseAAxisSweepPixelCenterCount: Int
+    let phaseACacheHitCount: Int
+    let phaseAWorkCount: Int
+    fileprivate let diagnostics = SparseTilePeriodicReachabilityDiagnostics()
+    fileprivate var cachedPages:
+        [SparseTileOutputRegion: Set<PaintTileCoordinate>] = [:]
+    fileprivate var cacheHitCount = 0
+    fileprivate var workCount = 0
+
+    init(
+        outputRegion: SparseTileOutputRegion,
+        mapping: SparseTilePeriodicOutputMapping,
+        addressing: SparseTileAddressing,
+        maximumWork: Int = 250_000,
+        seed: SparseTilePeriodicReachabilitySeed? = nil
+    ) {
+        self.outputRegion = outputRegion
+        self.mapping = mapping
+        self.addressing = addressing
+        self.maximumWork = maximumWork
+        phaseAVisitedNodeCount = seed?.phaseAVisitedNodeCount ?? 0
+        phaseASubdivisionCount = seed?.phaseASubdivisionCount ?? 0
+        phaseAEnumeratedPixelCenterCount =
+            seed?.phaseAEnumeratedPixelCenterCount ?? 0
+        phaseASinglePageFastPathCount =
+            seed?.phaseASinglePageFastPathCount ?? 0
+        phaseAAxisSweepPixelCenterCount =
+            seed?.phaseAAxisSweepPixelCenterCount ?? 0
+        phaseACacheHitCount = seed?.phaseACacheHitCount ?? 0
+        phaseAWorkCount = seed?.phaseAWorkCount ?? 0
+        if let seed {
+            precondition(seed.outputRegion == outputRegion)
+            precondition(seed.mapping == mapping)
+            precondition(seed.addressing == addressing)
+            cachedPages = seed.cachedPages
+        }
+    }
+}
+
 enum SparseTileSamplingPlanBuilder {
+    fileprivate static func makePeriodicReachabilityAuthority(
+        key: SparseTileSamplingPlanKey,
+        addressing: SparseTileAddressing,
+        outputRegion: SparseTileOutputRegion,
+        maximumWork: Int = 250_000,
+        seed: SparseTilePeriodicReachabilitySeed? = nil
+    ) throws -> SparseTilePeriodicReachabilityAuthority? {
+        guard case let .periodic(mapping) = key.outputMapping else {
+            guard seed == nil else {
+                throw SparseTileSamplingPlanError.inconsistentAddressing
+            }
+            return nil
+        }
+        guard maximumWork >= 0 else {
+            throw SparseTileSamplingPlanError
+                .periodicReachabilityWorkLimitExceeded(maximum: maximumWork)
+        }
+        try validateOutputMapping(.periodic(mapping), addressing: addressing)
+        if let seed {
+            guard seed.outputRegion == outputRegion,
+                  seed.mapping == mapping,
+                  seed.addressing == addressing
+            else { throw SparseTileSamplingPlanError.inconsistentAddressing }
+            guard seed.phaseAWorkCount <= maximumWork else {
+                throw SparseTileSamplingPlanError
+                    .periodicReachabilityWorkLimitExceeded(
+                        maximum: maximumWork
+                    )
+            }
+        }
+        return SparseTilePeriodicReachabilityAuthority(
+            outputRegion: outputRegion,
+            mapping: mapping,
+            addressing: addressing,
+            maximumWork: maximumWork,
+            seed: seed
+        )
+    }
+
+    fileprivate static func periodicReachabilitySeed(
+        from authority: SparseTilePeriodicReachabilityAuthority
+    ) -> SparseTilePeriodicReachabilitySeed {
+        SparseTilePeriodicReachabilitySeed(
+            outputRegion: authority.outputRegion,
+            mapping: authority.mapping,
+            addressing: authority.addressing,
+            cachedPages: authority.cachedPages,
+            phaseAVisitedNodeCount:
+                authority.phaseAVisitedNodeCount
+                    + authority.diagnostics.visitedNodeCount,
+            phaseASubdivisionCount:
+                authority.phaseASubdivisionCount
+                    + authority.diagnostics.subdivisionCount,
+            phaseAEnumeratedPixelCenterCount:
+                authority.phaseAEnumeratedPixelCenterCount
+                    + authority.diagnostics.enumeratedPixelCenterCount,
+            phaseASinglePageFastPathCount:
+                authority.phaseASinglePageFastPathCount
+                    + authority.diagnostics.singlePageFastPathCount,
+            phaseAAxisSweepPixelCenterCount:
+                authority.phaseAAxisSweepPixelCenterCount
+                    + authority.diagnostics.axisSweepPixelCenterCount,
+            phaseACacheHitCount:
+                authority.phaseACacheHitCount + authority.cacheHitCount,
+            phaseAWorkCount:
+                authority.phaseAWorkCount + authority.workCount
+        )
+    }
+
+    fileprivate static func periodicReachabilityReceipt(
+        from authority: SparseTilePeriodicReachabilityAuthority
+    ) -> SparseTilePeriodicReachabilityReceipt {
+        let phaseAWork = authority.phaseAWorkCount
+        let acquisitionWork = authority.workCount
+        return SparseTilePeriodicReachabilityReceipt(
+            physicalPages: authority.cachedPages[authority.outputRegion] ?? [],
+            visitedNodeCount: authority.phaseAVisitedNodeCount
+                + authority.diagnostics.visitedNodeCount,
+            subdivisionCount: authority.phaseASubdivisionCount
+                + authority.diagnostics.subdivisionCount,
+            enumeratedPixelCenterCount:
+                authority.phaseAEnumeratedPixelCenterCount
+                + authority.diagnostics.enumeratedPixelCenterCount,
+            singlePageFastPathCount:
+                authority.phaseASinglePageFastPathCount
+                + authority.diagnostics.singlePageFastPathCount,
+            axisSweepPixelCenterCount:
+                authority.phaseAAxisSweepPixelCenterCount
+                + authority.diagnostics.axisSweepPixelCenterCount,
+            cacheHitCount:
+                authority.phaseACacheHitCount + authority.cacheHitCount,
+            phaseAWorkCount: phaseAWork,
+            acquisitionWorkCount: acquisitionWork,
+            workCount: phaseAWork + acquisitionWork
+        )
+    }
+
+    #if DEBUG
+    static func testingPeriodicReachabilityReceipt(
+        for region: SparseTileOutputRegion,
+        mapping: SparseTilePeriodicOutputMapping,
+        addressing: SparseTileAddressing
+    ) throws -> SparseTilePeriodicReachabilityReceipt {
+        let authority = SparseTilePeriodicReachabilityAuthority(
+            outputRegion: region,
+            mapping: mapping,
+            addressing: addressing,
+            maximumWork: .max
+        )
+        _ = try periodicPhysicalPages(
+            for: region,
+            within: region,
+            mapping: mapping,
+            addressing: addressing,
+            diagnostics: authority.diagnostics,
+            authority: authority
+        )
+        return periodicReachabilityReceipt(from: authority)
+    }
+
+    #endif
+
     static func buildFull(
         key: SparseTileSamplingPlanKey,
         sources: [SparseTileSourceSnapshot],
@@ -2068,11 +2554,20 @@ enum SparseTileSamplingPlanBuilder {
             SparseTilePlanAllocationKind, Int
         ) -> Void)? = nil
     ) throws -> SparseTileSamplingPlanContent {
+        guard !sources.isEmpty else {
+            throw SparseTileSamplingPlanError.contentKeyMismatch
+        }
         let sourceFingerprints = sources.fingerprints
+        let authority = try makePeriodicReachabilityAuthority(
+            key: key,
+            addressing: sources[0].addressing,
+            outputRegion: outputRegion
+        )
         let selectedSources = try selectingPhysicalReferences(
             key: key,
             sources: sources,
-            outputRegion: outputRegion
+            outputRegion: outputRegion,
+            periodicReachabilityAuthority: authority
         )
         return try buildSelected(
             key: key,
@@ -2082,7 +2577,91 @@ enum SparseTileSamplingPlanBuilder {
             limits: limits,
             previous: previous,
             slotAssignments: slotAssignments,
-            allocationObserver: allocationObserver
+            allocationObserver: allocationObserver,
+            periodicReachabilityAuthority: authority
+        )
+    }
+
+    /// Builds from an authenticated Phase-A selection. Periodic reachability
+    /// starts from its immutable cache/receipt and charges only uncached work;
+    /// prepared root and stable-child plans therefore cannot launch a second
+    /// independent full-budget traversal.
+    static func buildFull(
+        key: SparseTileSamplingPlanKey,
+        selection: SparseTileSourceSelection,
+        outputRegion: SparseTileOutputRegion,
+        limits: SparseTilePlanLimits,
+        referenceScope: SparseTileSourceRequest.ReferenceScope = .identity,
+        previous: SparseTileSamplingPlanContent? = nil,
+        slotAssignments: [SparseTileRecordCoordinateKey: Int]? = nil,
+        allocationObserver: (@Sendable (
+            SparseTilePlanAllocationKind, Int
+        ) -> Void)? = nil,
+        maximumPeriodicReachabilityWork: Int = 250_000
+    ) throws -> SparseTileSamplingPlanContent {
+        guard (key.outputMapping.kind == .periodic)
+                == (selection.periodicReachabilitySeed != nil)
+        else {
+            throw SparseTileSamplingPlanError.inconsistentAddressing
+        }
+        let requests = try selection.restrictedSources(
+            referenceScope: referenceScope
+        )
+        guard !requests.isEmpty else {
+            throw SparseTileSamplingPlanError.contentKeyMismatch
+        }
+        let sources = try requests.map {
+            try SparseTileSourceSnapshot(
+                contentKey: $0.contentKey,
+                addressing: $0.addressing,
+                layerID: $0.layerID,
+                references: $0.references,
+                changedCoordinates: $0.changedCoordinates,
+                disposition: $0.disposition
+            )
+        }
+        let sourceFingerprints = sources.fingerprints
+        let authority = try makePeriodicReachabilityAuthority(
+            key: key,
+            addressing: sources[0].addressing,
+            outputRegion: outputRegion,
+            maximumWork: maximumPeriodicReachabilityWork,
+            seed: selection.periodicReachabilitySeed
+        )
+        let selectedSources = try selectingPhysicalReferences(
+            key: key,
+            sources: sources,
+            outputRegion: outputRegion,
+            periodicReachabilityAuthority: authority
+        )
+        guard selectedSources.count
+                == selection.selectedReferencesBySource.count
+        else {
+            throw SparseTileSamplingPlanError.sourceBatchSelectionMismatch(
+                sourceIndex: min(
+                    selectedSources.count,
+                    selection.selectedReferencesBySource.count
+                )
+            )
+        }
+        for (sourceIndex, pair) in zip(
+            selectedSources,
+            selection.selectedReferencesBySource
+        ).enumerated() where pair.0.references != pair.1 {
+            throw SparseTileSamplingPlanError.sourceBatchSelectionMismatch(
+                sourceIndex: sourceIndex
+            )
+        }
+        return try buildSelected(
+            key: key,
+            sources: selectedSources,
+            sourceFingerprints: sourceFingerprints,
+            outputRegion: outputRegion,
+            limits: limits,
+            previous: previous,
+            slotAssignments: slotAssignments,
+            allocationObserver: allocationObserver,
+            periodicReachabilityAuthority: authority
         )
     }
 
@@ -2092,7 +2671,9 @@ enum SparseTileSamplingPlanBuilder {
     fileprivate static func selectingPhysicalReferences(
         key: SparseTileSamplingPlanKey,
         sources: [SparseTileSourceSnapshot],
-        outputRegion: SparseTileOutputRegion
+        outputRegion: SparseTileOutputRegion,
+        periodicReachabilityAuthority:
+            SparseTilePeriodicReachabilityAuthority? = nil
     ) throws -> [SparseTileSourceSnapshot] {
         guard !sources.isEmpty else {
             throw SparseTileSamplingPlanError.contentKeyMismatch
@@ -2105,7 +2686,7 @@ enum SparseTileSamplingPlanBuilder {
         let addressing = sources[0].addressing
         try validateOutputMapping(key.outputMapping, addressing: addressing)
 
-        let selectedRadialPhysicalCoordinates: Set<PaintTileCoordinate>?
+        let selectedNonlinearPhysicalCoordinates: Set<PaintTileCoordinate>?
         let affineIntervals: (x: [Range<Int>], y: [Range<Int>])?
         switch key.outputMapping {
         case let .affine(transform):
@@ -2132,10 +2713,25 @@ enum SparseTileSamplingPlanBuilder {
                     wraps: addressing.wraps
                 )
             )
-            selectedRadialPhysicalCoordinates = nil
+            selectedNonlinearPhysicalCoordinates = nil
+        case let .periodic(mapping):
+            affineIntervals = nil
+            if let authority = periodicReachabilityAuthority {
+                selectedNonlinearPhysicalCoordinates = try authorityPages(
+                    for: outputRegion,
+                    authority: authority
+                )
+            } else {
+                selectedNonlinearPhysicalCoordinates = try periodicPhysicalPages(
+                    for: outputRegion,
+                    within: outputRegion,
+                    mapping: mapping,
+                    addressing: addressing
+                )
+            }
         case let .finiteRadial(mapping):
             affineIntervals = nil
-            selectedRadialPhysicalCoordinates = Set(
+            selectedNonlinearPhysicalCoordinates = Set(
                 try radialLogicalPages(
                     for: outputRegion,
                     mapping: mapping
@@ -2198,8 +2794,8 @@ enum SparseTileSamplingPlanBuilder {
                     }
                     selectedCoordinates = physical
                 }
-            case .finiteRadial:
-                selectedCoordinates = selectedRadialPhysicalCoordinates!
+            case .periodic, .finiteRadial:
+                selectedCoordinates = selectedNonlinearPhysicalCoordinates!
             }
             let selectedReferences = source.references.filter {
                 selectedCoordinates.contains($0.coordinate)
@@ -2228,7 +2824,9 @@ enum SparseTileSamplingPlanBuilder {
         slotAssignments: [SparseTileRecordCoordinateKey: Int]? = nil,
         allocationObserver: (@Sendable (
             SparseTilePlanAllocationKind, Int
-        ) -> Void)? = nil
+        ) -> Void)? = nil,
+        periodicReachabilityAuthority:
+            SparseTilePeriodicReachabilityAuthority? = nil
     ) throws -> SparseTileSamplingPlanContent {
         guard !sources.isEmpty else {
             throw SparseTileSamplingPlanError.contentKeyMismatch
@@ -2258,6 +2856,10 @@ enum SparseTileSamplingPlanBuilder {
         switch key.outputMapping {
         case let .affine(transform):
             shaderSourceOrigin = try transform.shaderSourceOrigin(
+                outputRegion: outputRegion
+            )
+        case let .periodic(mapping):
+            shaderSourceOrigin = try mapping.shaderSourceOrigin(
                 outputRegion: outputRegion
             )
         case .finiteRadial:
@@ -2334,14 +2936,16 @@ enum SparseTileSamplingPlanBuilder {
             outputRegion,
             outputMapping: key.outputMapping,
             shaderSourceOrigin: shaderSourceOrigin,
-            addressing: sources[0].addressing
+            addressing: sources[0].addressing,
+            periodicReachabilityAuthority: periodicReachabilityAuthority
         )
         try preflightBatches(
             sources: sources,
             outputRegion: outputRegion,
             outputMapping: key.outputMapping,
             shaderSourceOrigin: shaderSourceOrigin,
-            limits: limits
+            limits: limits,
+            periodicReachabilityAuthority: periodicReachabilityAuthority
         )
         allocationObserver?(.bindingRecords, bindingCount)
 
@@ -2469,7 +3073,8 @@ enum SparseTileSamplingPlanBuilder {
             outputRegion: outputRegion,
             outputMapping: key.outputMapping,
             shaderSourceOrigin: shaderSourceOrigin,
-            limits: limits
+            limits: limits,
+            periodicReachabilityAuthority: periodicReachabilityAuthority
         )
         let rebuiltPageEntries = pageTables.reduce(into: 0) { result, table in
             let oldChunks = previous?.pageTable(
@@ -2480,7 +3085,7 @@ enum SparseTileSamplingPlanBuilder {
                 result += chunk.entries.count
             }
         }
-        return SparseTileSamplingPlanContent(
+        let content = SparseTileSamplingPlanContent(
             key: key,
             addressing: sources[0].addressing,
             pageTables: pageTables,
@@ -2496,6 +3101,13 @@ enum SparseTileSamplingPlanBuilder {
             sourceFingerprints: sourceFingerprints,
             outputRegion: outputRegion
         )
+        #if DEBUG
+        content.periodicReachabilityReceipt =
+            periodicReachabilityAuthority.map {
+                periodicReachabilityReceipt(from: $0)
+            }
+        #endif
+        return content
     }
 
     private static func makePageTable(
@@ -2649,9 +3261,26 @@ enum SparseTileSamplingPlanBuilder {
         _ outputRegion: SparseTileOutputRegion,
         outputMapping: SparseTileSamplingOutputMapping,
         shaderSourceOrigin: SIMD2<Float>,
-        addressing: SparseTileAddressing
+        addressing: SparseTileAddressing,
+        periodicReachabilityAuthority:
+            SparseTilePeriodicReachabilityAuthority?
     ) throws {
-        if case let .finiteRadial(mapping) = outputMapping {
+        if case let .periodic(mapping) = outputMapping {
+            if let periodicReachabilityAuthority {
+                _ = try authorityPages(
+                    for: outputRegion,
+                    authority: periodicReachabilityAuthority
+                )
+            } else {
+                _ = try periodicPhysicalPages(
+                    for: outputRegion,
+                    within: outputRegion,
+                    mapping: mapping,
+                    addressing: addressing
+                )
+            }
+            return
+        } else if case let .finiteRadial(mapping) = outputMapping {
             _ = try radialLogicalPages(
                 for: outputRegion,
                 mapping: mapping
@@ -2686,9 +3315,38 @@ enum SparseTileSamplingPlanBuilder {
         within outputRegion: SparseTileOutputRegion,
         outputMapping: SparseTileSamplingOutputMapping,
         shaderSourceOrigin: SIMD2<Float>,
-        sources: [SparseTileSourceSnapshot]
+        sources: [SparseTileSourceSnapshot],
+        periodicReachabilityAuthority:
+            SparseTilePeriodicReachabilityAuthority?
     ) throws -> Int {
-        if case let .finiteRadial(mapping) = outputMapping {
+        if case let .periodic(mapping) = outputMapping {
+            let physicalCoordinates: Set<PaintTileCoordinate>
+            if let periodicReachabilityAuthority {
+                physicalCoordinates = try authorityPages(
+                    for: region,
+                    authority: periodicReachabilityAuthority
+                )
+            } else {
+                physicalCoordinates = try periodicPhysicalPages(
+                    for: region,
+                    within: outputRegion,
+                    mapping: mapping,
+                    addressing: sources[0].addressing
+                )
+            }
+            var required: Set<SparseTileRecordCoordinateKey> = []
+            for source in sources {
+                for reference in source.references
+                where physicalCoordinates.contains(reference.coordinate) {
+                    required.insert(SparseTileRecordCoordinateKey(
+                        layerID: source.layerID,
+                        role: source.role,
+                        coordinate: reference.coordinate
+                    ))
+                }
+            }
+            return required.count
+        } else if case let .finiteRadial(mapping) = outputMapping {
             let physicalCoordinates = Set(
                 try radialLogicalPages(for: region, mapping: mapping)
                     .compactMap { mapping.layout.residentPage(at: $0) }
@@ -2787,7 +3445,9 @@ enum SparseTileSamplingPlanBuilder {
         outputRegion: SparseTileOutputRegion,
         outputMapping: SparseTileSamplingOutputMapping,
         shaderSourceOrigin: SIMD2<Float>,
-        limits: SparseTilePlanLimits
+        limits: SparseTilePlanLimits,
+        periodicReachabilityAuthority:
+            SparseTilePeriodicReachabilityAuthority?
     ) throws {
         var batchCount = 0
         var examinedRegionCount = 0
@@ -2808,7 +3468,9 @@ enum SparseTileSamplingPlanBuilder {
                 within: outputRegion,
                 outputMapping: outputMapping,
                 shaderSourceOrigin: shaderSourceOrigin,
-                sources: sources
+                sources: sources,
+                periodicReachabilityAuthority:
+                    periodicReachabilityAuthority
             )
             if required <= limits.maximumTexturesPerBatch {
                 batchCount = try checkedSum(batchCount, 1)
@@ -2877,7 +3539,9 @@ enum SparseTileSamplingPlanBuilder {
         outputRegion: SparseTileOutputRegion,
         outputMapping: SparseTileSamplingOutputMapping,
         shaderSourceOrigin: SIMD2<Float>,
-        limits: SparseTilePlanLimits
+        limits: SparseTilePlanLimits,
+        periodicReachabilityAuthority:
+            SparseTilePeriodicReachabilityAuthority?
     ) throws -> [SparseTileBindingBatch] {
         var batches: [SparseTileBindingBatch] = []
         func split(_ region: SparseTileOutputRegion) throws {
@@ -2887,7 +3551,9 @@ enum SparseTileSamplingPlanBuilder {
                 outputMapping: outputMapping,
                 shaderSourceOrigin: shaderSourceOrigin,
                 pageTables: pageTables,
-                addressing: addressing
+                addressing: addressing,
+                periodicReachabilityAuthority:
+                    periodicReachabilityAuthority
             )
             if slots.count <= limits.maximumTexturesPerBatch {
                 let remap = Dictionary(
@@ -2947,9 +3613,36 @@ enum SparseTileSamplingPlanBuilder {
         outputMapping: SparseTileSamplingOutputMapping,
         shaderSourceOrigin: SIMD2<Float>,
         pageTables: [SparseTilePageTable],
-        addressing: SparseTileAddressing
+        addressing: SparseTileAddressing,
+        periodicReachabilityAuthority:
+            SparseTilePeriodicReachabilityAuthority?
     ) throws -> [Int] {
-        if case let .finiteRadial(mapping) = outputMapping {
+        if case let .periodic(mapping) = outputMapping {
+            let physicalPages: Set<PaintTileCoordinate>
+            if let periodicReachabilityAuthority {
+                physicalPages = try authorityPages(
+                    for: region,
+                    authority: periodicReachabilityAuthority
+                )
+            } else {
+                physicalPages = try periodicPhysicalPages(
+                    for: region,
+                    within: outputRegion,
+                    mapping: mapping,
+                    addressing: addressing
+                )
+            }
+            var slots: Set<Int> = []
+            for table in pageTables {
+                for coordinate in physicalPages {
+                    if let entry = table.entry(at: coordinate),
+                       !entry.isMissing {
+                        slots.insert(entry.globalBindingSlot)
+                    }
+                }
+            }
+            return slots.sorted()
+        } else if case let .finiteRadial(mapping) = outputMapping {
             let logicalPages = try radialLogicalPages(
                 for: region,
                 mapping: mapping
@@ -3033,6 +3726,11 @@ enum SparseTileSamplingPlanBuilder {
             // Accepted B3b.2 behavior includes affine access to already-folded
             // signed radial logical coordinates.
             return
+        case let .periodic(mapping):
+            try SparseTilePeriodicOutputMappingValidator.validate(
+                mapping,
+                addressing: addressing
+            )
         case let .finiteRadial(mapping):
             guard case let .radial(layout) = addressing,
                   layout == mapping.layout
@@ -3040,6 +3738,769 @@ enum SparseTileSamplingPlanBuilder {
                 throw SparseTileSamplingPlanError.inconsistentAddressing
             }
         }
+    }
+
+    private static func authorityPages(
+        for region: SparseTileOutputRegion,
+        authority: SparseTilePeriodicReachabilityAuthority
+    ) throws -> Set<PaintTileCoordinate> {
+        guard region.minX >= authority.outputRegion.minX,
+              region.minY >= authority.outputRegion.minY,
+              region.maxX <= authority.outputRegion.maxX,
+              region.maxY <= authority.outputRegion.maxY
+        else { throw SparseTileSamplingPlanError.invalidOutputRegion }
+        if let cached = authority.cachedPages[region] {
+            authority.cacheHitCount = try checkedSum(
+                authority.cacheHitCount, 1
+            )
+            return cached
+        }
+        let pages = try periodicPhysicalPages(
+            for: region,
+            within: authority.outputRegion,
+            mapping: authority.mapping,
+            addressing: authority.addressing,
+            diagnostics: authority.diagnostics,
+            authority: authority
+        )
+        return pages
+    }
+
+    private enum PeriodicCellSignatureComponent: Equatable, Hashable {
+        /// Axis-aligned folds execute a 32-bit Metal cell conversion.
+        case shaderInt(Int)
+        /// Unit-lattice folds use modulo directly. Preserve the exact Float
+        /// floor identity without narrowing a valid large lattice coordinate.
+        case floatFloor(UInt32)
+    }
+
+    private struct PeriodicCellSignature: Equatable, Hashable {
+        let column: PeriodicCellSignatureComponent
+        let row: PeriodicCellSignatureComponent
+    }
+
+    /// Shared periodic nonlinear reachability authority. It evaluates discrete
+    /// output pixel centers, recursively proving a complete fold-cell signature
+    /// before using corner extrema. Ambiguous or boundary-crossing rectangles
+    /// bisect deterministically; small leaves enumerate exact centers. The
+    /// resulting physical canonical pages drive selection, preflight, fallback
+    /// count, and final slot validation.
+    private static func periodicPhysicalPages(
+        for region: SparseTileOutputRegion,
+        within outputRegion: SparseTileOutputRegion,
+        mapping: SparseTilePeriodicOutputMapping,
+        addressing: SparseTileAddressing,
+        diagnostics: SparseTilePeriodicReachabilityDiagnostics? = nil,
+        authority: SparseTilePeriodicReachabilityAuthority? = nil
+    ) throws -> Set<PaintTileCoordinate> {
+        try validateOutputMapping(.periodic(mapping), addressing: addressing)
+        guard case let .periodic(period) = addressing else {
+            throw SparseTileSamplingPlanError.inconsistentAddressing
+        }
+        let transform = mapping.outputToWorldTransform
+        let shaderOrigin = try mapping.shaderSourceOrigin(
+            outputRegion: outputRegion
+        )
+        let fullColumns = try ceilDivide(
+            period.width,
+            by: PaintTileDescriptor.side
+        )
+        let fullRows = try ceilDivide(
+            period.height,
+            by: PaintTileDescriptor.side
+        )
+        let fullPageCount = try checkedProduct(fullColumns, fullRows)
+        func recordWork(_ count: Int) throws {
+            guard count >= 0 else {
+                throw SparseTileSamplingPlanError.arithmeticOverflow
+            }
+            if let authority {
+                let acquisitionWork = try checkedSum(
+                    authority.workCount, count
+                )
+                let aggregateWork = try checkedSum(
+                    authority.phaseAWorkCount, acquisitionWork
+                )
+                guard aggregateWork <= authority.maximumWork else {
+                    throw SparseTileSamplingPlanError
+                        .periodicReachabilityWorkLimitExceeded(
+                            maximum: authority.maximumWork
+                        )
+                }
+                authority.workCount = acquisitionWork
+            }
+        }
+
+        func worldAxis(
+            origin: Float,
+            localIndex: Int,
+            screenPixelOffset: Int,
+            step: Float
+        ) throws -> Float {
+            let localCenter = Float(localIndex) + 0.5
+            let offset = Float(screenPixelOffset)
+            let center = localCenter + offset
+            guard localCenter.isFinite, offset.isFinite, center.isFinite,
+                  Double(Float(localIndex)) == Double(localIndex),
+                  Int(exactly: offset) == screenPixelOffset
+            else {
+                throw SparseTileSamplingPlanError
+                    .invalidOutputToSourceTransform
+            }
+            // This is the exact expression written in the precise periodic
+            // Metal scope: sourceOrigin + rootPixel * sourceStep.
+            let value = origin + center * step
+            guard value.isFinite else {
+                throw SparseTileSamplingPlanError
+                    .invalidOutputToSourceTransform
+            }
+            return value
+        }
+
+        func worldPoint(x: Int, y: Int) throws -> WorldPoint {
+            let localX = try x.subtractingChecked(outputRegion.minX)
+            let localY = try y.subtractingChecked(outputRegion.minY)
+            guard localX >= 0, localY >= 0,
+                  localX < outputRegion.width,
+                  localY < outputRegion.height
+            else { throw SparseTileSamplingPlanError.invalidOutputRegion }
+            let xValue = try worldAxis(
+                origin: shaderOrigin.x,
+                localIndex: localX,
+                screenPixelOffset: mapping.screenPixelOffset.x,
+                step: transform.sourceStep.x
+            )
+            let yValue = try worldAxis(
+                origin: shaderOrigin.y,
+                localIndex: localY,
+                screenPixelOffset: mapping.screenPixelOffset.y,
+                step: transform.sourceStep.y
+            )
+            return WorldPoint(x: xValue, y: yValue)
+        }
+
+        func latticePoint(_ world: WorldPoint) throws -> SIMD2<Float> {
+            // Matches both Task 7 and the reassociation-disabled Metal vector
+            // expression `(xAxis * x + yAxis * y) + translation`.
+            let lattice = mapping.fold.worldToLattice.applying(to: world.simd)
+            guard lattice.x.isFinite, lattice.y.isFinite else {
+                throw SparseTileSamplingPlanError
+                    .invalidOutputToSourceTransform
+            }
+            return lattice
+        }
+
+        func resolvedCellIndex(
+            coordinate: Float,
+            extent: Float,
+            phase: Float
+        ) throws -> Int {
+            let phased = coordinate - phase
+            let quotient = phased / extent
+            guard phased.isFinite, quotient.isFinite,
+                  let initial = Int(exactly: floor(quotient))
+            else {
+                throw SparseTileSamplingPlanError
+                    .invalidOutputToSourceTransform
+            }
+            var result = initial
+            let origin = Float(result) * extent + phase
+            let boundary = origin + extent
+            guard origin.isFinite, boundary.isFinite else {
+                throw SparseTileSamplingPlanError
+                    .invalidOutputToSourceTransform
+            }
+            if coordinate < origin {
+                result = try checkedSum(result, -1)
+            } else if coordinate >= boundary {
+                result = try checkedSum(result, 1)
+            }
+            return result
+        }
+
+        /// Throwing mirror of Task 7's preconditioned cell authority. Every
+        /// world candidate must pass this exact-Float and half-open round-trip
+        /// proof before `CompiledPeriodicDisplayFold.applying` is invoked.
+        func cellIndex(
+            coordinate: Float,
+            extent: Float,
+            phase: Float,
+            requiresShaderInt32: Bool = true
+        ) throws -> Int {
+            let result = try resolvedCellIndex(
+                coordinate: coordinate,
+                extent: extent,
+                phase: phase
+            )
+            let floatResult = Float(result)
+            guard Int(exactly: floatResult) == result,
+                  !requiresShaderInt32 || Int32(exactly: result) != nil
+            else {
+                throw SparseTileSamplingPlanError
+                    .invalidOutputToSourceTransform
+            }
+            let unphasedOrigin = floatResult * extent
+            let origin = unphasedOrigin + phase
+            let boundary = origin + extent
+            let successor = try checkedSum(result, 1)
+            guard unphasedOrigin.isFinite,
+                  origin.isFinite,
+                  boundary.isFinite,
+                  phase == 0 || origin - unphasedOrigin == phase,
+                  boundary - origin == extent,
+                  try resolvedCellIndex(
+                    coordinate: origin, extent: extent, phase: phase
+                  ) == result,
+                  try resolvedCellIndex(
+                    coordinate: boundary.nextDown,
+                    extent: extent,
+                    phase: phase
+                  ) == result,
+                  try resolvedCellIndex(
+                    coordinate: boundary, extent: extent, phase: phase
+                  ) == successor,
+                  coordinate >= origin,
+                  coordinate < boundary
+            else {
+                throw SparseTileSamplingPlanError
+                    .invalidOutputToSourceTransform
+            }
+            return result
+        }
+
+        func phaseOffset(_ index: Int, _ phase: PeriodicPhaseProgram) -> Float {
+            let count = phase.fractions.count
+            let remainder = index % count
+            let slot = remainder >= 0 ? remainder : remainder + count
+            let extent: Float = switch phase.offsetAxis {
+            case .x: mapping.fold.repeatSize.width
+            case .y: mapping.fold.repeatSize.height
+            }
+            return phase.fractions[slot] * extent
+        }
+
+        func signature(
+            _ world: WorldPoint
+        ) throws -> PeriodicCellSignature {
+            let fold = mapping.fold
+            switch fold.coordinateSpace {
+            case .unitLattice:
+                let lattice = try latticePoint(world)
+                if fold.family == .rectangular {
+                    // Task 7 proves exact Float cell round-trips for this
+                    // family even though Metal itself folds by modulo.
+                    _ = try cellIndex(
+                        coordinate: lattice.x,
+                        extent: 1,
+                        phase: 0,
+                        requiresShaderInt32: false
+                    )
+                    _ = try cellIndex(
+                        coordinate: lattice.y,
+                        extent: 1,
+                        phase: 0,
+                        requiresShaderInt32: false
+                    )
+                }
+                func component(
+                    _ coordinate: Float
+                ) throws -> PeriodicCellSignatureComponent {
+                    let value = floor(coordinate)
+                    guard value.isFinite else {
+                        throw SparseTileSamplingPlanError
+                            .invalidOutputToSourceTransform
+                    }
+                    let normalized: Float = value == 0 ? 0 : value
+                    return .floatFloor(normalized.bitPattern)
+                }
+                return PeriodicCellSignature(
+                    column: try component(lattice.x),
+                    row: try component(lattice.y)
+                )
+            case .axisAlignedRepeat:
+                guard let phase = fold.phase else {
+                    return PeriodicCellSignature(
+                        column: .shaderInt(try cellIndex(
+                            coordinate: world.x,
+                            extent: fold.repeatSize.width,
+                            phase: 0
+                        )),
+                        row: .shaderInt(try cellIndex(
+                            coordinate: world.y,
+                            extent: fold.repeatSize.height,
+                            phase: 0
+                        ))
+                    )
+                }
+                switch phase.indexAxis {
+                case .x:
+                    let column = try cellIndex(
+                        coordinate: world.x,
+                        extent: fold.repeatSize.width,
+                        phase: 0
+                    )
+                    return PeriodicCellSignature(
+                        column: .shaderInt(column),
+                        row: .shaderInt(try cellIndex(
+                            coordinate: world.y,
+                            extent: fold.repeatSize.height,
+                            phase: phaseOffset(column, phase)
+                        ))
+                    )
+                case .y:
+                    let row = try cellIndex(
+                        coordinate: world.y,
+                        extent: fold.repeatSize.height,
+                        phase: 0
+                    )
+                    return PeriodicCellSignature(
+                        column: .shaderInt(try cellIndex(
+                            coordinate: world.x,
+                            extent: fold.repeatSize.width,
+                            phase: phaseOffset(row, phase)
+                        )),
+                        row: .shaderInt(row)
+                    )
+                }
+            }
+        }
+
+        func samplePosition(_ world: WorldPoint) throws -> SIMD2<Float> {
+            // Validate Task 7's preconditions before invoking its compiled
+            // fold. The periodic Metal scope writes the same expression and
+            // explicitly disables reassociation and contraction.
+            _ = try signature(world)
+            let compiled = mapping.fold.applying(to: world)
+            let sample = SIMD2(compiled.x, compiled.y)
+                - SIMD2(repeating: 0.5)
+            guard compiled.x.isFinite, compiled.y.isFinite,
+                  sample.x.isFinite, sample.y.isFinite
+            else {
+                throw SparseTileSamplingPlanError
+                    .invalidOutputToSourceTransform
+            }
+            return sample
+        }
+
+        func insertSamplePosition(
+            _ sample: SIMD2<Float>,
+            into pages: inout Set<PaintTileCoordinate>
+        ) throws {
+            let lowerX = try checkedFloorToInt(Double(sample.x))
+            let lowerY = try checkedFloorToInt(Double(sample.y))
+            for deltaY in 0...1 {
+                for deltaX in 0...1 {
+                    let x = try checkedSum(lowerX, deltaX)
+                    let y = try checkedSum(lowerY, deltaY)
+                    let wrappedX = (x % period.width + period.width)
+                        % period.width
+                    let wrappedY = (y % period.height + period.height)
+                        % period.height
+                    pages.insert(PaintTileCoordinate(
+                        x: wrappedX / PaintTileDescriptor.side,
+                        y: wrappedY / PaintTileDescriptor.side
+                    ))
+                }
+            }
+        }
+
+        func physicalPages(
+            for samples: [SIMD2<Float>]
+        ) throws -> Set<PaintTileCoordinate> {
+            var result: Set<PaintTileCoordinate> = []
+            for sample in samples {
+                let lowerX = try checkedFloorToInt(Double(sample.x))
+                let lowerY = try checkedFloorToInt(Double(sample.y))
+                for deltaY in 0...1 {
+                    for deltaX in 0...1 {
+                        let pixelX = try checkedSum(lowerX, deltaX)
+                        let pixelY = try checkedSum(lowerY, deltaY)
+                        let wrappedX = (pixelX % period.width + period.width)
+                            % period.width
+                        let wrappedY = (pixelY % period.height + period.height)
+                            % period.height
+                        result.insert(PaintTileCoordinate(
+                            x: wrappedX / PaintTileDescriptor.side,
+                            y: wrappedY / PaintTileDescriptor.side
+                        ))
+                    }
+                }
+            }
+            return result
+        }
+
+        func upperPhysicalPages(
+            for worlds: [WorldPoint]
+        ) throws -> Set<PaintTileCoordinate> {
+            try recordWork(worlds.count)
+            let samples = try worlds.map(samplePosition)
+            guard let minimumX = samples.map(\.x).min(),
+                  let maximumX = samples.map(\.x).max(),
+                  let minimumY = samples.map(\.y).min(),
+                  let maximumY = samples.map(\.y).max()
+            else { throw SparseTileSamplingPlanError.invalidOutputRegion }
+            let minX = try checkedFloorToInt(Double(minimumX))
+            let maxX = try checkedSum(
+                try checkedFloorToInt(Double(maximumX)), 1
+            )
+            let minY = try checkedFloorToInt(Double(minimumY))
+            let maxY = try checkedSum(
+                try checkedFloorToInt(Double(maximumY)), 1
+            )
+            let xIntervals = try addressedIntervals(
+                minimum: minX,
+                maximumInclusive: maxX,
+                axisLimit: period.width,
+                wraps: true
+            )
+            let yIntervals = try addressedIntervals(
+                minimum: minY,
+                maximumInclusive: maxY,
+                axisLimit: period.height,
+                wraps: true
+            )
+            var pageIterationCount = 0
+            for xInterval in xIntervals {
+                let firstX = floorDivide(
+                    xInterval.lowerBound,
+                    divisor: PaintTileDescriptor.side
+                )
+                let lastX = floorDivide(
+                    xInterval.upperBound - 1,
+                    divisor: PaintTileDescriptor.side
+                )
+                let xCount = try checkedSum(
+                    try lastX.subtractingChecked(firstX), 1
+                )
+                for yInterval in yIntervals {
+                    let firstY = floorDivide(
+                        yInterval.lowerBound,
+                        divisor: PaintTileDescriptor.side
+                    )
+                    let lastY = floorDivide(
+                        yInterval.upperBound - 1,
+                        divisor: PaintTileDescriptor.side
+                    )
+                    let yCount = try checkedSum(
+                        try lastY.subtractingChecked(firstY), 1
+                    )
+                    pageIterationCount = try checkedSum(
+                        pageIterationCount,
+                        try checkedProduct(xCount, yCount)
+                    )
+                }
+            }
+            // Charge the complete Cartesian page walk before inserting its
+            // first element, so enormous valid periods fail typed and leave no
+            // partial authority cache behind.
+            try recordWork(pageIterationCount)
+            var result: Set<PaintTileCoordinate> = []
+            for xInterval in xIntervals {
+                let firstX = floorDivide(
+                    xInterval.lowerBound,
+                    divisor: PaintTileDescriptor.side
+                )
+                let lastX = floorDivide(
+                    xInterval.upperBound - 1,
+                    divisor: PaintTileDescriptor.side
+                )
+                for yInterval in yIntervals {
+                    let firstY = floorDivide(
+                        yInterval.lowerBound,
+                        divisor: PaintTileDescriptor.side
+                    )
+                    let lastY = floorDivide(
+                        yInterval.upperBound - 1,
+                        divisor: PaintTileDescriptor.side
+                    )
+                    for y in firstY...lastY {
+                        for x in firstX...lastX {
+                            result.insert(PaintTileCoordinate(x: x, y: y))
+                        }
+                    }
+                }
+            }
+            return result
+        }
+
+        func witnessedPhysicalPages(
+            in candidate: SparseTileOutputRegion
+        ) throws -> Set<PaintTileCoordinate> {
+            let middleX = try checkedSum(
+                candidate.minX, (candidate.width - 1) / 2
+            )
+            let middleY = try checkedSum(
+                candidate.minY, (candidate.height - 1) / 2
+            )
+            let xs = Set([candidate.minX, middleX, candidate.maxX - 1])
+            let ys = Set([candidate.minY, middleY, candidate.maxY - 1])
+            try recordWork(try checkedProduct(xs.count, ys.count))
+            var samples: [SIMD2<Float>] = []
+            for y in ys {
+                for x in xs {
+                    let world = try worldPoint(x: x, y: y)
+                    samples.append(try samplePosition(world))
+                }
+            }
+            return try physicalPages(for: samples)
+        }
+
+        func physicalAxisSamplePages(
+            _ samplePosition: Float,
+            axisLimit: Int
+        ) throws -> Set<Int> {
+            let lower = try checkedFloorToInt(Double(samplePosition))
+            var result: Set<Int> = []
+            for delta in 0...1 {
+                let pixel = try checkedSum(lower, delta)
+                let wrapped = (pixel % axisLimit + axisLimit) % axisLimit
+                result.insert(wrapped / PaintTileDescriptor.side)
+            }
+            return result
+        }
+
+        func enumerate(
+            _ leaf: SparseTileOutputRegion
+        ) throws -> Set<PaintTileCoordinate> {
+            let centerCount = try checkedProduct(leaf.width, leaf.height)
+            diagnostics?.enumeratedPixelCenterCount = try checkedSum(
+                diagnostics?.enumeratedPixelCenterCount ?? 0,
+                centerCount
+            )
+            try recordWork(centerCount)
+            var result: Set<PaintTileCoordinate> = []
+            for y in leaf.minY..<leaf.maxY {
+                for x in leaf.minX..<leaf.maxX {
+                    let world = try worldPoint(x: x, y: y)
+                    try insertSamplePosition(
+                        try samplePosition(world), into: &result
+                    )
+                }
+            }
+            return result
+        }
+
+        /// Within one complete rectangular fold signature, canonical x and y
+        /// are separable. Sweep each discrete output axis rather than filling
+        /// the continuous corner range: sparse source steps may intentionally
+        /// skip physical pages. If an interior sample changes phase/cell/
+        /// reflection signature, return false so deterministic subdivision
+        /// establishes smaller separable pieces.
+        func exactAxisSeparablePages(
+            _ candidate: SparseTileOutputRegion
+        ) throws -> Set<PaintTileCoordinate>? {
+            let sweepCount = try checkedSum(
+                candidate.width, candidate.height
+            )
+            try recordWork(sweepCount)
+            diagnostics?.axisSweepPixelCenterCount = try checkedSum(
+                diagnostics?.axisSweepPixelCenterCount ?? 0,
+                sweepCount
+            )
+            var observedSignatures: Set<PeriodicCellSignature> = []
+            var xPages: Set<Int> = []
+            var yPages: Set<Int> = []
+            for x in candidate.minX..<candidate.maxX {
+                let world = try worldPoint(x: x, y: candidate.minY)
+                observedSignatures.insert(try signature(world))
+                let sample = try samplePosition(world)
+                xPages.formUnion(try physicalAxisSamplePages(
+                    sample.x,
+                    axisLimit: period.width
+                ))
+            }
+            for y in candidate.minY..<candidate.maxY {
+                let world = try worldPoint(x: candidate.minX, y: y)
+                observedSignatures.insert(try signature(world))
+                let sample = try samplePosition(world)
+                yPages.formUnion(try physicalAxisSamplePages(
+                    sample.y,
+                    axisLimit: period.height
+                ))
+            }
+            guard observedSignatures.count == 1 else { return nil }
+            try recordWork(try checkedProduct(xPages.count, yPages.count))
+            var result: Set<PaintTileCoordinate> = []
+            for y in yPages {
+                for x in xPages {
+                    result.insert(PaintTileCoordinate(x: x, y: y))
+                }
+            }
+            return result
+        }
+
+        /// Choose the axis whose remaining output extent spans more folded
+        /// canonical pages. This is only a subdivision-order heuristic; exact
+        /// reachability still comes from the shared fold/page authority.
+        func projectedAmbiguitySpan(
+            forX: Bool,
+            in candidate: SparseTileOutputRegion
+        ) throws -> Double {
+            let fold = mapping.fold
+            let pixelCount = Double(
+                forX ? candidate.width : candidate.height
+            )
+            let canonicalWidth = Double(fold.canonicalSize.width)
+            let canonicalHeight = Double(fold.canonicalSize.height)
+            let pageSide = Double(PaintTileDescriptor.side)
+            let span: Double
+            switch fold.coordinateSpace {
+            case .axisAlignedRepeat:
+                if forX {
+                    let cells = abs(Double(transform.sourceStep.x))
+                        / Double(fold.repeatSize.width)
+                    var canonical = cells * canonicalWidth
+                    if let phase = fold.phase, phase.indexAxis == .x {
+                        canonical = max(canonical, cells * canonicalHeight)
+                    }
+                    span = canonical * pixelCount / pageSide
+                } else {
+                    let cells = abs(Double(transform.sourceStep.y))
+                        / Double(fold.repeatSize.height)
+                    var canonical = cells * canonicalHeight
+                    if let phase = fold.phase, phase.indexAxis == .y {
+                        canonical = max(canonical, cells * canonicalWidth)
+                    }
+                    span = canonical * pixelCount / pageSide
+                }
+            case .unitLattice:
+                let derivative = forX
+                    ? fold.worldToLattice.xAxis * transform.sourceStep.x
+                    : fold.worldToLattice.yAxis * transform.sourceStep.y
+                let canonical = max(
+                    abs(Double(derivative.x)) * canonicalWidth,
+                    abs(Double(derivative.y)) * canonicalHeight
+                )
+                span = canonical * pixelCount / pageSide
+            }
+            guard span.isFinite else {
+                throw SparseTileSamplingPlanError
+                    .invalidOutputToSourceTransform
+            }
+            return span
+        }
+
+        func collect(
+            _ candidate: SparseTileOutputRegion
+        ) throws -> Set<PaintTileCoordinate> {
+            if let cached = authority?.cachedPages[candidate] {
+                authority?.cacheHitCount = try checkedSum(
+                    authority?.cacheHitCount ?? 0, 1
+                )
+                return cached
+            }
+            diagnostics?.visitedNodeCount = try checkedSum(
+                diagnostics?.visitedNodeCount ?? 0, 1
+            )
+            try recordWork(1)
+
+            func finish(
+                _ result: Set<PaintTileCoordinate>
+            ) -> Set<PaintTileCoordinate> {
+                authority?.cachedPages[candidate] = result
+                return result
+            }
+            let lastX = candidate.maxX - 1
+            let lastY = candidate.maxY - 1
+            let corners = [
+                (candidate.minX, candidate.minY),
+                (lastX, candidate.minY),
+                (candidate.minX, lastY),
+                (lastX, lastY),
+            ]
+            try recordWork(corners.count)
+            var worlds: [WorldPoint] = []
+            for point in corners {
+                worlds.append(try worldPoint(x: point.0, y: point.1))
+            }
+            var allSignatures: Set<PeriodicCellSignature> = []
+            for world in worlds {
+                allSignatures.insert(try signature(world))
+            }
+            if allSignatures.count == 1 {
+                let upper = try upperPhysicalPages(for: worlds)
+                let witnessed = try witnessedPhysicalPages(in: candidate)
+                if upper == witnessed {
+                    diagnostics?.singlePageFastPathCount = try checkedSum(
+                        diagnostics?.singlePageFastPathCount ?? 0, 1
+                    )
+                    return finish(upper)
+                }
+                switch mapping.fold.coordinateSpace {
+                case .axisAlignedRepeat:
+                    if let exact = try exactAxisSeparablePages(candidate) {
+                        return finish(exact)
+                    }
+                case .unitLattice:
+                    // A rotated/sheared footprint is a parallelogram, not its
+                    // Cartesian bounding box. When witnesses do not prove the
+                    // complete upper set, subdivide instead of retaining an
+                    // unreachable Cartesian range.
+                    break
+                }
+            }
+            let area = try checkedProduct(candidate.width, candidate.height)
+            if area <= 64 {
+                return finish(try enumerate(candidate))
+            }
+            let canSplitX = candidate.width > 1
+            let canSplitY = candidate.height > 1
+            let splitX: Bool
+            if canSplitX, canSplitY {
+                let xSpan = try projectedAmbiguitySpan(
+                    forX: true, in: candidate
+                )
+                let ySpan = try projectedAmbiguitySpan(
+                    forX: false, in: candidate
+                )
+                splitX = xSpan == ySpan
+                    ? candidate.width >= candidate.height
+                    : xSpan > ySpan
+            } else {
+                splitX = canSplitX
+            }
+            if splitX, canSplitX {
+                diagnostics?.subdivisionCount = try checkedSum(
+                    diagnostics?.subdivisionCount ?? 0, 1
+                )
+                let midpoint = try checkedSum(
+                    candidate.minX, candidate.width / 2
+                )
+                let first = try collect(SparseTileOutputRegion(
+                    minX: candidate.minX, minY: candidate.minY,
+                    maxX: midpoint, maxY: candidate.maxY
+                ))
+                if first.count == fullPageCount { return finish(first) }
+                let second = try collect(SparseTileOutputRegion(
+                    minX: midpoint, minY: candidate.minY,
+                    maxX: candidate.maxX, maxY: candidate.maxY
+                ))
+                try recordWork(try checkedSum(first.count, second.count))
+                return finish(first.union(second))
+            } else if candidate.height > 1 {
+                diagnostics?.subdivisionCount = try checkedSum(
+                    diagnostics?.subdivisionCount ?? 0, 1
+                )
+                let midpoint = try checkedSum(
+                    candidate.minY, candidate.height / 2
+                )
+                let first = try collect(SparseTileOutputRegion(
+                    minX: candidate.minX, minY: candidate.minY,
+                    maxX: candidate.maxX, maxY: midpoint
+                ))
+                if first.count == fullPageCount { return finish(first) }
+                let second = try collect(SparseTileOutputRegion(
+                    minX: candidate.minX, minY: midpoint,
+                    maxX: candidate.maxX, maxY: candidate.maxY
+                ))
+                try recordWork(try checkedSum(first.count, second.count))
+                return finish(first.union(second))
+            } else {
+                return finish(try enumerate(candidate))
+            }
+        }
+
+        return try collect(region)
     }
 
     /// Conservative nonlinear reachability shared by root selection and every

@@ -1,12 +1,108 @@
 import EditorCore
 import Foundation
 import Metal
+import PatternEngine
 import simd
 import Testing
 @testable import MetalRenderer
 
 @Suite("Bounded GPU layer blend pipeline", .serialized)
 struct LayerBlendPipelineTests {
+    @Test @MainActor
+    func nonradialDisplayFlagsPreserveExistingAffineAndPeriodicOutput()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let pipeline = try LayerBlendPipeline.prepare(
+            device: device,
+            library: makeLayerBlendLibrary(device: device),
+            abiVersion: LayerBlendABI.version
+        )
+        let sourcePixels: [SIMD4<Float>] = [
+            SIMD4(0.1, 0.2, 0.3, 1),
+            SIMD4(0.4, 0.3, 0.2, 1),
+            SIMD4(0.7, 0.6, 0.5, 1),
+            SIMD4(0.9, 0.1, 0.8, 1),
+        ]
+        let source = try makeTexture(device: device, pixels: sourcePixels)
+        let targetDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: DocumentColorPipeline.displayPixelFormat,
+            width: 2,
+            height: 2,
+            mipmapped: false
+        )
+        targetDescriptor.storageMode = .shared
+        targetDescriptor.usage = [.renderTarget, .shaderRead]
+        let target = try #require(device.makeTexture(
+            descriptor: targetDescriptor
+        ))
+        let queue = try #require(device.makeCommandQueue())
+        let output = try SparseTileOutputRegion(
+            minX: 0, minY: 0, maxX: 2, maxY: 2
+        )
+        let strategy = try TilingStrategy(
+            configuration: .defaultConfiguration(
+                presetID: .halfDrop,
+                canonicalRasterSize: PixelSize(width: 64, height: 64)
+            ),
+            canonicalRasterSize: PixelSize(width: 64, height: 64)
+        )
+        let fold = try #require(
+            strategy.compiledSymmetry.domain.periodic?.displayFold
+        )
+        let mappings: [SparseTileSamplingOutputMapping] = [
+            .affine(.identity),
+            .periodic(SparseTilePeriodicOutputMapping(
+                fold: fold,
+                outputToWorldTransform: .identity
+            )),
+        ]
+        var outputs: [[UInt8]] = []
+        for mapping in mappings {
+            for flags in [(false, false), (true, true)] {
+                let command = try #require(queue.makeCommandBuffer())
+                let pass = MTLRenderPassDescriptor()
+                pass.colorAttachments[0].texture = target
+                pass.colorAttachments[0].loadAction = .clear
+                pass.colorAttachments[0].storeAction = .store
+                pass.colorAttachments[0].clearColor = MTLClearColor(
+                    red: 0, green: 0, blue: 0, alpha: 1
+                )
+                try pipeline.encodeDisplay(
+                    source: source,
+                    target: target,
+                    outputRegion: output,
+                    parameters: SparseTileSamplingEncodeParameters(
+                        outputMapping: mapping,
+                        compositeMode: 0,
+                        liveVisible: true,
+                        strokeOpacity: 1,
+                        accumulationLimit: 1,
+                        eraserStrength: 1,
+                        showGridLines: flags.0,
+                        showCanvasBoundary: flags.1
+                    ),
+                    commandBuffer: command,
+                    renderPassDescriptor: pass
+                )
+                command.commit()
+                command.waitUntilCompleted()
+                #expect(command.status == .completed)
+                var bytes = [UInt8](repeating: 0, count: 2 * 2 * 4)
+                target.getBytes(
+                    &bytes,
+                    bytesPerRow: 2 * 4,
+                    from: MTLRegionMake2D(0, 0, 2, 2),
+                    mipmapLevel: 0
+                )
+                outputs.append(bytes)
+            }
+        }
+        #expect(outputs[0] == outputs[1])
+        #expect(outputs[2] == outputs[3])
+        #expect(outputs[0] == outputs[2])
+    }
+
     @Test @MainActor
     func gpuMatchesIndependentLinearPremultipliedReference() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }

@@ -83,6 +83,130 @@ struct DocumentPaintStableSnapshotRendererTests {
     }
 
     @Test
+    func periodicChildrenRetainRootTransformAndAccumulateExactPixelOffset()
+        throws
+    {
+        let size = PixelSize(width: 512, height: 512)
+        let fold = try #require(TilingStrategy(
+            configuration: .defaultConfiguration(
+                presetID: .halfDrop,
+                canonicalRasterSize: size
+            ),
+            canonicalRasterSize: size
+        ).compiledSymmetry.domain.periodic?.displayFold)
+        let transform = SparseTileOutputToSourceTransform(
+            sourceOffset: SIMD2(-160.457, 11.25),
+            sourceStep: SIMD2(0.3, 0.75)
+        )
+        let root = SparseTileSamplingOutputMapping.periodic(
+            SparseTilePeriodicOutputMapping(
+                fold: fold,
+                outputToWorldTransform: transform
+            )
+        )
+        let full = try region(-100_000, -20, -99_900, 80)
+        let firstRegion = try region(-99_970, -10, -99_920, 60)
+        let secondRegion = try region(-99_950, 5, -99_930, 30)
+        let first = try DocumentPaintStableSnapshotChunkPlanner.childMapping(
+            global: root,
+            full: full,
+            child: firstRegion
+        )
+        let second = try DocumentPaintStableSnapshotChunkPlanner.childMapping(
+            global: first,
+            full: firstRegion,
+            child: secondRegion
+        )
+        guard case let .periodic(firstMapping) = first,
+              case let .periodic(secondMapping) = second
+        else {
+            Issue.record("periodic child mapping changed kind")
+            return
+        }
+        #expect(firstMapping.outputToWorldTransform == transform)
+        #expect(firstMapping.screenPixelOffset == SIMD2(30, 10))
+        #expect(secondMapping.outputToWorldTransform == transform)
+        #expect(secondMapping.screenPixelOffset == SIMD2(50, 25))
+        #expect(try secondMapping.shaderSourceOrigin(
+            outputRegion: secondRegion
+        ) == transform.shaderSourceOrigin(outputRegion: full))
+
+        let invalid = SparseTilePeriodicOutputMapping(
+            fold: fold,
+            outputToWorldTransform: transform,
+            screenPixelOffset: SIMD2((1 << 24) + 1, 0)
+        )
+        #expect(throws: SparseTileSamplingPlanError.inconsistentAddressing) {
+            try SparseTilePeriodicOutputMappingValidator.validate(
+                invalid,
+                addressing: .periodic(period: size)
+            )
+        }
+        let overflow = SparseTileSamplingOutputMapping.periodic(
+            SparseTilePeriodicOutputMapping(
+                fold: fold,
+                outputToWorldTransform: transform,
+                screenPixelOffset: SIMD2(Int.max, 0)
+            )
+        )
+        #expect(throws: DocumentPaintStableSnapshotRendererError
+            .inexactFloatCoordinate) {
+            _ = try DocumentPaintStableSnapshotChunkPlanner.childMapping(
+                global: overflow,
+                full: try region(0, 0, 2, 1),
+                child: try region(1, 0, 2, 1)
+            )
+        }
+        #expect(throws: DocumentPaintStableSnapshotRendererError
+            .childOutsideFullRegion) {
+            _ = try DocumentPaintStableSnapshotChunkPlanner.childMapping(
+                global: root,
+                full: try region(0, 0, 2, 1),
+                child: try region(-1, 0, 1, 1)
+            )
+        }
+    }
+
+    @Test
+    func periodicChildAcrossFloatIntegerBoundaryUsesRootOffset() throws {
+        let size = PixelSize(width: 512, height: 512)
+        let fold = try #require(TilingStrategy(
+            configuration: .defaultConfiguration(
+                presetID: .grid,
+                canonicalRasterSize: size
+            ),
+            canonicalRasterSize: size
+        ).compiledSymmetry.domain.periodic?.displayFold)
+        let transform = SparseTileOutputToSourceTransform(
+            sourceOffset: SIMD2(17.25, -9.5),
+            sourceStep: SIMD2(0.3, 0.75)
+        )
+        let root = SparseTileSamplingOutputMapping.periodic(
+            SparseTilePeriodicOutputMapping(
+                fold: fold,
+                outputToWorldTransform: transform
+            )
+        )
+        let boundary = 1 << 24
+        let full = try region(boundary, 0, boundary + 4, 1)
+        let childRegion = try region(boundary + 1, 0, boundary + 3, 1)
+
+        let child = try DocumentPaintStableSnapshotChunkPlanner.childMapping(
+            global: root,
+            full: full,
+            child: childRegion
+        )
+        guard case let .periodic(mapping) = child else {
+            Issue.record("periodic child mapping changed kind")
+            return
+        }
+        #expect(mapping.outputToWorldTransform == transform)
+        #expect(mapping.screenPixelOffset == SIMD2(1, 0))
+        #expect(try mapping.shaderSourceOrigin(outputRegion: childRegion)
+            == transform.shaderSourceOrigin(outputRegion: full))
+    }
+
+    @Test
     func limitsRejectZeroNegativeAndOverflowingScratch() throws {
         #expect(throws: DocumentPaintStableSnapshotRendererError.invalidLimit) {
             _ = try DocumentPaintStableSnapshotRendererLimits(
@@ -851,6 +975,205 @@ struct DocumentPaintStableSnapshotRendererTests {
         #expect(store.activeSnapshotTokenCount == 0)
         #expect(store.activeLeaseCount == 0)
         #expect(store.snapshotPayloadDebtByteCount == 0)
+    }
+
+    @Test(arguments: [
+        SymmetryPresetID.halfDrop,
+        .brick,
+        .mirrorXY,
+        .squareRotation,
+        .rotation3,
+    ])
+    @MainActor
+    func compiledPeriodicFoldSplitAndUnsplitMatchOracleAndBackends(
+        preset: SymmetryPresetID
+    ) async throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 512, height: 512)
+        let geometry = try DocumentPaintGeometry(
+            documentPixelSize: size,
+            storagePixelSize: size,
+            radialLayout: nil
+        )
+        let fixture = try makeFixture(
+            device: device,
+            geometry: geometry,
+            byteBudgetTiles: 4
+        )
+        let colors: [PaintTileCoordinate: SIMD4<Float>] = [
+            .init(x: 0, y: 0): SIMD4(0.125, 0.25, 0.375, 1),
+            .init(x: 1, y: 0): SIMD4(0.625, 0.125, 0.25, 1),
+            .init(x: 0, y: 1): SIMD4(0.25, 0.75, 0.125, 1),
+            .init(x: 1, y: 1): SIMD4(0.875, 0.5, 0.25, 1),
+        ]
+        for (coordinate, color) in colors {
+            try seed(fixture, coordinate: coordinate, color: color)
+        }
+        let snapshot = try fixture.registry.captureStableCanonicalSnapshot(
+            layerID: fixture.layerID,
+            addressing: .periodic(period: size),
+            addressingRevision: 120 + UInt64(preset.rawValue)
+        )
+        let strategy = try TilingStrategy(
+            configuration: .defaultConfiguration(
+                presetID: preset,
+                canonicalRasterSize: size
+            ),
+            canonicalRasterSize: size
+        )
+        let fold = try #require(
+            strategy.compiledSymmetry.domain.periodic?.displayFold
+        )
+        let output = try region(-7, -5, 9, 7)
+        let transform = SparseTileOutputToSourceTransform(
+            sourceOffset: SIMD2(-633.75, -507.5),
+            sourceStep: SIMD2(97.5, 111.25)
+        )
+        let mapping = SparseTileSamplingOutputMapping.periodic(
+            SparseTilePeriodicOutputMapping(
+                fold: fold,
+                outputToWorldTransform: transform
+            )
+        )
+        let renderRequest = DocumentPaintStableSnapshotRenderRequest(
+            snapshot: snapshot,
+            outputRegion: output,
+            outputGeometryRevision: 19,
+            outputMapping: mapping
+        )
+        let library = try makeLibrary(device)
+        let fallbackWhole = try await renderTightBytes(
+            request: renderRequest,
+            chunk: 32,
+            device: device,
+            library: library,
+            backendRequest: .forceFallback
+        )
+        let fallbackSplit = try await renderTightBytes(
+            request: renderRequest,
+            chunk: 3,
+            device: device,
+            library: library,
+            backendRequest: .forceFallback
+        )
+        #expect(fallbackSplit == fallbackWhole)
+        let expected = try expectedPeriodicBytes(
+            output: output,
+            transform: transform,
+            fold: fold,
+            size: size,
+            colors: colors
+        )
+        expectEncodedBytesWithinOne(fallbackWhole, expected)
+        if device.argumentBuffersSupport == .tier2 {
+            let tier2 = try await renderTightBytes(
+                request: renderRequest,
+                chunk: 3,
+                device: device,
+                library: library,
+                backendRequest: .forceTier2
+            )
+            #expect(tier2 == fallbackWhole)
+        }
+        snapshot.close()
+        assertStoreDebtIsZero(fixture.registry.sharedTileStore.snapshot())
+    }
+
+    @Test @MainActor
+    func periodicSplitPreservesRootFloatGroupingAcrossTexelBoundary()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 512, height: 512)
+        let geometry = try DocumentPaintGeometry(
+            documentPixelSize: size,
+            storagePixelSize: size,
+            radialLayout: nil
+        )
+        let fixture = try makeFixture(
+            device: device,
+            geometry: geometry,
+            byteBudgetTiles: 2
+        )
+        var pixels = Array(
+            repeating: SIMD4<Float16>(0, 0, 0, 1),
+            count: PaintTileDescriptor.side * PaintTileDescriptor.side
+        )
+        for y in 0..<PaintTileDescriptor.side {
+            for x in 0..<PaintTileDescriptor.side {
+                pixels[y * PaintTileDescriptor.side + x] = x < 192
+                    ? SIMD4(1, 0, 0, 1)
+                    : SIMD4(0, 1, 0, 1)
+            }
+        }
+        try seed(
+            fixture,
+            coordinate: PaintTileCoordinate(x: 0, y: 0),
+            pixels: pixels
+        )
+        let snapshot = try fixture.registry.captureStableCanonicalSnapshot(
+            layerID: fixture.layerID,
+            addressing: .periodic(period: size),
+            addressingRevision: 141
+        )
+        let fold = try #require(TilingStrategy(
+            configuration: .defaultConfiguration(
+                presetID: .grid,
+                canonicalRasterSize: size
+            ),
+            canonicalRasterSize: size
+        ).compiledSymmetry.domain.periodic?.displayFold)
+        let output = try region(-100_000, 0, -99_997, 1)
+        let transform = SparseTileOutputToSourceTransform(
+            sourceOffset: SIMD2(-160.457, 100),
+            sourceStep: SIMD2(0.3, 1)
+        )
+        // This is the concrete Float counterexample that used to move the
+        // middle pixel across the 192 texel boundary after child composition.
+        let rootOrigin = Float(output.minX) + transform.sourceOffset.x
+        let unsplitMiddle = rootOrigin + (Float(1) + 0.5) * 0.3
+        let oldChildOffset = transform.sourceOffset.x + 1 * (0.3 - 1)
+        let oldSplitMiddle = Float(output.minX + 1) + oldChildOffset
+            + 0.5 * 0.3
+        #expect(unsplitMiddle.bitPattern == Float(-100_160).bitPattern)
+        #expect(oldSplitMiddle.bitPattern
+            == Float(bitPattern: unsplitMiddle.bitPattern + 1).bitPattern)
+
+        let request = DocumentPaintStableSnapshotRenderRequest(
+            snapshot: snapshot,
+            outputRegion: output,
+            outputGeometryRevision: 19,
+            outputMapping: .periodic(SparseTilePeriodicOutputMapping(
+                fold: fold,
+                outputToWorldTransform: transform
+            ))
+        )
+        let library = try makeLibrary(device)
+        for backend: SparseTileSamplingBackendRequest in [
+            .forceFallback,
+            .forceTier2,
+        ] where backend != .forceTier2
+            || device.argumentBuffersSupport == .tier2
+        {
+            let whole = try await renderTightBytes(
+                request: request,
+                chunk: 8,
+                device: device,
+                library: library,
+                backendRequest: backend
+            )
+            let split = try await renderTightBytes(
+                request: request,
+                chunk: 1,
+                device: device,
+                library: library,
+                backendRequest: backend
+            )
+            #expect(split == whole)
+            #expect(whole.contains { $0 != 0 })
+        }
+        snapshot.close()
+        assertStoreDebtIsZero(fixture.registry.sharedTileStore.snapshot())
     }
 
     @Test @MainActor
@@ -2182,6 +2505,66 @@ struct DocumentPaintStableSnapshotRendererTests {
         let encoded = DocumentColorPipeline
             .exportEncodedPremultipliedBGRA8(linear)
         return [encoded.blue, encoded.green, encoded.red, encoded.alpha]
+    }
+
+    private func expectedPeriodicBytes(
+        output: SparseTileOutputRegion,
+        transform: SparseTileOutputToSourceTransform,
+        fold: CompiledPeriodicDisplayFold,
+        size: PixelSize,
+        colors: [PaintTileCoordinate: SIMD4<Float>]
+    ) throws -> Data {
+        var result = Data()
+        result.reserveCapacity(output.width * output.height * 4)
+        let origin = SIMD2(Float(output.minX), Float(output.minY))
+            + transform.sourceOffset
+        for y in output.minY..<output.maxY {
+            for x in output.minX..<output.maxX {
+                let local = SIMD2(
+                    Float(x - output.minX) + 0.5,
+                    Float(y - output.minY) + 0.5
+                )
+                let world = origin + local * transform.sourceStep
+                let canonical = fold.applying(to: WorldPoint(world))
+                let sample = SIMD2(canonical.x, canonical.y)
+                    - SIMD2<Float>(repeating: 0.5)
+                let lowerX = Int(floor(sample.x))
+                let lowerY = Int(floor(sample.y))
+                let fractionX = sample.x - floor(sample.x)
+                let fractionY = sample.y - floor(sample.y)
+                func value(_ x: Int, _ y: Int) -> SIMD4<Float> {
+                    let wrappedX = (x % size.width + size.width) % size.width
+                    let wrappedY = (y % size.height + size.height) % size.height
+                    let color = colors[PaintTileCoordinate(
+                        x: wrappedX / PaintTileDescriptor.side,
+                        y: wrappedY / PaintTileDescriptor.side
+                    )] ?? .zero
+                    return SIMD4(
+                        Float(Float16(color.x)), Float(Float16(color.y)),
+                        Float(Float16(color.z)), Float(Float16(color.w))
+                    )
+                }
+                let value00 = value(lowerX, lowerY)
+                let value10 = value(lowerX + 1, lowerY)
+                let value01 = value(lowerX, lowerY + 1)
+                let value11 = value(lowerX + 1, lowerY + 1)
+                let top = value00 + (value10 - value00) * fractionX
+                let bottom = value01 + (value11 - value01) * fractionX
+                let linearValue = top + (bottom - top) * fractionY
+                guard let linear = LinearPremultipliedColor(
+                    red: linearValue.x,
+                    green: linearValue.y,
+                    blue: linearValue.z,
+                    alpha: linearValue.w
+                ) else { throw DocumentPaintStableSnapshotRendererError.invalidRequest }
+                let encoded = DocumentColorPipeline
+                    .exportEncodedPremultipliedBGRA8(linear)
+                result.append(contentsOf: [
+                    encoded.blue, encoded.green, encoded.red, encoded.alpha,
+                ])
+            }
+        }
+        return result
     }
 
     private func expectedRadialBytes(

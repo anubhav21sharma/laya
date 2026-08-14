@@ -3104,19 +3104,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         pixelSize: PixelSize,
         transparentBackground: Bool = false
     ) async throws -> FlattenedSceneExport {
-        let mapping: SparseTileSamplingOutputMapping
-        if tilingStrategy.compiledSymmetry.domain.finite?.radial.layout != nil {
-            mapping = try .finiteRadial(strategy: tilingStrategy)
-        } else {
-            let inverseZoom = 1 / viewport.zoom
-            mapping = .affine(SparseTileOutputToSourceTransform(
-                sourceOffset: viewport.worldCenter.simd - SIMD2(
-                    Float(pixelSize.width) * 0.5 * inverseZoom,
-                    Float(pixelSize.height) * 0.5 * inverseZoom
-                ),
-                sourceStep: SIMD2(repeating: inverseZoom)
-            ))
-        }
+        let mapping = try CanvasDisplayOutputMapping.make(
+            viewport: viewport,
+            strategy: tilingStrategy,
+            outputPixelSize: pixelSize
+        )
         let request = try DocumentPaintStableFlattenedOutputRequest(
             pixelSize: pixelSize,
             outputMapping: mapping,

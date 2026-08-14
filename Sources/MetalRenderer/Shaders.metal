@@ -1238,15 +1238,14 @@ static float4 patternSparseFallbackNeighbor(
     );
 }
 
-static float4 patternSparseSamplingTier2ValueAtPoint(
-    float2 point,
+static float4 patternSparseSamplingTier2ValueAtSamplePosition(
+    float2 samplePosition,
     constant PatternCompositeUniforms& material,
     constant PatternSparseSamplingUniforms& sparse,
     constant PatternSparsePageTableDescriptor* descriptors,
     constant PatternSparseTilePageEntry* entries,
     constant PatternSparseTextureArguments& arguments
 ) {
-    const float2 samplePosition = point - 0.5;
     const int2 lower = int2(floor(samplePosition));
     const float2 fraction = fract(samplePosition);
     return patternSparseBilinear(
@@ -1269,8 +1268,21 @@ static float4 patternSparseSamplingTier2ValueAtPoint(
     );
 }
 
-static float4 patternSparseSamplingFallbackValueAtPoint(
+static float4 patternSparseSamplingTier2ValueAtPoint(
     float2 point,
+    constant PatternCompositeUniforms& material,
+    constant PatternSparseSamplingUniforms& sparse,
+    constant PatternSparsePageTableDescriptor* descriptors,
+    constant PatternSparseTilePageEntry* entries,
+    constant PatternSparseTextureArguments& arguments
+) {
+    return patternSparseSamplingTier2ValueAtSamplePosition(
+        point - 0.5, material, sparse, descriptors, entries, arguments
+    );
+}
+
+static float4 patternSparseSamplingFallbackValueAtSamplePosition(
+    float2 samplePosition,
     constant PatternCompositeUniforms& material,
     constant PatternSparseSamplingUniforms& sparse,
     constant PatternSparsePageTableDescriptor* descriptors,
@@ -1278,7 +1290,6 @@ static float4 patternSparseSamplingFallbackValueAtPoint(
     constant int* remap,
     array<texture2d<float>, 16> textures
 ) {
-    const float2 samplePosition = point - 0.5;
     const int2 lower = int2(floor(samplePosition));
     const float2 fraction = fract(samplePosition);
     return patternSparseBilinear(
@@ -1298,6 +1309,20 @@ static float4 patternSparseSamplingFallbackValueAtPoint(
             descriptors, entries, remap, textures
         ),
         fraction
+    );
+}
+
+static float4 patternSparseSamplingFallbackValueAtPoint(
+    float2 point,
+    constant PatternCompositeUniforms& material,
+    constant PatternSparseSamplingUniforms& sparse,
+    constant PatternSparsePageTableDescriptor* descriptors,
+    constant PatternSparseTilePageEntry* entries,
+    constant int* remap,
+    array<texture2d<float>, 16> textures
+) {
+    return patternSparseSamplingFallbackValueAtSamplePosition(
+        point - 0.5, material, sparse, descriptors, entries, remap, textures
     );
 }
 
@@ -1331,6 +1356,177 @@ static float4 patternSparseSamplingFallbackValue(
         point, material, sparse, descriptors, entries, remap, textures
     );
 }
+
+// The CPU reachability authority enumerates the explicitly written IEEE Float
+// expressions below. Prevent cross-statement contraction/reassociation from
+// inventing an unbounded fold-to-bilinear address outside that finite set.
+#pragma clang fp reassociate(off)
+#pragma clang fp contract(off)
+static int patternPeriodicFoldCellIndex(
+    float coordinate,
+    float extent,
+    float phase
+) {
+    int result = int(floor(metal::precise::divide(
+        coordinate - phase, extent
+    )));
+    const float origin = float(result) * extent + phase;
+    const float boundary = origin + extent;
+    if (coordinate < origin) {
+        result -= 1;
+    } else if (coordinate >= boundary) {
+        result += 1;
+    }
+    return result;
+}
+
+static float patternPeriodicFoldPositiveModulo(float value, float extent) {
+    const float normalized = abs(value) < FLT_MIN ? 0.0 : value;
+    const float remainder = metal::precise::fmod(normalized, extent);
+    if (remainder == 0.0 || abs(remainder) < FLT_MIN) {
+        return 0.0;
+    }
+    if (remainder < 0.0) {
+        return min(remainder + extent, nextafter(extent, 0.0));
+    }
+    return remainder;
+}
+
+static float patternPeriodicPhaseOffset(
+    int index,
+    constant PatternPeriodicDisplayFoldUniforms& fold
+) {
+    if (fold.phaseCount == 0) {
+        return 0.0;
+    }
+    const int count = int(fold.phaseCount);
+    const int remainder = index % count;
+    const uint slot = uint(remainder >= 0 ? remainder : remainder + count);
+    const float fraction = fold.phaseFractions[slot];
+    const float extent = fold.phaseOffsetAxis == 0
+        ? fold.repeatSize.x : fold.repeatSize.y;
+    return fraction * extent;
+}
+
+static float2 patternPeriodicDisplayFold(
+    float2 world,
+    constant PatternPeriodicDisplayFoldUniforms& fold
+) {
+    if (fold.foldMode == 1) {
+        const float2 lattice = fold.worldToLatticeXAxis * world.x
+            + fold.worldToLatticeYAxis * world.y
+            + fold.worldToLatticeTranslation;
+        return float2(
+            patternPeriodicFoldPositiveModulo(lattice.x, 1.0)
+                * fold.canonicalSize.x,
+            patternPeriodicFoldPositiveModulo(lattice.y, 1.0)
+                * fold.canonicalSize.y
+        );
+    }
+
+    int column;
+    int row;
+    float2 phasedWorld = world;
+    if (fold.phaseCount == 0) {
+        column = patternPeriodicFoldCellIndex(
+            world.x, fold.repeatSize.x, 0.0
+        );
+        row = patternPeriodicFoldCellIndex(
+            world.y, fold.repeatSize.y, 0.0
+        );
+    } else if (fold.phaseIndexAxis == 0) {
+        column = patternPeriodicFoldCellIndex(
+            world.x, fold.repeatSize.x, 0.0
+        );
+        const float offset = patternPeriodicPhaseOffset(column, fold);
+        row = patternPeriodicFoldCellIndex(
+            world.y, fold.repeatSize.y, offset
+        );
+        if (fold.phaseOffsetAxis == 0) {
+            phasedWorld.x -= offset;
+        } else {
+            phasedWorld.y -= offset;
+        }
+    } else {
+        row = patternPeriodicFoldCellIndex(
+            world.y, fold.repeatSize.y, 0.0
+        );
+        const float offset = patternPeriodicPhaseOffset(row, fold);
+        column = patternPeriodicFoldCellIndex(
+            world.x, fold.repeatSize.x, offset
+        );
+        if (fold.phaseOffsetAxis == 0) {
+            phasedWorld.x -= offset;
+        } else {
+            phasedWorld.y -= offset;
+        }
+    }
+
+    const float scaledX = patternPeriodicFoldPositiveModulo(
+        phasedWorld.x, fold.repeatSize.x
+    ) * fold.canonicalSize.x;
+    const float scaledY = patternPeriodicFoldPositiveModulo(
+        phasedWorld.y, fold.repeatSize.y
+    ) * fold.canonicalSize.y;
+    float2 local = float2(
+        metal::precise::divide(scaledX, fold.repeatSize.x),
+        metal::precise::divide(scaledY, fold.repeatSize.y)
+    );
+    if ((fold.reflectionFlags & 1u) != 0u && (column % 2) != 0) {
+        local.x = patternPeriodicFoldPositiveModulo(
+            fold.canonicalSize.x - local.x,
+            fold.canonicalSize.x
+        );
+    }
+    if ((fold.reflectionFlags & 2u) != 0u && (row % 2) != 0) {
+        local.y = patternPeriodicFoldPositiveModulo(
+            fold.canonicalSize.y - local.y,
+            fold.canonicalSize.y
+        );
+    }
+    return local;
+}
+
+static float4 patternSparsePeriodicSamplingTier2Value(
+    PatternFullscreenOut input,
+    constant PatternPeriodicDisplayFoldUniforms& fold,
+    constant PatternCompositeUniforms& material,
+    constant PatternSparseSamplingUniforms& sparse,
+    constant PatternSparsePageTableDescriptor* descriptors,
+    constant PatternSparseTilePageEntry* entries,
+    constant PatternSparseTextureArguments& arguments
+) {
+    const float2 rootPixel = input.screenPixel + float2(sparse.reserved);
+    const float2 world = sparse.sourceOrigin + rootPixel * sparse.sourceStep;
+    const float2 samplePosition = patternPeriodicDisplayFold(world, fold)
+        - 0.5;
+    return patternSparseSamplingTier2ValueAtSamplePosition(
+        samplePosition,
+        material, sparse, descriptors, entries, arguments
+    );
+}
+
+static float4 patternSparsePeriodicSamplingFallbackValue(
+    PatternFullscreenOut input,
+    constant PatternPeriodicDisplayFoldUniforms& fold,
+    constant PatternCompositeUniforms& material,
+    constant PatternSparseSamplingUniforms& sparse,
+    constant PatternSparsePageTableDescriptor* descriptors,
+    constant PatternSparseTilePageEntry* entries,
+    constant int* remap,
+    array<texture2d<float>, 16> textures
+) {
+    const float2 rootPixel = input.screenPixel + float2(sparse.reserved);
+    const float2 world = sparse.sourceOrigin + rootPixel * sparse.sourceStep;
+    const float2 samplePosition = patternPeriodicDisplayFold(world, fold)
+        - 0.5;
+    return patternSparseSamplingFallbackValueAtSamplePosition(
+        samplePosition,
+        material, sparse, descriptors, entries, remap, textures
+    );
+}
+#pragma clang fp contract(on)
+#pragma clang fp reassociate(on)
 
 static PatternRadialMapping patternSparseRadialMapping(
     PatternFullscreenOut input,
@@ -1520,6 +1716,47 @@ fragment float4 patternSparseSamplingFallbackFragment(
     );
 }
 
+fragment float4 patternSparsePeriodicSamplingTier2Fragment(
+    PatternFullscreenOut input [[stage_in]],
+    constant PatternPeriodicDisplayFoldUniforms& fold
+        [[buffer(PatternBufferIndexPeriodicDisplayFold)]],
+    constant PatternCompositeUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
+    constant PatternSparseSamplingUniforms& sparse
+        [[buffer(PatternBufferIndexSparseSamplingUniforms)]],
+    constant PatternSparsePageTableDescriptor* descriptors
+        [[buffer(PatternBufferIndexSparsePageTableDescriptors)]],
+    constant PatternSparseTilePageEntry* entries
+        [[buffer(PatternBufferIndexSparsePageEntries)]],
+    constant PatternSparseTextureArguments& arguments
+        [[buffer(PatternBufferIndexSparseTextureArguments)]]
+) {
+    return patternSparsePeriodicSamplingTier2Value(
+        input, fold, material, sparse, descriptors, entries, arguments
+    );
+}
+
+fragment float4 patternSparsePeriodicSamplingFallbackFragment(
+    PatternFullscreenOut input [[stage_in]],
+    constant PatternPeriodicDisplayFoldUniforms& fold
+        [[buffer(PatternBufferIndexPeriodicDisplayFold)]],
+    constant PatternCompositeUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
+    constant PatternSparseSamplingUniforms& sparse
+        [[buffer(PatternBufferIndexSparseSamplingUniforms)]],
+    constant PatternSparsePageTableDescriptor* descriptors
+        [[buffer(PatternBufferIndexSparsePageTableDescriptors)]],
+    constant PatternSparseTilePageEntry* entries
+        [[buffer(PatternBufferIndexSparsePageEntries)]],
+    constant int* remap [[buffer(PatternBufferIndexSparseBindingRemap)]],
+    array<texture2d<float>, 16> textures
+        [[texture(PatternTextureIndexSparseFallbackBase)]]
+) {
+    return patternSparsePeriodicSamplingFallbackValue(
+        input, fold, material, sparse, descriptors, entries, remap, textures
+    );
+}
+
 static float4 patternSparseInterchangeOutput(float4 linearPremultiplied) {
     const float4 encodedStraight =
         patternLinearPremultipliedToEncodedSRGB(linearPremultiplied);
@@ -1564,6 +1801,52 @@ fragment float4 patternSparseSamplingInterchangeFallbackFragment(
     return patternSparseInterchangeOutput(patternSparseSamplingFallbackValue(
         input, material, sparse, descriptors, entries, remap, textures
     ));
+}
+
+fragment float4 patternSparsePeriodicSamplingInterchangeTier2Fragment(
+    PatternFullscreenOut input [[stage_in]],
+    constant PatternPeriodicDisplayFoldUniforms& fold
+        [[buffer(PatternBufferIndexPeriodicDisplayFold)]],
+    constant PatternCompositeUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
+    constant PatternSparseSamplingUniforms& sparse
+        [[buffer(PatternBufferIndexSparseSamplingUniforms)]],
+    constant PatternSparsePageTableDescriptor* descriptors
+        [[buffer(PatternBufferIndexSparsePageTableDescriptors)]],
+    constant PatternSparseTilePageEntry* entries
+        [[buffer(PatternBufferIndexSparsePageEntries)]],
+    constant PatternSparseTextureArguments& arguments
+        [[buffer(PatternBufferIndexSparseTextureArguments)]]
+) {
+    return patternSparseInterchangeOutput(
+        patternSparsePeriodicSamplingTier2Value(
+            input, fold, material, sparse, descriptors, entries, arguments
+        )
+    );
+}
+
+fragment float4 patternSparsePeriodicSamplingInterchangeFallbackFragment(
+    PatternFullscreenOut input [[stage_in]],
+    constant PatternPeriodicDisplayFoldUniforms& fold
+        [[buffer(PatternBufferIndexPeriodicDisplayFold)]],
+    constant PatternCompositeUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
+    constant PatternSparseSamplingUniforms& sparse
+        [[buffer(PatternBufferIndexSparseSamplingUniforms)]],
+    constant PatternSparsePageTableDescriptor* descriptors
+        [[buffer(PatternBufferIndexSparsePageTableDescriptors)]],
+    constant PatternSparseTilePageEntry* entries
+        [[buffer(PatternBufferIndexSparsePageEntries)]],
+    constant int* remap [[buffer(PatternBufferIndexSparseBindingRemap)]],
+    array<texture2d<float>, 16> textures
+        [[texture(PatternTextureIndexSparseFallbackBase)]]
+) {
+    return patternSparseInterchangeOutput(
+        patternSparsePeriodicSamplingFallbackValue(
+            input, fold, material, sparse, descriptors, entries,
+            remap, textures
+        )
+    );
 }
 
 fragment float4 patternSparseRadialSamplingWorkingTier2Fragment(

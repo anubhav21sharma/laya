@@ -234,6 +234,73 @@ enum DocumentPaintStableSnapshotChunkPlanner {
                 full: full,
                 child: child
             ))
+        case let .periodic(mapping):
+            // Retain the root transform itself. Only the recovered root pixel
+            // and cumulative relative offset participate in the periodic ABI;
+            // an absolute child coordinate beyond Float's consecutive-integer
+            // range is valid when that pair remains exact.
+            guard child.minX >= full.minX,
+                  child.minY >= full.minY,
+                  child.maxX <= full.maxX,
+                  child.maxY <= full.maxY
+            else {
+                throw DocumentPaintStableSnapshotRendererError
+                    .childOutsideFullRegion
+            }
+            let transform = mapping.outputToWorldTransform
+            guard transform.sourceOffset.x.isFinite,
+                  transform.sourceOffset.y.isFinite,
+                  transform.sourceStep.x.isFinite,
+                  transform.sourceStep.y.isFinite,
+                  mapping.screenPixelOffset.x >= 0,
+                  mapping.screenPixelOffset.y >= 0,
+                  mapping.screenPixelOffset.x <= Int(UInt32.max),
+                  mapping.screenPixelOffset.y <= Int(UInt32.max),
+                  Int(exactly: Float(mapping.screenPixelOffset.x))
+                    == mapping.screenPixelOffset.x,
+                  Int(exactly: Float(mapping.screenPixelOffset.y))
+                    == mapping.screenPixelOffset.y
+            else {
+                throw DocumentPaintStableSnapshotRendererError
+                    .inexactFloatCoordinate
+            }
+            let rootX = try checkedSubtract(
+                full.minX, mapping.screenPixelOffset.x
+            )
+            let rootY = try checkedSubtract(
+                full.minY, mapping.screenPixelOffset.y
+            )
+            let floatRoot = SIMD2(Float(rootX), Float(rootY))
+            let sourceOrigin = floatRoot + transform.sourceOffset
+            guard floatRoot.x.isFinite, floatRoot.y.isFinite,
+                  Int(exactly: floatRoot.x) == rootX,
+                  Int(exactly: floatRoot.y) == rootY,
+                  sourceOrigin.x.isFinite, sourceOrigin.y.isFinite
+            else {
+                throw DocumentPaintStableSnapshotRendererError
+                    .inexactFloatCoordinate
+            }
+            let deltaX = try checkedSubtract(child.minX, full.minX)
+            let deltaY = try checkedSubtract(child.minY, full.minY)
+            let (offsetX, overflowX) = mapping.screenPixelOffset.x
+                .addingReportingOverflow(deltaX)
+            let (offsetY, overflowY) = mapping.screenPixelOffset.y
+                .addingReportingOverflow(deltaY)
+            guard offsetX >= 0, offsetY >= 0,
+                  !overflowX, !overflowY,
+                  offsetX <= Int(UInt32.max),
+                  offsetY <= Int(UInt32.max),
+                  Int(exactly: Float(offsetX)) == offsetX,
+                  Int(exactly: Float(offsetY)) == offsetY
+            else {
+                throw DocumentPaintStableSnapshotRendererError
+                    .inexactFloatCoordinate
+            }
+            return .periodic(SparseTilePeriodicOutputMapping(
+                fold: mapping.fold,
+                outputToWorldTransform: mapping.outputToWorldTransform,
+                screenPixelOffset: SIMD2(offsetX, offsetY)
+            ))
         case let .finiteRadial(mapping):
             guard child.minX >= full.minX,
                   child.minY >= full.minY,
@@ -345,7 +412,7 @@ struct DocumentPaintStableSnapshotRenderRequest: @unchecked Sendable {
     let outputMapping: SparseTileSamplingOutputMapping
 
     var outputToSourceTransform: SparseTileOutputToSourceTransform {
-        outputMapping.affineTransform ?? .identity
+        outputMapping.outputToWorldTransform
     }
 
     init(
@@ -614,6 +681,7 @@ actor DocumentPaintStableSnapshotRenderer {
         ] = [:]
         for kind in [
             SparseTileSamplingOutputMappingKind.affine,
+            .periodic,
             .finiteRadial,
         ] {
             result[kind] = try SparseTileSamplingPipeline.prepare(
@@ -874,6 +942,17 @@ actor DocumentPaintStableSnapshotRenderer {
             else {
                 throw DocumentPaintStableSnapshotRendererError.invalidRequest
             }
+        case let .periodic(mapping):
+            guard case let .periodic(period) = request.snapshot.addressing,
+                  request.snapshot.geometry.radialLayout == nil,
+                  request.snapshot.geometry.storagePixelSize == period
+            else {
+                throw SparseTileSamplingPlanError.inconsistentAddressing
+            }
+            try SparseTilePeriodicOutputMappingValidator.validate(
+                mapping,
+                addressing: request.snapshot.addressing
+            )
         case let .finiteRadial(mapping):
             guard case let .radial(layout) = request.snapshot.addressing,
                   layout == mapping.layout,

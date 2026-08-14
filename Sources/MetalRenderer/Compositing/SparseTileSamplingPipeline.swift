@@ -3,6 +3,44 @@ import Foundation
 import Metal
 import PatternEngine
 
+extension PatternPeriodicDisplayFoldUniforms {
+    init(validating fold: CompiledPeriodicDisplayFold) throws {
+        let fractions = fold.phase?.fractions ?? []
+        guard fractions.count <= 2 else {
+            throw SparseTileSamplingPlanError.inconsistentAddressing
+        }
+        self.init()
+        canonicalSize = SIMD2(
+            fold.canonicalSize.width,
+            fold.canonicalSize.height
+        )
+        repeatSize = SIMD2(fold.repeatSize.width, fold.repeatSize.height)
+        worldToLatticeXAxis = fold.worldToLattice.xAxis
+        worldToLatticeYAxis = fold.worldToLattice.yAxis
+        worldToLatticeTranslation = fold.worldToLattice.translation
+        phaseFractions = SIMD2(
+            fractions.first ?? 0,
+            fractions.count > 1 ? fractions[1] : 0
+        )
+        foldMode = fold.coordinateSpace.rawValue
+        symmetryFamily = fold.family.rawValue
+        phaseCount = UInt32(fractions.count)
+        phaseIndexAxis = fold.phase.map { periodicAxisWire($0.indexAxis) } ?? 0
+        phaseOffsetAxis = fold.phase.map { periodicAxisWire($0.offsetAxis) } ?? 0
+        reflectionFlags = UInt32(
+            fold.alternatingReflections.rawValue
+        )
+        reserved = SIMD2(0, 0)
+    }
+}
+
+private func periodicAxisWire(_ axis: SymmetryAxis) -> UInt32 {
+    switch axis {
+    case .x: 0
+    case .y: 1
+    }
+}
+
 enum SparseTileSamplingBackendRequest: Equatable, Sendable {
     case automatic
     case forceTier2
@@ -269,6 +307,20 @@ enum SparseTileSamplingPipeline {
         ):
             "patternSparseRadialSamplingInterchangeFallbackFragment"
         case (
+            .periodic, .interchangeEncodedPremultiplied,
+            .tier2ArgumentBuffer
+        ):
+            "patternSparsePeriodicSamplingInterchangeTier2Fragment"
+        case (
+            .periodic, .interchangeEncodedPremultiplied,
+            .directFallback
+        ):
+            "patternSparsePeriodicSamplingInterchangeFallbackFragment"
+        case (.periodic, _, .tier2ArgumentBuffer):
+            "patternSparsePeriodicSamplingTier2Fragment"
+        case (.periodic, _, .directFallback):
+            "patternSparsePeriodicSamplingFallbackFragment"
+        case (
             .affine, .interchangeEncodedPremultiplied,
             .tier2ArgumentBuffer
         ):
@@ -425,6 +477,7 @@ private final class SparseTileSamplingUploadLease: @unchecked Sendable {
     let uniformsOffset: Int
     let gridFrameOffset: Int
     let radialFrameOffset: Int
+    let periodicFoldOffset: Int
     let materialOffset: Int
     private let ring: SparseTileSamplingUploadRing
     private let slot: Int
@@ -437,6 +490,7 @@ private final class SparseTileSamplingUploadLease: @unchecked Sendable {
         uniformsOffset: Int,
         gridFrameOffset: Int,
         radialFrameOffset: Int,
+        periodicFoldOffset: Int,
         materialOffset: Int,
         ring: SparseTileSamplingUploadRing,
         slot: Int,
@@ -446,6 +500,7 @@ private final class SparseTileSamplingUploadLease: @unchecked Sendable {
         self.uniformsOffset = uniformsOffset
         self.gridFrameOffset = gridFrameOffset
         self.radialFrameOffset = radialFrameOffset
+        self.periodicFoldOffset = periodicFoldOffset
         self.materialOffset = materialOffset
         self.ring = ring
         self.slot = slot
@@ -471,6 +526,7 @@ private final class SparseTileSamplingUploadRing: @unchecked Sendable {
     private static let gridFrameOffsetInSlot = 64
     private static let radialFrameOffsetInSlot = 160
     private static let materialOffsetInSlot = 256
+    private static let periodicFoldOffsetInSlot = 320
 
     private let buffer: any MTLBuffer
     private let lock = NSLock()
@@ -511,7 +567,8 @@ private final class SparseTileSamplingUploadRing: @unchecked Sendable {
         radialFrames: (
             grid: PatternGridFrameUniforms,
             radial: PatternRadialFrameUniforms
-        )? = nil
+        )? = nil,
+        periodicFold: PatternPeriodicDisplayFoldUniforms? = nil
     ) throws -> SparseTileSamplingUploadLease {
         lock.lock()
         guard let slot = active.firstIndex(of: false) else {
@@ -544,6 +601,13 @@ private final class SparseTileSamplingUploadRing: @unchecked Sendable {
             ).assumingMemoryBound(to: PatternRadialFrameUniforms.self)
                 .pointee = radialFrames.radial
         }
+        if let periodicFold {
+            buffer.contents().advanced(
+                by: base + Self.periodicFoldOffsetInSlot
+            ).assumingMemoryBound(
+                to: PatternPeriodicDisplayFoldUniforms.self
+            ).pointee = periodicFold
+        }
         buffer.contents().advanced(by: base + Self.materialOffsetInSlot)
             .assumingMemoryBound(to: PatternCompositeUniforms.self)
             .pointee = material
@@ -553,6 +617,7 @@ private final class SparseTileSamplingUploadRing: @unchecked Sendable {
             uniformsOffset: base,
             gridFrameOffset: base + Self.gridFrameOffsetInSlot,
             radialFrameOffset: base + Self.radialFrameOffsetInSlot,
+            periodicFoldOffset: base + Self.periodicFoldOffsetInSlot,
             materialOffset: base + Self.materialOffsetInSlot,
             ring: self,
             slot: slot,
@@ -1280,11 +1345,23 @@ actor SparseTileSamplingGPUPlanCache {
         let geometry = try SparseTileSamplingGeometry.validateBatches(
             content.batches
         )
-        try validateShaderIntegerRange(
-            origin: content.shaderSourceOrigin,
-            step: content.outputToSourceTransform.sourceStep,
-            outputSize: geometry.size
-        )
+        // Periodic shaders fold the precise world coordinate into the bounded
+        // canonical period before converting bilinear neighbors to `int`.
+        // Raw repeated-world endpoints may legitimately exceed Int32; the
+        // shared periodic reachability validator proves the actual folded
+        // addresses instead. Affine/radial shaders still convert the raw
+        // sample position and retain the legacy range proof.
+        if case .periodic = content.outputMapping {
+            // Validated by the shared periodic selection/build authority.
+        } else {
+            try validateShaderIntegerRange(
+                origin: content.shaderSourceOrigin,
+                step: content.outputToSourceTransform.sourceStep,
+                outputSize: geometry.size,
+                screenPixelOffset:
+                    content.outputMapping.periodicScreenPixelOffset
+            )
+        }
         var preflightEntryCount = 0
         for (descriptorIndex, table) in content.pageTables.enumerated() {
             var tableEntryCount = 0
@@ -1881,7 +1958,7 @@ struct SparseTileSamplingEncodeParameters: Equatable, Sendable {
     let showCanvasBoundary: Bool
 
     var outputToSourceTransform: SparseTileOutputToSourceTransform {
-        outputMapping.affineTransform ?? .identity
+        outputMapping.outputToWorldTransform
     }
 
     init(
@@ -2135,6 +2212,13 @@ final class SparseTileSamplingPreparedSubmission: @unchecked Sendable {
                 upload.buffer,
                 offset: upload.radialFrameOffset,
                 index: Int(PatternBufferIndexRadialFrameUniforms)
+            )
+        }
+        if content.outputMapping.kind == .periodic {
+            renderEncoder.setFragmentBuffer(
+                upload.buffer,
+                offset: upload.periodicFoldOffset,
+                index: Int(PatternBufferIndexPeriodicDisplayFold)
             )
         }
         renderEncoder.setFragmentBuffer(
@@ -2420,7 +2504,16 @@ enum SparseTileSamplingEncoder {
         uniforms.period = addressing.period
         uniforms.compositeMode = parameters.compositeMode
         uniforms.liveVisible = parameters.liveVisible ? 1 : 0
-        uniforms.reserved = SIMD2(0, 0)
+        let screenPixelOffset = content.outputMapping
+            .periodicScreenPixelOffset
+        guard let offsetX = UInt32(exactly: screenPixelOffset.x),
+              let offsetY = UInt32(exactly: screenPixelOffset.y),
+              Int(exactly: Float(screenPixelOffset.x))
+                == screenPixelOffset.x,
+              Int(exactly: Float(screenPixelOffset.y))
+                == screenPixelOffset.y
+        else { throw SparseTileSamplingPipelineError.byteOverflow }
+        uniforms.reserved = SIMD2(offsetX, offsetY)
         var material = PatternCompositeUniforms()
         material.parameters = SIMD4(
             parameters.strokeOpacity,
@@ -2445,6 +2538,8 @@ enum SparseTileSamplingEncoder {
         switch content.outputMapping {
         case .affine:
             radialFrames = nil
+        case .periodic:
+            radialFrames = nil
         case let .finiteRadial(mapping):
             radialFrames = try SparseTileSamplingRadialFrames.make(
                 mapping: mapping,
@@ -2453,10 +2548,20 @@ enum SparseTileSamplingEncoder {
                 parameters: parameters
             )
         }
+        let periodicFold: PatternPeriodicDisplayFoldUniforms?
+        switch content.outputMapping {
+        case .affine, .finiteRadial:
+            periodicFold = nil
+        case let .periodic(mapping):
+            periodicFold = try PatternPeriodicDisplayFoldUniforms(
+                validating: mapping.fold
+            )
+        }
         let upload = try content.uploadRing.acquire(
             uniforms: uniforms,
             material: material,
-            radialFrames: radialFrames
+            radialFrames: radialFrames,
+            periodicFold: periodicFold
         )
         let prepared = SparseTileSamplingPreparedSubmission(
             plan: plan,
@@ -2573,15 +2678,26 @@ enum SparseTileSamplingGeometry {
 private func validateShaderIntegerRange(
     origin: SIMD2<Float>,
     step: SIMD2<Float>,
-    outputSize: SIMD2<Int>
+    outputSize: SIMD2<Int>,
+    screenPixelOffset: SIMD2<Int>
 ) throws {
     guard outputSize.x > 0, outputSize.y > 0 else {
         throw SparseTileSamplingPipelineError.incompleteHalo
     }
-    func validateAxis(origin: Float, step: Float, count: Int) throws {
-        let first = Double(origin) + 0.5 * Double(step) - 0.5
+    func validateAxis(
+        origin: Float,
+        step: Float,
+        count: Int,
+        screenPixelOffset: Int
+    ) throws {
+        guard screenPixelOffset >= 0,
+              screenPixelOffset <= Int(UInt32.max),
+              Int(exactly: Float(screenPixelOffset)) == screenPixelOffset
+        else { throw SparseTileSamplingPipelineError.byteOverflow }
+        let offset = Double(screenPixelOffset)
+        let first = Double(origin) + (offset + 0.5) * Double(step) - 0.5
         let last = Double(origin)
-            + (Double(count) - 0.5) * Double(step) - 0.5
+            + (offset + Double(count) - 0.5) * Double(step) - 0.5
         guard first.isFinite, last.isFinite else {
             throw SparseTileSamplingPipelineError.byteOverflow
         }
@@ -2591,8 +2707,18 @@ private func validateShaderIntegerRange(
               upperNeighbor <= Double(Int32.max)
         else { throw SparseTileSamplingPipelineError.byteOverflow }
     }
-    try validateAxis(origin: origin.x, step: step.x, count: outputSize.x)
-    try validateAxis(origin: origin.y, step: step.y, count: outputSize.y)
+    try validateAxis(
+        origin: origin.x,
+        step: step.x,
+        count: outputSize.x,
+        screenPixelOffset: screenPixelOffset.x
+    )
+    try validateAxis(
+        origin: origin.y,
+        step: step.y,
+        count: outputSize.y,
+        screenPixelOffset: screenPixelOffset.y
+    )
 }
 
 private func rootTextureIdentity(
